@@ -1742,6 +1742,14 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/schedules/{id}/run",
         methods: &["POST"],
     },
+    RouteEntry {
+        path: "/api/schedules/shell",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/schedules/{id}/output",
+        methods: &["GET"],
+    },
     // AMUX-5237: named clearance signals.
     RouteEntry {
         path: "/api/signals",
@@ -1871,6 +1879,47 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
     RouteEntry {
         path: "/api/metrics/host/history",
         methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/metrics/host/pressure",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/metrics/telemetry",
+        methods: &["GET"],
+    },
+    // Agent trace archive (370787b2), pinned launchers and the credential vault.
+    RouteEntry {
+        path: "/api/traces",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/traces/file",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/pinned",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/pinned/{id}",
+        methods: &["PATCH", "DELETE"],
+    },
+    RouteEntry {
+        path: "/api/pinned/{id}/launch",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/vault",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/vault/{id}",
+        methods: &["PATCH", "DELETE"],
+    },
+    RouteEntry {
+        path: "/api/vault/{id}/fill",
+        methods: &["POST"],
     },
     RouteEntry {
         path: "/api/metrics/fleet",
