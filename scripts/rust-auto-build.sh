@@ -33,7 +33,7 @@ LOCK="${AMUX_RS_BUILD_LOCK:-$HOME/.amux/rust-build.lock}"
 # it — the lock would leak on every run and the second invocation would be
 # blocked forever. Everything that needs unwinding goes here.
 cleanup() {
-  if [ -n "${WORK:-}" ]; then
+  if [ -n "${WORK:-}" ] && [ -z "${WORK_STABLE:-}" ]; then
     git -C "$REPO" worktree remove --force "$WORK" 2>/dev/null || true
     rm -rf "$WORK"
   fi
@@ -530,10 +530,36 @@ fi
 
   # Build from a clean, committed snapshot: a worktree of HEAD, so nobody's
   # uncommitted edits (or a mid-edit broken tree) can poison the deploy.
-  WORK=$(mktemp -d /tmp/amux-rs-build.XXXXXX)
-  git -C "$REPO" worktree add --detach "$WORK" "$(git -C "$REPO" rev-parse HEAD)" >/dev/null
-  # Shared target dir: incremental rebuilds (~15s) instead of cold ones
-  # (~3min) — the worktree isolates SOURCE, the cache is content-keyed.
+  #
+  # ONE STABLE BUILD DIRECTORY, reset to the commit each time (2026-09-27).
+  # This used to be a fresh `mktemp -d` worktree per build, and the comment
+  # here claimed the shared target dir made that incremental. It did not:
+  # cargo keys workspace crates by their source PATH, so a new directory
+  # recompiled amux-server from scratch every deploy (5m45s to 9m40s
+  # measured). A stable directory, hard-reset and cleaned to the committed
+  # snapshot, keeps the same isolation from anyone's uncommitted edits and
+  # lets the `deploy` profile rebuild only what changed (14s to 63s).
+  # Falls back to a throwaway worktree if the stable one cannot be prepared.
+  BUILD_SHA="$(git -C "$REPO" rev-parse HEAD)"
+  STABLE="${AMUX_DEPLOY_SRC:-$HOME/.amux/deploy-build-src}"
+  if [ -d "$STABLE" ] && git -C "$STABLE" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      && git -C "$STABLE" reset -q --hard && git -C "$STABLE" clean -qfdx \
+      && git -C "$STABLE" checkout -q --detach "$BUILD_SHA"; then
+    WORK="$STABLE"; WORK_STABLE=1
+  else
+    rm -rf "${STABLE:?}"; git -C "$REPO" worktree prune 2>/dev/null || true
+    if git -C "$REPO" worktree add --detach "$STABLE" "$BUILD_SHA" >/dev/null 2>&1; then
+      WORK="$STABLE"; WORK_STABLE=1
+    else
+      echo "== stable build dir $STABLE unavailable; building in a throwaway worktree (cold, slow)"
+      WORK=$(mktemp -d /tmp/amux-rs-build.XXXXXX)
+      git -C "$REPO" worktree add --detach "$WORK" "$BUILD_SHA" >/dev/null
+    fi
+  fi
+  [ "$(git -C "$WORK" rev-parse HEAD)" = "$BUILD_SHA" ] || { echo "== build dir is not at $BUILD_SHA; refusing"; exit 1; }
+  # The deploy profile's output. The remote-build path produces a release
+  # binary at the release path, so it sets BUILT_BIN to that below.
+  BUILT_BIN="$HOME/.amux/rust-build-target/deploy/amux-server"
   # CAPTURE THE WHOLE BUILD, THEN DECIDE WHAT TO KEEP (AMUX-2927).
   #
   # This was `cargo build ... 2>&1 | tail -3`, and on a FAILURE cargo's last
@@ -568,6 +594,7 @@ fi
     if "$REPO/scripts/rust-remote-build.sh" "$WORK" \
         "$HOME/.amux/rust-build-target/release/amux-server" > "$BUILD_OUT" 2>&1; then
       BUILD_OK=1
+      BUILT_BIN="$HOME/.amux/rust-build-target/release/amux-server"
     else
       { echo "== remote build on '$AMUX_REMOTE_BUILD_HOST' failed, falling back to local:"; \
         cat "$BUILD_OUT"; } > "${BUILD_OUT}.remote" 2>&1
@@ -576,12 +603,12 @@ fi
       # this script's — this unit already gets one via systemd (defense in
       # depth for the case where rust-auto-build.sh is invoked directly
       # from an interactive pane instead of via the timer).
-      if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" "$REPO/scripts/safe-cargo.sh" build --release -p amux-server) >> "$BUILD_OUT" 2>&1; then
+      if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) >> "$BUILD_OUT" 2>&1; then
         BUILD_OK=1
       fi
     fi
   else
-    if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" "$REPO/scripts/safe-cargo.sh" build --release -p amux-server) > "$BUILD_OUT" 2>&1; then
+    if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) > "$BUILD_OUT" 2>&1; then
       BUILD_OK=1
     fi
   fi
@@ -601,7 +628,7 @@ fi
     # EX_CONFIG until somebody manually re-registers the agent. From a phone the
     # symptom is simply that the canonical Tailscale URL stays offline.
     INSTALL_TMP="${INSTALL}.new.$$"
-    install -m 0755 "$HOME/.amux/rust-build-target/release/amux-server" "$INSTALL_TMP"
+    install -m 0755 "$BUILT_BIN" "$INSTALL_TMP"
     # STABLE CODE IDENTITY, or say why there is not one (AMUX-3527).
     #
     # cargo/rustc emit a LINKER-SIGNED ADHOC binary: `Signature=adhoc`,

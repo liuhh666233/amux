@@ -17,8 +17,10 @@ test('lifecycle overrides provider state and incomplete pause stays visible',()=
 test('every observed runtime state exposes inspectable status evidence',()=>{
  for(const status of ['active','idle','waiting','blocked','error','rate_limited']) {
    const html=badge({running:true,status});
-   assert.match(html,/Status evidence for test-worker/);
-   assert.match(html,/_openStatusDetail/);
+   // The pill itself is the button (2026-09-27): no separate ⓘ.
+   assert.match(html,/^<button type="button" class="status-badge/);
+   assert.match(html,/_openStatusDetail\('test-worker'\)/);
+   assert.doesNotMatch(html,/ⓘ/);
  }
 });
 test('the Enter chip sends the suggestion if one is showing, else presses Enter',()=>{
@@ -51,7 +53,8 @@ test('the worker-details header pill is the status-evidence button, with no sepa
  vm.runInContext(code,ctx);
  const header=ctx._workerExecutionBadge({name:'test-worker',running:true,status:'idle'},{},{inspect:false});
  assert.doesNotMatch(header,/ⓘ/);
- assert.match(badge({running:true,status:'idle'}),/ⓘ/);
+ assert.doesNotMatch(badge({running:true,status:'idle'}),/ⓘ/);
+ assert.match(badge({running:true,status:'idle'}),/^<button type="button" class="status-badge idle"[^>]*_openStatusDetail[^>]*>idle<\/button>/);
  const peek=source.slice(source.indexOf('function updatePeekStatus()'),source.indexOf('function shellWords('));
  assert.match(peek,/_workerExecutionBadge\(s, runtimeBoard, \{ inspect: false \}\)/);
  assert.match(peek,/el\.onclick = \(\) => _openStatusDetail\(s\.name\)/);

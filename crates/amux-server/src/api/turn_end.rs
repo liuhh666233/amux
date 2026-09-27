@@ -188,13 +188,29 @@ pub(crate) fn original_sentence(original: &str, lowered: &str) -> String {
             .join(" ")
     };
     let want = flat(lowered);
-    sentences(original)
+    if want.is_empty() {
+        return lowered.to_string();
+    }
+    // Compare like with like: `lowered` had code spans and quotes cut by
+    // said_text, so cut them from each candidate too, then return the
+    // candidate UNCUT. A code span can also split the ORIGINAL where the cut
+    // text is one sentence (a command starting with `!`), so adjacent pairs
+    // are candidates as well; the shortest match wins. Without this the steer
+    // quoted the cut text back: "still waiting on you: , to record the two
+    // standing approvals." (amux, 2026-09-27).
+    let sents = sentences(original);
+    let mut cands: Vec<String> = sents.clone();
+    for w in sents.windows(2) {
+        cands.push(format!("{} {}", w[0], w[1]));
+    }
+    cands
         .into_iter()
         .rev()
-        .find(|s| {
-            let f = flat(s);
-            !want.is_empty() && (f.contains(&want) || (want.contains(&f) && f.len() > 8))
+        .filter(|s| {
+            let f = flat(&said_text(s));
+            f.contains(&want) || (want.contains(&f) && f.len() > 8 && f.len() * 2 > want.len())
         })
+        .min_by_key(|s| s.len())
         .unwrap_or_else(|| lowered.to_string())
 }
 
@@ -1510,6 +1526,18 @@ mod tests {
         assert!(skips_turn_end_classifier("chat"));
         assert!(!skips_turn_end_classifier("coding"));
         assert!(!skips_turn_end_classifier(""));
+    }
+
+    #[test]
+    fn a_quoted_ask_keeps_its_command_and_casing() {
+        let t = "The CLI sync works.\n\nStill waiting on you: `! ~/.amux/seed-standing-approvals.sh`, to record the two standing approvals.";
+        match ask(t) {
+            OwnerAsk::InBoundary { sentence } | OwnerAsk::Boundary { sentence, .. } => {
+                assert!(sentence.starts_with("Still waiting on you:"), "{sentence}");
+                assert!(sentence.contains("seed-standing-approvals.sh"), "{sentence}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
