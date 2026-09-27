@@ -110,6 +110,7 @@ pub mod terminal;
 pub mod torrents;
 pub mod tts;
 pub mod tunnel;
+pub(crate) mod goal_loop;
 pub(crate) mod promise_nudge;
 pub(crate) mod turn_end;
 pub mod upload;

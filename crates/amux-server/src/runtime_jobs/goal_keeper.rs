@@ -196,9 +196,24 @@ async fn tick(app: crate::api::AppState) {
     let now = crate::config::now_f64();
     let idle_s = env_f64("AMUX_GOAL_CONTINUE_IDLE_S", 120.0);
     let mut considered = 0usize;
+    // AMUX-5277: release answered owner blocks and restore parked goals first.
+    let stamped: Vec<String> = sessions
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .filter(|n| crate::api::goal_loop::stamped(&crate::api::session_verbs::load_meta(n)))
+        .map(str::to_string)
+        .collect();
+    if !stamped.is_empty() {
+        crate::api::goal_loop::restore_tick(&app, &stamped).await;
+    }
     for s in &sessions {
         let name = s["name"].as_str().unwrap_or("").to_string();
         if name.is_empty() || s["running"] != true || s["archived"] == true || s["provider"] != "claude" {
+            continue;
+        }
+        // A lane the goal-loop guard parked on the owner is not continued:
+        // continuing it is the loop (AMUX-5277).
+        if stamped.contains(&name) {
             continue;
         }
         // Board-drive's standing orders already continue these.

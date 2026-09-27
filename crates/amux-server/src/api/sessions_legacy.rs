@@ -416,6 +416,60 @@ fn run_bounded(
         .map(|s| s.trim().to_string())
 }
 
+/// The goal-loop guard's status stamp, read from lane meta.
+pub(crate) struct OwnerStamp<'a> {
+    pub since: i64,
+    pub card: &'a str,
+    pub ask: &'a str,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct OwnerBlock {
+    pub card: String,
+    pub ask: String,
+    pub since: i64,
+    /// `goal_loop` (the detector fired), `named` (the latest turn named an
+    /// open needsyou card), `linked` (an idle lane owns one).
+    pub source: &'static str,
+}
+
+/// Is this lane blocked on the owner, and on which card? Pure, so the three
+/// sources and the "a working lane does not flip" rule are pinned by a test.
+///
+/// A goal-loop stamp wins even over `active`: the loop IS activity, which is
+/// how tubescience-parity read `active` for 27 minutes. Without a stamp only
+/// an IDLE lane flips: a working lane with an unrelated needsyou card is
+/// working, and a picker, quota wait or error is its own, more specific state.
+pub(crate) fn owner_block_projection(
+    status: &str,
+    running: bool,
+    stamp: &OwnerStamp<'_>,
+    name: &str,
+    named: &[String],
+    needsyou: &BTreeMap<String, (String, String, i64)>,
+) -> Option<OwnerBlock> {
+    if !running {
+        return None;
+    }
+    let ask_of = |id: &str| needsyou.get(id).map(|(_, a, _)| a.clone()).unwrap_or_default();
+    if stamp.since > 0 && matches!(status, "active" | "idle" | "waiting" | "") {
+        let ask = if stamp.ask.is_empty() { ask_of(stamp.card) } else { stamp.ask.to_string() };
+        return Some(OwnerBlock { card: stamp.card.to_string(), ask, since: stamp.since, source: "goal_loop" });
+    }
+    if !matches!(status, "idle" | "") {
+        return None;
+    }
+    if let Some(id) = named.iter().find(|id| needsyou.contains_key(id.as_str())) {
+        return Some(OwnerBlock { card: id.clone(), ask: ask_of(id), since: 0, source: "named" });
+    }
+    // The most recently updated card the lane owns.
+    needsyou
+        .iter()
+        .filter(|(_, (sess, _, _))| sess == name)
+        .max_by_key(|(_, (_, _, updated))| *updated)
+        .map(|(id, (_, ask, _))| OwnerBlock { card: id.clone(), ask: ask.clone(), since: 0, source: "linked" })
+}
+
 /// Derive the waiting_reason from a pane capture: "permission_prompt",
 /// "user_input", "rate_limit", or "" (not waiting / unknown).
 ///
@@ -5732,6 +5786,50 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
         }
     }
 
+    // NEEDS INPUT (AMUX-5277). Ethan, 2026-09-27: "amux should've understood
+    // this and intervened or indicated via status" and "there should've been a
+    // status indicator so i can see clearly". tubescience-parity read `active`
+    // for 27 minutes while every turn ended on "The only thing left is TP-37:
+    // sign in once at ...". A lane blocked on its own needsyou card reads
+    // `waiting` / `owner`, with the card and the one-line ask.
+    {
+        let mut needsyou: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(session,''), COALESCE(NULLIF(ask_question,''), title), COALESCE(updated,0) FROM issues
+             WHERE status = 'needsyou' AND deleted IS NULL AND COALESCE(archived,0) = 0",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))? {
+            let (id, sess, ask, updated) = row?;
+            needsyou.insert(id, (sess, ask, updated));
+        }
+        for v in out.iter_mut() {
+            let Some(name) = v["name"].as_str().map(str::to_string) else { continue };
+            let meta = load_meta(&name);
+            let named: Vec<String> = meta["last_turn_cards"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let block = owner_block_projection(
+                v["status"].as_str().unwrap_or(""),
+                v["running"].as_bool().unwrap_or(false),
+                &OwnerStamp {
+                    since: meta[crate::api::goal_loop::M_SINCE].as_i64().unwrap_or(0),
+                    card: meta[crate::api::goal_loop::M_CARD].as_str().unwrap_or(""),
+                    ask: meta[crate::api::goal_loop::M_ASK].as_str().unwrap_or(""),
+                },
+                &name,
+                &named,
+                &needsyou,
+            );
+            if let Some(b) = block {
+                v["status"] = json!("waiting");
+                v["waiting_reason"] = json!("owner");
+                v["waiting_label"] = json!(if b.card.is_empty() { "Needs input".to_string() } else { format!("Needs input · {}", b.card) });
+                v["owner_block"] = json!({"card": b.card, "ask": b.ask, "since": b.since, "source": b.source});
+            }
+        }
+    }
+
     // Python's exact sort (py:20456-20457): pinned first, running next,
     // active/waiting before idle/blank, then most-recent human activity.
     let status_rank = |s: &str| -> i64 {
@@ -5922,6 +6020,38 @@ mod status_authority_tests {
 pub(crate) mod tests {
     use super::*;
     static PROBE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// AMUX-5277: "Needs input · TP-37" on the lane that is blocked on it.
+    #[test]
+    fn owner_block_projection_flips_blocked_lanes_and_leaves_working_ones() {
+        let mut needsyou: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
+        needsyou.insert("TP-37".into(), ("tubescience-parity".into(), "Sign in once at the semantic-search URL?".into(), 100));
+        needsyou.insert("TP-12".into(), ("tubescience-parity".into(), "older ask".into(), 50));
+        needsyou.insert("GS-9".into(), ("gs-4".into(), "gs ask".into(), 10));
+        let none = OwnerStamp { since: 0, card: "", ask: "" };
+        let loop_stamp = OwnerStamp { since: 1_790_000_000, card: "TP-37", ask: "The only thing left is TP-37: sign in once" };
+        // The incident: a goal-looping lane reads `active`; the stamp flips it.
+        let b = owner_block_projection("active", true, &loop_stamp, "tubescience-parity", &[], &needsyou).unwrap();
+        assert_eq!((b.card.as_str(), b.source), ("TP-37", "goal_loop"));
+        assert!(b.ask.contains("sign in once"));
+        // A working lane with its own needsyou card, no stamp: stays working.
+        assert_eq!(owner_block_projection("active", true, &none, "tubescience-parity", &["TP-37".into()], &needsyou), None);
+        // Idle and the latest turn named the card: flips, even if another lane owns it.
+        let b = owner_block_projection("idle", true, &none, "helper", &["GS-9".into()], &needsyou).unwrap();
+        assert_eq!((b.card.as_str(), b.source), ("GS-9", "named"));
+        // Idle with its own card: the most recently updated one.
+        let b = owner_block_projection("idle", true, &none, "tubescience-parity", &[], &needsyou).unwrap();
+        assert_eq!((b.card.as_str(), b.source, b.ask.as_str()), ("TP-37", "linked", "Sign in once at the semantic-search URL?"));
+        // An idle lane with no needsyou card of its own, a stopped lane, and the
+        // more specific states never flip.
+        assert_eq!(owner_block_projection("idle", true, &none, "backend", &[], &needsyou), None);
+        assert_eq!(owner_block_projection("idle", false, &loop_stamp, "tubescience-parity", &[], &needsyou), None);
+        for st in ["rate_limited", "api_error", "error", "blocked", "starting"] {
+            assert_eq!(owner_block_projection(st, true, &loop_stamp, "tubescience-parity", &[], &needsyou), None, "{st}");
+        }
+        // A picker (waiting/user_input) keeps its own reason unless the loop fired.
+        assert_eq!(owner_block_projection("waiting", true, &none, "tubescience-parity", &[], &needsyou), None);
+    }
 
     /// AMUX-4703. The flag was a one-way switch and the pane read ignored it.
     ///

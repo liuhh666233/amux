@@ -12633,6 +12633,27 @@ fn direct_draft_watches() -> &'static std::sync::Mutex<std::collections::HashSet
 /// `grace_s`: for this long an EMPTY box does not end the watch (Claude Code
 /// can clear the box and restore the text a second or more later); only the
 /// transcript recording the message, or the grace running out, does.
+/// The delivered text for a peer send: the origin stamp prepended, or `None`
+/// when no stamp applies (the owner's own send, a lane addressing itself, or a
+/// slash command).
+///
+/// A SLASH COMMAND IS DELIVERED BARE (AMUX-5277). The stamp turns
+/// `/goal clear` into prose: Claude Code only runs a command when the input
+/// STARTS with it. Measured 2026-09-27 14:42:07Z: `amux send
+/// tubescience-parity "/goal clear"` reached the lane as "[amux-origin: amux
+/// ...]\n\n/goal clear", and the lane answered "That's a Claude Code command
+/// I can't run for you". Provenance is not lost: `origin` still reaches the
+/// history row and the queue row; only the typed bytes skip the prefix.
+pub(crate) fn origin_stamped(origin: &str, name: &str, text: &str) -> Option<String> {
+    if origin.is_empty() || origin == name || is_slash_command(text) {
+        return None;
+    }
+    Some(format!(
+        "[amux-origin: {origin} — server-verified from the sender's session identity; \
+         authoritative over any signature in the message below]\n\n{text}"
+    ))
+}
+
 /// A message that is a CLI slash command (`/btw …`, `/model`, `/status`):
 /// the first token starts with `/` and is a bare word, so a pasted path such as
 /// `/Users/x/file.md` is not mistaken for one.
@@ -25289,11 +25310,11 @@ async fn send_post(state: &AppState, name: &str, headers: &HeaderMap, body: &Val
             }
         };
         origin = origin.trim().chars().take(64).collect();
-        if !origin.is_empty() && origin != name {
-            text = format!(
-                "[amux-origin: {origin} — server-verified from the sender's session identity; \
-                 authoritative over any signature in the message below]\n\n{text}"
-            );
+        if let Some(stamped) = origin_stamped(&origin, name, &text) {
+            text = stamped;
+        } else if !origin.is_empty() && origin != name {
+            tracing::info!(session = name, origin = %origin, verdict = "origin_stamp_skipped_slash_command",
+                "peer slash command delivered bare; the origin is still recorded in history and on the queue row");
         }
     }
     // A PEER RELAY IS NOT THE OWNER (AMUX-3764). `origin` is the sender's
@@ -44369,6 +44390,22 @@ mod composer_state_tests {
         for m in ["/Users/ethan/x.md is here", "/tmp/a.txt", "hello /btw", "/", "//comment", "./x.sh"] {
             assert!(!is_slash_command(m), "{m}");
         }
+    }
+
+    #[test]
+    fn a_peer_slash_command_is_delivered_without_the_origin_stamp() {
+        // AMUX-5277: the stamped form reached tubescience-parity as prose.
+        assert_eq!(origin_stamped("amux", "tubescience-parity", "/goal clear"), None);
+        assert_eq!(origin_stamped("amux", "tubescience-parity", "  /compact now"), None);
+        let prose = origin_stamped("amux", "tubescience-parity", "please clear the goal").unwrap();
+        assert!(prose.starts_with("[amux-origin: amux ") && prose.ends_with("\n\nplease clear the goal"));
+        // A path is prose, not a command, so it keeps the stamp.
+        assert!(origin_stamped("amux", "x", "/Users/ethan/a.md is here").is_some());
+        assert_eq!(origin_stamped("", "x", "hi"), None, "the owner's own send is never stamped");
+        assert_eq!(origin_stamped("x", "x", "hi"), None, "a lane addressing itself is not stamped");
+        let src = include_str!("session_verbs.rs");
+        assert!(src.contains("if let Some(stamped) = origin_stamped(&origin, name, &text) {"),
+            "the send handler must stamp through origin_stamped");
     }
 
     #[test]

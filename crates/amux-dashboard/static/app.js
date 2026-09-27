@@ -5164,6 +5164,8 @@ async function _fetchSessionsOnce() {
 
 function _waitingLabel(s) {
   const wr = s.waiting_reason || '';
+  // AMUX-5277: blocked on the owner's own card ("Needs input · TP-37").
+  if (wr === 'owner') return s.waiting_label || 'Needs input';
   if (wr === 'permission_prompt') return 'permission prompt';
   if (wr === 'rate_limit') return 'rate limited';
   if (wr === 'project_execution') return s.project_waiting_label || s.waiting_label || 'project blocked';
@@ -5174,6 +5176,47 @@ function _waitingLabel(s) {
   if (s.composer_stuck_since) return 'unsubmitted text';
   if (wr === 'user_input') return 'needs input';
   return 'waiting';
+}
+// NEEDS INPUT (AMUX-5277). Ethan, 2026-09-27: "there should've been a status
+// indicator so i can see clearly". tubescience-parity read "working" for 27
+// minutes while every turn ended on "The only thing left is TP-37: sign in
+// once...". Its own colour, the card id, the one-line ask, and tapping it opens
+// the card, because answering the card is the whole remedy.
+function _needsInputBadge(s) {
+  const b = s.owner_block || {};
+  const card = b.card || '';
+  const ask = String(b.ask || '').replace(/\s+/g, ' ').trim();
+  const open = card
+    ? 'openBoardDetail(\'' + escJs(card) + '\')'
+    : '_openStatusDetail(\'' + escJs(s.name) + '\')';
+  return '<button type="button" class="status-badge needs-input" title="' + esc((ask || 'Waiting on you') + (card ? ' (tap to open ' + card + ')' : ''))
+    + '" aria-label="' + esc(s.name + ' needs input' + (card ? ' on ' + card : '') + (ask ? ': ' + ask : '')) + '"'
+    + ' onclick="event.stopPropagation();' + open + '">'
+    + '<span class="ni-label">' + esc(_waitingLabel(s)) + '</span>'
+    + (ask ? '<span class="ni-ask">' + esc(ask) + '</span>' : '')
+    + '</button>';
+}
+function _needsInputSessions() {
+  return sessions.filter(s => s.running && s.status === 'waiting' && s.waiting_reason === 'owner');
+}
+// Header chip, same pattern as updateRateLimitPill: a count, tap jumps to the
+// first worker that needs input.
+function updateNeedsInputPill() {
+  const pill = document.getElementById('needs-input-pill');
+  const txt = document.getElementById('needs-input-pill-text');
+  if (!pill || !txt) return;
+  const list = _needsInputSessions();
+  const n = list.length;
+  if (!n) { pill.classList.remove('show'); return; }
+  txt.textContent = n + (n === 1 ? ' needs input' : ' need input');
+  document.getElementById('needs-input-pill-count').textContent = n;
+  pill.setAttribute('aria-label', n + (n === 1 ? ' worker needs' : ' workers need') + ' your input. Open ' + list[0].name);
+  pill.title = list.map(s => s.name + ((s.owner_block || {}).card ? ' (' + s.owner_block.card + ')' : '')).join(', ') + ' (tap to jump)';
+  pill.classList.add('show');
+}
+function openFirstNeedsInput() {
+  const s = _needsInputSessions()[0];
+  if (s) openPeek(s.name);
 }
 // Tooltip for a waiting badge: the stuck composer text, when that is the reason.
 function _waitingTitle(s) {
@@ -5533,6 +5576,7 @@ function _workerExecutionBadge(s, runtimeBoard, opts) {
   else if (s.running && s.status === 'active' && s.activity === 'api_retry') badge = '<span class="status-badge rate-limited" title="A request to the API failed; the agent is waiting to retry it on its own.">retrying</span>';
   else if (s.running && s.status === 'active' && s.activity === 'background_shell') badge = '<span class="status-badge background" title="The turn is finished; a background shell it started is still running. The agent resumes on its own when that ends.">background job</span>';
   else if (s.status === 'starting') badge = '<span class="status-badge idle">starting</span>';
+  else if (s.status === 'waiting' && s.waiting_reason === 'owner') badge = _needsInputBadge(s);
   else if (s.status === 'waiting') badge = '<span class="status-badge waiting"' + _waitingTitle(s) + '>' + _waitingLabel(s) + '</span>';
   else if (!s.running) badge = '<span class="status-badge idle">stopped</span>';
   else if (s.status === 'error') badge = '<button type="button" class="status-badge blocked" title="' + esc(s.error_detail || s.state_detail || 'Worker failed; inspect the terminal for the provider error') + '" onclick="event.stopPropagation();_openStatusDetail(\'' + escJs(s.name) + '\')">error ▾</button>';
@@ -6163,6 +6207,7 @@ function render() {
   const focusedId = _active && _active.id ? _active.id : null;
   updateActiveCount();
   updateRateLimitPill();
+  updateNeedsInputPill();
   updateTelemetryPill();
   // Active-filter preview chips (provider/model/log-search) + Filters button badge
   renderActiveFilters();
@@ -8481,7 +8526,7 @@ function _scrollToFirstRateLimited() {
 
 // AF-731: document overflow alone misses a button clipped by its flex parent.
 // Measure the actual visible control bounds, including clipping ancestors.
-const _headerControlIds = ['brand-header','conn-status','notif-btn','rate-limit-pill','active-btn','add-btn','settings-btn','interaction-feedback'];
+const _headerControlIds = ['brand-header','conn-status','notif-btn','rate-limit-pill','needs-input-pill','active-btn','add-btn','settings-btn','interaction-feedback'];
 function _headerLayoutCheck() {
   const clipped = _headerControlIds.filter(id => {
     const el = id==='interaction-feedback' ? document.querySelector('#interaction-feedback > summary') : document.getElementById(id);
@@ -17610,6 +17655,7 @@ function _atStatusBadge(s) {
   const b = (cls, txt, extra) =>
     `<span class="status-badge ${cls}" style="margin-right:6px;"${extra || ''}>${txt}</span>`;
   if (k === 'working') return b('active', 'working') + _atAgentsChip(s);
+  if (k === 'waiting' && s.waiting_reason === 'owner') return b('needs-input', esc(_waitingLabel(s)));
   if (k === 'waiting') return b('waiting', esc(_waitingLabel(s)), _waitingTitle(s));
   if (k === 'rate_limited') return b('rate-limited', 'rate limited');
   if (k === 'api_error') return b('rate-limited', 'API ' + esc(s.api_error_code || '5xx'));

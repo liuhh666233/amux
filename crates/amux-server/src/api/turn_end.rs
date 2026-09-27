@@ -299,7 +299,7 @@ pub(crate) enum OwnerAsk {
 /// for a go-ahead; none matches a worker merely reporting that it asked
 /// somebody. Real specimens from the 2026-09-26 review are the test fixtures.
 fn is_ask_sentence(s: &str) -> bool {
-    let pats: [&regex::Regex; 13] = [
+    let pats: [&regex::Regex; 14] = [
         rx!(r"\bsay go\b|\bsay the word\b"),
         rx!(r"\b(awaiting|waiting (on|for)|need|needs|want) your (word|go|go-?ahead|call|decisions?|approvals?|sign-?off|ok|okay|green ?light|confirmation|answers?|reply|replies|input)\b"),
         rx!(r"\bon your (word|go|signal|say-?so)\b"),
@@ -315,8 +315,22 @@ fn is_ask_sentence(s: &str) -> bool {
         // gs-4-gke-minimization, 2026-09-26: "Still waiting for your answers:
         // the six permission lines, the re-login, and the ten decisions".
         rx!(r"\bstill (waiting|blocked) (on|for) (you|your)\b"),
+        // tubescience-parity, 2026-09-27, 2,206 turns in a row: "The only
+        // thing left is TP-37: sign in once at https://... in the
+        // `ethan-tubescience` Chrome profile." An imperative sign-in aimed at
+        // a URL or a browser profile has no "you" in it and is still an ask.
+        sign_in_at_re(),
     ];
     pats.iter().any(|p| p.is_match(s))
+}
+
+/// An imperative sign-in, log-in or re-auth pointed at a URL or a browser
+/// profile: only the owner can type that password. Matched over `said_text`,
+/// so the profile name in backticks is already gone and "profile" remains.
+/// First person ("i'll sign in at") is excluded by requiring the verb to open
+/// the sentence, follow a colon, or follow "please"/"you (need to)".
+fn sign_in_at_re() -> &'static regex::Regex {
+    rx!(r"(^|[:;]\s*|\bplease\s+|\byou\s+(need to |must |have to |should |can )?)(sign|log) ?(back )?in\b[^\n]{0,160}?(https?://|\bprofile\b)|(^|[:;]\s*|\bplease\s+)re-?auth\w*\b[^\n]{0,160}?(https?://|\bprofile\b)")
 }
 
 /// Things the owner said in THIS turn's prompt that make "proceed" wrong: an
@@ -356,6 +370,9 @@ pub(crate) fn boundary_of(context: &str) -> Option<Boundary> {
     if (has(destructive) && has(data)) || (has(rx!(r"\b(prod|production)\b")) && has(prod_risk)) {
         return Some(Boundary::ProdData);
     }
+    if sign_in_at_re().is_match(&c) {
+        return Some(Boundary::OwnerOnly);
+    }
     if has(rx!(r"\b(sign[- ]?in|log ?in|re-?auth\w*|oauth|credentials?|password|2fa|mfa|api key|secret|iam|grant|role binding|act ?as|permission|console access|admin rights)\b"))
         && has(rx!(r"\b(you|your|ethan|owner)\b"))
     {
@@ -393,7 +410,18 @@ pub(crate) fn classify_owner_ask(text: &str) -> OwnerAsk {
         (None, None) => return OwnerAsk::None,
     };
     let sentence = original_sentence(text, &sentence);
-    match boundary_of(&context) {
+    // The sign-in can sit in the list BELOW the ask sentence. tubescience-parity,
+    // 12:41Z 2026-09-27: "...TP-37 is still waiting on you." then "1. TP-37:
+    // sign in at https://...". Reading only the ask sentence steered it to
+    // "proceed" on a password only the owner can type. A false boundary costs
+    // one card, so the whole ask tail may escalate to OwnerOnly.
+    let boundary = boundary_of(&context).or_else(|| {
+        sentences(&tail)
+            .iter()
+            .any(|s| sign_in_at_re().is_match(s))
+            .then_some(Boundary::OwnerOnly)
+    });
+    match boundary {
         Some(kind) => OwnerAsk::Boundary { sentence, kind },
         None => OwnerAsk::InBoundary { sentence },
     }
@@ -584,6 +612,77 @@ async fn claim_once(state: &AppState, session: &str, etype: &str, idem: String, 
         .unwrap_or(false)
 }
 
+/// Record `idem` unless an event of `etype` for this lane carrying `key` in
+/// its data was recorded in the last `window_s` seconds. True only for the call
+/// that inserted.
+///
+/// Why a window and not the turn uuid (tubescience-parity, 2026-09-27): a lane
+/// looping under a /goal ends a NEW turn every five seconds on the same ask, so
+/// a per-turn claim steered it "proceed" at 12:41:27Z and again at 12:42:22Z,
+/// and each steer fed the loop another turn.
+async fn claim_within(
+    state: &AppState,
+    session: &str,
+    etype: &str,
+    key: &str,
+    window_s: f64,
+    idem: String,
+    data: Value,
+) -> bool {
+    let (session, etype, key) = (session.to_string(), etype.to_string(), key.to_string());
+    state
+        .store
+        .write_async(move |conn| {
+            sv::ensure_fleet_tables(conn)?;
+            let now = crate::config::now_f64();
+            let recent: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session = ?1 AND type = ?2 \
+                 AND ts > ?3 AND json_extract(data, '$.key') = ?4",
+                rusqlite::params![session, etype, now - window_s, key],
+                |r| r.get(0),
+            )?;
+            if recent > 0 {
+                return Ok(crate::db::WriteOutcome { applied: false, events: vec![] });
+            }
+            let mut data = data;
+            data["key"] = json!(key);
+            let n = conn.execute(
+                "INSERT OR IGNORE INTO session_events (ts, session, type, data, idem, source) \
+                 VALUES (?1,?2,?3,?4,?5,'turn-end')",
+                rusqlite::params![now, session, etype, data.to_string(), idem],
+            )?;
+            Ok(crate::db::WriteOutcome { applied: n == 1, events: vec![] })
+        })
+        .await
+        .map(|o| o.applied)
+        .unwrap_or(false)
+}
+
+/// How long one in-boundary steer covers the same question on the same lane.
+const OWNER_ASK_STEER_WINDOW_S: f64 = 6.0 * 3600.0;
+
+/// [`claim_once`] for sibling modules (the goal-loop guard).
+pub(crate) async fn claim_once_pub(state: &AppState, session: &str, etype: &str, idem: String, data: Value) -> bool {
+    claim_once(state, session, etype, idem, data).await
+}
+
+/// Origin label for cards the goal-loop guard files (AMUX-5277).
+pub(crate) const GOAL_LOOP_ORIGIN: &str = "goal-loop guard";
+
+/// File (or find) the card for a lane goal-looping on an ask that named no card.
+pub(crate) async fn file_goal_loop_card(
+    state: &AppState,
+    lane: &str,
+    kind: Option<Boundary>,
+    question: &str,
+    context: &str,
+    isolated: bool,
+) -> Result<(String, bool, AskPath), String> {
+    let ask_type = kind.map(Boundary::ask_type).unwrap_or("decision");
+    let path = AskPath::for_type(lane, ask_type);
+    file_ask_card_via(state, lane, kind, question, context, GOAL_LOOP_ORIGIN, path, isolated).await
+}
+
 fn question_key(q: &str) -> String {
     let norm: String = q
         .to_lowercase()
@@ -601,7 +700,7 @@ fn hex_prefix(bytes: &[u8], n: usize) -> String {
 }
 
 /// A question as a card can carry it: one sentence ending in `?`.
-fn as_question(sentence: &str, lane: &str) -> String {
+pub(crate) fn as_question(sentence: &str, lane: &str) -> String {
     let s = clip(sentence, 280);
     if s.trim_end().ends_with('?') {
         s
@@ -670,6 +769,10 @@ async fn file_ask_card_via(
     let label = kind.map(Boundary::label).unwrap_or("decision");
     let title = format!("Owner ask ({label}): {}", clip(question, 110));
     let why = match kind {
+        _ if origin == GOAL_LOOP_ORIGIN => format!(
+            "because {lane} ended three turns in a row on this ask while its /goal kept re-prompting it \
+             (AMUX-5277), so only the owner can move it"
+        ),
         _ if isolated => format!(
             "because {lane} is isolated: amux may not steer it and only the owner's own messages reach it, \
              so the ask is recorded here instead of living only in its terminal"
@@ -916,9 +1019,28 @@ pub(crate) async fn on_turn_end(state: AppState, name: String, session_id: Strin
     };
     let records = sv::iter_jsonl_tail(&path, 2_000_000);
     let Some(turn) = final_turn(&records) else {
+        // Under a looping /goal the next turn can already have started by the
+        // time this reads (tubescience-parity turned over every ~5s), so the
+        // goal-loop guard still gets the last turn END it can see.
+        if let Some(end) = super::goal_loop::turn_ends(&records).pop() {
+            if crate::config::now_f64() - end.ts < 30.0 {
+                let turn = TurnTail { uuid: end.id, text: end.text, ts: end.ts, prompt: String::new() };
+                super::goal_loop::on_turn_end(&state, &name, isolated, &records, &turn).await;
+            }
+        }
         tracing::debug!(session = %name, verdict = "turn_end_no_final_text", "turn-end: turn did not end on text");
         return;
     };
+    // Record which cards the lane's latest turn named, for the session list's
+    // "Needs input" projection (a lane blocked on its own needsyou card).
+    let named = super::goal_loop::card_ids(&turn.text);
+    sv::update_meta(&name, &[("last_turn_cards", json!(named)), ("last_turn_ts", json!(turn.ts))]);
+    // AMUX-5277: a lane goal-looping on the owner is not steered. Steering it
+    // "proceed" only bought tubescience-parity another turn of the same ask.
+    if super::goal_loop::on_turn_end(&state, &name, isolated, &records, &turn).await {
+        super::promise_nudge::forget_promise(&name);
+        return;
+    }
     let verdict = classify_owner_ask(&turn.text);
     if isolated {
         isolated_owner_ask(&state, &name, &records, &turn, verdict).await;
@@ -943,10 +1065,14 @@ pub(crate) async fn on_turn_end(state: AppState, name: String, session_id: Strin
                     "turn-end: in-boundary owner ask not steered; this turn's prompt asked the lane to hold or only report");
                 return;
             }
-            if !claim_once(&state, &name, "turn_end.owner_ask", format!("owner-ask:{name}:{}", turn.uuid),
+            let qkey = question_key(sentence);
+            if !claim_within(&state, &name, "turn_end.owner_ask_steer", &qkey, OWNER_ASK_STEER_WINDOW_S,
+                format!("owner-ask:{name}:{}", turn.uuid),
                 json!({"sentence": sentence, "uuid": turn.uuid, "verdict": "in_boundary"})).await
             {
-                tracing::debug!(session = %name, verdict = "owner_ask_already_handled", "turn-end: ask already handled");
+                tracing::info!(session = %name, verdict = "owner_ask_steer_deduped", key = %qkey,
+                    sentence = %clip(sentence, 160),
+                    "turn-end: in-boundary owner ask already steered on this lane in the last 6h (or this turn); not steered again");
                 return;
             }
             let id = format!("owner-ask-{}", turn.uuid);
@@ -1538,6 +1664,44 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// AMUX-5277: the exact sentences tubescience-parity looped on. Both were
+    /// steered "proceed" (12:41:27Z, 12:42:22Z); a sign-in only the owner can
+    /// type is OwnerOnly, so it becomes a card and is never steered.
+    #[test]
+    fn tp37_sign_in_at_a_url_is_an_owner_only_ask() {
+        let tp37 = "The results still don't match production. The only thing left is TP-37: sign in once at https://semantic-search-tawny.vercel.app in the `ethan-tubescience` Chrome profile.";
+        assert_eq!(boundary(tp37), Some(Boundary::OwnerOnly));
+        let listed = "The results still don't match production. The semantic-search token still returns 401, and TP-37 is still waiting on you.\n\n\
+            1. **TP-37:** sign in at https://semantic-search-tawny.vercel.app in the `ethan-tubescience` Chrome profile.\n\
+            2. **gs-3:** decide what happens to commit 804e1a5 on TubeScience's GitHub: push it, rebase it, or close it.";
+        assert_eq!(boundary(listed), Some(Boundary::OwnerOnly));
+        // First person is a plan, not an ask.
+        assert_eq!(ask("Token refreshed. I'll sign in at https://x.example once the build is green."), OwnerAsk::None);
+    }
+
+    #[tokio::test]
+    async fn the_in_boundary_steer_is_deduped_per_question_for_six_hours_not_per_turn() {
+        let (_tmp, state) = hermetic_state();
+        let key = question_key("That repo is outside my lane, so it's your call.");
+        let claim = |uuid: &'static str| {
+            let (state, key) = (state.clone(), key.clone());
+            async move {
+                claim_within(&state, "tubescience-parity", "turn_end.owner_ask_steer", &key, OWNER_ASK_STEER_WINDOW_S,
+                    format!("owner-ask:tubescience-parity:{uuid}"), json!({"uuid": uuid})).await
+            }
+        };
+        assert!(claim("turn-1").await, "the first steer goes out");
+        assert!(!claim("turn-2").await, "a new turn with the same ask is not steered again");
+        // Another lane, or another question, is its own claim.
+        assert!(claim_within(&state, "other-lane", "turn_end.owner_ask_steer", &key, OWNER_ASK_STEER_WINDOW_S,
+            "owner-ask:other-lane:t".into(), json!({})).await);
+        assert!(claim_within(&state, "tubescience-parity", "turn_end.owner_ask_steer", &question_key("Want me to rerun it?"),
+            OWNER_ASK_STEER_WINDOW_S, "owner-ask:tubescience-parity:turn-3".into(), json!({})).await);
+        // Outside the window the same question may be steered again.
+        assert!(claim_within(&state, "tubescience-parity", "turn_end.owner_ask_steer", &key, -1.0,
+            "owner-ask:tubescience-parity:turn-4".into(), json!({})).await);
     }
 
     #[test]

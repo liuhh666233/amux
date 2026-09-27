@@ -659,12 +659,13 @@ pub const CATALOG: &[Doc] = &[
     Doc {
         id: ids::GOAL_KEEPER,
         name: "Goal keeper",
-        purpose: "Continues a Claude worker whose owner-set /goal is not met (latest transcript goal_status met:false and the footer shows /goal active) once it has been idle 2 minutes, because Claude Code's own goal loop does not survive a resume. At most one continue per 10 minutes; two continues with no tool call stop it for that goal until the goal changes or the owner writes. Reaches isolated workers as owner configuration (goal: guard).",
+        purpose: "Continues a Claude worker whose owner-set /goal is not met (latest transcript goal_status met:false and the footer shows /goal active) once it has been idle 2 minutes, because Claude Code's own goal loop does not survive a resume. At most one continue per 10 minutes; two continues with no tool call stop it for that goal until the goal changes or the owner writes. Reaches isolated workers as owner configuration (goal: guard). Each tick also runs the goal-loop guard's restore (AMUX-5277): a lane parked on a needsyou card gets `/goal <condition>` back once when the card leaves needsyou, and is never continued while parked.",
         env: &[
             EnvControl { var: "AMUX_GOAL_KEEPER_SECS", effect: "0 disables the keeper", off: Some("0") },
             EnvControl { var: "AMUX_GOAL_CONTINUE", effect: "0 opts a worker, group or the fleet out (scoped)", off: None },
             EnvControl { var: "AMUX_GOAL_CONTINUE_IDLE_S", effect: "idle seconds before a continue, default 120", off: None },
             EnvControl { var: "AMUX_GOAL_CONTINUE_INTERVAL_S", effect: "minimum seconds between continues, default 600", off: None },
+            EnvControl { var: "AMUX_GOAL_LOOP_GUARD", effect: "0 turns off goal-loop detection, park and restore (scoped)", off: None },
         ],
         pref: None,
         detail: None,

@@ -1788,7 +1788,7 @@
   /* The header chips share one shape: text on desktop, count only on phones.
      The status and host chips were added without these rules and showed a
      stray count on desktop and overflowing text at 390px. */
-  #rate-limit-pill-count, #telemetry-pill-count, #host-pressure-pill-count { display:none; }
+  #rate-limit-pill-count, #telemetry-pill-count, #host-pressure-pill-count, #needs-input-pill-count { display:none; }
   .btn-rate-limit.show { display: flex; }
   .btn-rate-limit:active { background: rgba(248,81,73,0.22); }
   .active-dropdown {
@@ -1912,8 +1912,8 @@
     .header-row .active-wrap, .header-row .header-add-wrap, .header-row .settings-wrap { flex:0 0 auto; }
     .header-row .btn-active { gap:3px; font-size:0.85rem; }
     .header-row .btn-rate-limit { max-width:44px; overflow:visible; white-space:nowrap; }
-    .header-row #rate-limit-pill-text, .header-row #telemetry-pill-text, .header-row #host-pressure-pill-text { display:none; }
-    .header-row #rate-limit-pill-count, .header-row #telemetry-pill-count, .header-row #host-pressure-pill-count { display:inline-block; font-size:0.85rem; font-weight:600; }
+    .header-row #rate-limit-pill-text, .header-row #telemetry-pill-text, .header-row #host-pressure-pill-text, .header-row #needs-input-pill-text { display:none; }
+    .header-row #rate-limit-pill-count, .header-row #telemetry-pill-count, .header-row #host-pressure-pill-count, .header-row #needs-input-pill-count { display:inline-block; font-size:0.85rem; font-weight:600; }
     .header-row > #interaction-feedback { flex:0 0 44px; margin-left:auto; }
     .header-row > #interaction-feedback > summary { box-sizing:border-box; width:44px; height:44px; min-height:44px; padding:0; justify-content:center; }
     .header-row > #interaction-feedback > summary > span { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
@@ -7546,3 +7546,16 @@ select.input { height:var(--control-height); }
 @media (max-width: 600px) { .peek-shell-actions .btn, .peek-shell-actions select { min-height: 44px; } }
 .peek-shell-out { margin: 0; max-height: 360px; overflow: auto; background: #010409; color: #c9d1d9; border-radius: 6px; padding: 8px 10px; font-size: 0.74rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
 @keyframes peek-shell-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* NEEDS INPUT (AMUX-5277): a worker blocked on the owner's own card. Orange,
+   distinct from working (green), plain waiting (yellow), rate limited (red)
+   and steering (purple). A 44px tap target because tapping it opens the card. */
+.status-badge.needs-input { display:inline-flex; flex-direction:column; align-items:stretch; overflow:hidden; min-width:0; justify-content:center; min-height:44px; box-sizing:border-box; padding:4px 10px; max-width:min(100%, 320px); background:rgba(240,136,62,0.16); color:#f0883e; border:1px solid rgba(240,136,62,0.6); font-weight:600; cursor:pointer; text-align:left; line-height:1.25; font:inherit; font-size:0.78rem; }
+.status-badge.needs-input .ni-label { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.status-badge.needs-input .ni-ask { display:block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:400; font-size:0.72rem; opacity:0.9; text-transform:none; letter-spacing:normal; }
+.status-badge.needs-input:hover, .status-badge.needs-input:active { background:rgba(240,136,62,0.26); }
+body.light .status-badge.needs-input { color:#bc4c00; border-color:rgba(188,76,0,0.5); background:rgba(188,76,0,0.1); }
+#peek-session-status .status-badge.needs-input { max-width:min(46vw, 280px); }
+.header-row .btn-needs-input { color:#f0883e; border:1px solid rgba(240,136,62,0.6); background:rgba(240,136,62,0.14); }
+.header-row .btn-needs-input:hover, .header-row .btn-needs-input:active { background:rgba(240,136,62,0.26); }
+body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,76,0,0.5); background:rgba(188,76,0,0.1); }
