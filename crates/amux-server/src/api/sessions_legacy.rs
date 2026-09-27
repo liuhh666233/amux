@@ -447,6 +447,7 @@ pub(crate) fn owner_block_projection(
     name: &str,
     named: &[String],
     needsyou: &BTreeMap<String, (String, String, i64)>,
+    watching: bool,
 ) -> Option<OwnerBlock> {
     if !running {
         return None;
@@ -457,6 +458,14 @@ pub(crate) fn owner_block_projection(
         return Some(OwnerBlock { card: stamp.card.to_string(), ask, since: stamp.since, source: "goal_loop" });
     }
     if !matches!(status, "idle" | "") {
+        return None;
+    }
+    // An armed monitor or background shell will wake the lane on its own, so
+    // an open card is not what it is waiting on. Measured 2026-09-27 19:40:
+    // gs-5-one-click ("1 monitor still running", a 30-minute run in flight)
+    // and mvs-infra (waiting on its generation watcher) both read "Needs
+    // input" from cards they were not stopped on. The card stays in triage.
+    if watching {
         return None;
     }
     // Only the lane's OWN card, and only one that clears the needs-input bar.
@@ -478,6 +487,23 @@ pub(crate) fn owner_block_projection(
         .filter(|(_, (sess, _, _))| sess == name)
         .max_by_key(|(_, (_, _, updated))| *updated)
         .map(|(id, (_, ask, _))| OwnerBlock { card: id.clone(), ask: ask.clone(), since: 0, source: "linked" })
+}
+
+/// Does the Claude footer (after the last prompt) show an armed monitor or a
+/// background shell? `⏵⏵ bypass permissions on · 1 monitor · ← 5 agents`.
+pub(crate) fn footer_background_watch(raw: &str) -> bool {
+    let clean = crate::backend::adapter::strip_ansi(raw);
+    let footer = clean.rsplit_once('\u{276f}').map(|(_, f)| f).unwrap_or("");
+    footer.lines().any(|line| {
+        let line = line.trim();
+        (line.starts_with('\u{23f8}') || line.starts_with('\u{23f5}'))
+            && line.split('\u{b7}').any(|part| {
+                let mut w = part.split_whitespace();
+                w.next().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| n > 0)
+                    && matches!(w.next(), Some("monitor" | "monitors" | "shell" | "shells"))
+                    && w.next().is_none()
+            })
+    })
 }
 
 /// Derive the waiting_reason from a pane capture: "permission_prompt",
@@ -5835,6 +5861,7 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
                 &name,
                 &named,
                 &needsyou,
+                signals.panes.get(&name).is_some_and(|raw| footer_background_watch(raw)),
             );
             if let Some(b) = block {
                 v["status"] = json!("waiting");
@@ -6038,6 +6065,22 @@ pub(crate) mod tests {
 
     /// AMUX-5277: "Needs input · TP-37" on the lane that is blocked on it.
     #[test]
+    fn an_armed_monitor_keeps_an_old_card_from_flipping_the_lane() {
+        let mut needsyou: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
+        needsyou.insert("G5OC-10".into(), ("gs-5-one-click".into(), "Run gcloud auth login?".into(), 100));
+        let none = OwnerStamp { since: 0, card: "", ask: "" };
+        // Live footer, gs-5-one-click 2026-09-27 19:40.
+        let pane = "\u{273b} Crunched for 2m 57s \u{b7} done 7:40 PM \u{b7} 1 monitor still running\n\u{276f}\u{a0}\n  \u{23f5}\u{23f5} bypass permissions on \u{b7} 1 monitor \u{b7} \u{2190} 5 agents \u{b7} 1 feedback draft";
+        assert!(footer_background_watch(pane));
+        assert!(footer_background_watch("\u{276f}\n\u{23f5}\u{23f5} bypass permissions on \u{b7} 2 shells"));
+        assert!(!footer_background_watch("\u{276f}\n\u{23f5}\u{23f5} bypass permissions on \u{b7} \u{2190} 5 agents"));
+        // Scrollback above the prompt does not count.
+        assert!(!footer_background_watch("\u{23f5}\u{23f5} x \u{b7} 1 monitor\n\u{276f}\n\u{23f5}\u{23f5} bypass permissions on"));
+        assert_eq!(owner_block_projection("idle", true, &none, "gs-5-one-click", &["G5OC-10".into()], &needsyou, true), None);
+        assert!(owner_block_projection("idle", true, &none, "gs-5-one-click", &["G5OC-10".into()], &needsyou, false).is_some());
+    }
+
+    #[test]
     fn owner_block_projection_flips_blocked_lanes_and_leaves_working_ones() {
         let mut needsyou: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
         needsyou.insert("TP-37".into(), ("tubescience-parity".into(), "Sign in once at the semantic-search URL?".into(), 100));
@@ -6046,29 +6089,29 @@ pub(crate) mod tests {
         let none = OwnerStamp { since: 0, card: "", ask: "" };
         let loop_stamp = OwnerStamp { since: 1_790_000_000, card: "TP-37", ask: "The only thing left is TP-37: sign in once" };
         // The incident: a goal-looping lane reads `active`; the stamp flips it.
-        let b = owner_block_projection("active", true, &loop_stamp, "tubescience-parity", &[], &needsyou).unwrap();
+        let b = owner_block_projection("active", true, &loop_stamp, "tubescience-parity", &[], &needsyou, false).unwrap();
         assert_eq!((b.card.as_str(), b.source), ("TP-37", "goal_loop"));
         assert!(b.ask.contains("sign in once"));
         // A working lane with its own needsyou card, no stamp: stays working.
-        assert_eq!(owner_block_projection("active", true, &none, "tubescience-parity", &["TP-37".into()], &needsyou), None);
+        assert_eq!(owner_block_projection("active", true, &none, "tubescience-parity", &["TP-37".into()], &needsyou, false), None);
         // Idle and the latest turn MENTIONS another lane's card: does not flip
         // (2026-09-27: amux-meta-helper read "Needs input · SP-1067", studio-plg's card).
-        assert_eq!(owner_block_projection("idle", true, &none, "helper", &["GS-9".into()], &needsyou), None);
+        assert_eq!(owner_block_projection("idle", true, &none, "helper", &["GS-9".into()], &needsyou, false), None);
         // Idle and the latest turn names its OWN card: flips as named.
-        let b = owner_block_projection("idle", true, &none, "tubescience-parity", &["TP-12".into()], &needsyou).unwrap();
+        let b = owner_block_projection("idle", true, &none, "tubescience-parity", &["TP-12".into()], &needsyou, false).unwrap();
         assert_eq!((b.card.as_str(), b.source), ("TP-12", "named"));
         // Idle with its own card: the most recently updated one.
-        let b = owner_block_projection("idle", true, &none, "tubescience-parity", &[], &needsyou).unwrap();
+        let b = owner_block_projection("idle", true, &none, "tubescience-parity", &[], &needsyou, false).unwrap();
         assert_eq!((b.card.as_str(), b.source, b.ask.as_str()), ("TP-37", "linked", "Sign in once at the semantic-search URL?"));
         // An idle lane with no needsyou card of its own, a stopped lane, and the
         // more specific states never flip.
-        assert_eq!(owner_block_projection("idle", true, &none, "backend", &[], &needsyou), None);
-        assert_eq!(owner_block_projection("idle", false, &loop_stamp, "tubescience-parity", &[], &needsyou), None);
+        assert_eq!(owner_block_projection("idle", true, &none, "backend", &[], &needsyou, false), None);
+        assert_eq!(owner_block_projection("idle", false, &loop_stamp, "tubescience-parity", &[], &needsyou, false), None);
         for st in ["rate_limited", "api_error", "error", "blocked", "starting"] {
-            assert_eq!(owner_block_projection(st, true, &loop_stamp, "tubescience-parity", &[], &needsyou), None, "{st}");
+            assert_eq!(owner_block_projection(st, true, &loop_stamp, "tubescience-parity", &[], &needsyou, false), None, "{st}");
         }
         // A picker (waiting/user_input) keeps its own reason unless the loop fired.
-        assert_eq!(owner_block_projection("waiting", true, &none, "tubescience-parity", &[], &needsyou), None);
+        assert_eq!(owner_block_projection("waiting", true, &none, "tubescience-parity", &[], &needsyou, false), None);
     }
 
     /// AMUX-4703. The flag was a one-way switch and the pane read ignored it.
