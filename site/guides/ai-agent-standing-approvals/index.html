@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>AI Agent Standing Approvals — Pre-Approve Actions for Unattended Runs — amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="Stop AI coding agents from pausing for permission prompts. Set standing approvals by category — budget, external, production data, credentials — and run overnight without interruption.">
+  <meta name="keywords" content="ai agent standing approvals, pre-approve ai agent actions, ai coding agents unattended, stop ai agent permission prompts, overnight ai agents no interruption, claude code approval automation, amux standing approvals">
+  <link rel="canonical" href="https://amux.io/guides/ai-agent-standing-approvals/">
+  <meta property="og:title" content="AI Agent Standing Approvals — Pre-Approve Actions for Unattended Runs — amux">
+  <meta property="og:description" content="Stop AI coding agents from pausing for permission prompts. Set standing approvals by category and run overnight without interruption.">
+  <meta property="og:url" content="https://amux.io/guides/ai-agent-standing-approvals/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/site.js"></script>
+
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},{"@type":"ListItem","position":3,"name":"AI Agent Standing Approvals","item":"https://amux.io/guides/ai-agent-standing-approvals/"}]}</script>
+
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"AI Agent Standing Approvals: Pre-Approve Actions for Unattended Runs","description":"How to configure standing approvals in amux so AI coding agents can answer their own permission requests overnight — by category, with caps, without granting unlimited authority.","url":"https://amux.io/guides/ai-agent-standing-approvals/","datePublished":"2026-09-27","dateModified":"2026-09-27","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
+
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"How to Configure AI Agent Standing Approvals","description":"Set up standing approvals in amux so AI coding agents can answer their own permission prompts during overnight and unattended runs.","step":[{"@type":"HowToStep","position":1,"name":"Open Settings > Approvals","text":"In the amux dashboard, go to Settings and select the Approvals tab. This is where all standing approvals for your fleet are defined and managed."},{"@type":"HowToStep","position":2,"name":"Create your first approval rule","text":"Click 'Add approval'. Give it a title (e.g. 'Run tests and linters'), choose a category (budget, customer_outbound, prod_data, credential, access, or decision), and write a plain-language sentence describing what is allowed."},{"@type":"HowToStep","position":3,"name":"Set limits and caps","text":"Add free-text limits (shown to agents verbatim when the rule fires), a max_per_day cap to limit how often the rule can fire in 24 hours, and a max_amount_usd cap if the rule covers spending. Add require_terms if the ask must contain specific words before the rule fires."},{"@type":"HowToStep","position":4,"name":"Set scope","text":"Choose global (all workers), group:<name> (workers in a specific group), or worker:<name> (one session only). Narrower scope means fewer agents can invoke the rule."},{"@type":"HowToStep","position":5,"name":"Monitor usage","text":"The Approvals tab shows a live feed of every time a standing approval fired, which agent asked, what they asked for, and whether the cap was still available. Review this after overnight runs to see what was auto-approved."}]}</script>
+
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What are AI agent standing approvals?","acceptedAnswer":{"@type":"Answer","text":"Standing approvals are pre-defined permission rules you set once in the amux dashboard. When an AI coding agent hits a request that matches a rule (running tests, creating a branch, calling a specific API), amux answers it automatically with your pre-set answer instead of pausing to ask you. Requests that do not match any rule still surface to you as normal."}},{"@type":"Question","name":"How do standing approvals differ from --yolo mode?","acceptedAnswer":{"@type":"Answer","text":"The --yolo flag (Claude Code's --dangerously-skip-permissions) grants unlimited permission to everything with no tracking and no caps. Standing approvals are categorical and bounded: you define exactly which classes of action are pre-approved, set per-day limits, dollar caps, and scope them to specific workers or groups. Agents operate within those defined boundaries; requests outside them still require your attention."}},{"@type":"Question","name":"What categories of actions can I pre-approve?","acceptedAnswer":{"@type":"Answer","text":"amux standing approvals cover six categories: budget (spending, API calls with cost), customer_outbound (emails, messages, external notifications), prod_data (reading or writing production data), credential (using stored API keys or secrets), access (file system, network, or service access), and decision (judgment calls about approach or scope). Each category is treated separately so you can pre-approve low-risk categories without touching high-risk ones."}},{"@type":"Question","name":"Can I limit how often a standing approval fires?","acceptedAnswer":{"@type":"Answer","text":"Yes. Each standing approval has a max_per_day field that caps how many times it can fire in a rolling 24-hour window. Once the cap is spent, the rule no longer auto-answers and the request surfaces to you as normal. This prevents runaway agents from invoking a broad rule hundreds of times in one session."}},{"@type":"Question","name":"Do standing approvals work with all AI coding agents?","acceptedAnswer":{"@type":"Answer","text":"Standing approvals work with any agent that routes escalations through amux's alert or needsyou channels — Claude Code, OpenAI Codex CLI, Antigravity CLI (formerly Gemini CLI), and any custom agent that calls the amux alert API. Agents that never surface requests to amux (purely autonomous --yolo sessions) do not interact with the approvals system."}},{"@type":"Question","name":"Can I scope a standing approval to just one agent?","acceptedAnswer":{"@type":"Answer","text":"Yes. Each approval has a scope field: global (all workers), group:<name> (a named agent group), or worker:<name> (a single named session). Scoping to a worker is useful when one agent handles a sensitive task that requires broader permissions than you would grant fleet-wide — for example, a dedicated deployment agent that is allowed to trigger CI/CD while other agents are not."}}]}</script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>AI Agent Standing Approvals</span></div>
+
+    <!-- EXP-099: top-of-page CTA on standing-approvals guide (Sept 2026) -->
+    <div style="background:#0d7c42;border-radius:8px;padding:1rem 1.2rem;margin-bottom:1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+      <span style="font-size:.9rem;color:#fff">Run your AI engineering team overnight. Standing approvals, self-healing, phone dashboard — open source and free.</span>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="typeof posthog!=='undefined'&&posthog.capture('exp099_standing_approvals_topofpage_cta_click')" style="background:#fff;color:#0d7c42;padding:0.45rem 1rem;border-radius:6px;font-size:.875rem;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0">View amux on GitHub &#9733;</a>
+    </div>
+
+    <h1>AI Agent Standing Approvals</h1>
+    <p class="subtitle">The single biggest reason overnight AI coding runs stall: agents pause and wait for a permission response that never comes. Standing approvals solve this — you define which action categories are pre-approved, set caps, and agents handle them without waking you up. Updated September 2026.</p>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Contents</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#problem" style="color:var(--dim);text-decoration:none;">The Overnight Hang Problem</a></li>
+        <li><a href="#what-they-are" style="color:var(--dim);text-decoration:none;">What Are Standing Approvals?</a></li>
+        <li><a href="#categories" style="color:var(--dim);text-decoration:none;">Approval Categories</a></li>
+        <li><a href="#configure" style="color:var(--dim);text-decoration:none;">How to Configure</a></li>
+        <li><a href="#scope" style="color:var(--dim);text-decoration:none;">Scope: Global, Group, Worker</a></li>
+        <li><a href="#caps" style="color:var(--dim);text-decoration:none;">Limits and Caps</a></li>
+        <li><a href="#monitoring" style="color:var(--dim);text-decoration:none;">Monitoring the Approval Feed</a></li>
+        <li><a href="#vs-yolo" style="color:var(--dim);text-decoration:none;">Standing Approvals vs. --yolo</a></li>
+        <li><a href="#recipes" style="color:var(--dim);text-decoration:none;">Recipes for Common Use Cases</a></li>
+        <li><a href="#faq" style="color:var(--dim);text-decoration:none;">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <h2 id="problem">The Overnight Hang Problem</h2>
+    <p>You queue 15 tasks, start your agent fleet at midnight, and go to sleep. At 2am, agent 3 hits an action it wants approval for — calling an external API, running a long-lived test suite, writing to a config file. It surfaces the request to you and waits. You are asleep. The agent sits idle for 6 hours. By morning, 14 tasks are untouched because agent 3 was the bottleneck for four downstream tasks.</p>
+    <p>This is the most common failure mode in overnight AI coding. It is not a model quality problem — the agent correctly identified it needed authorization. It is an authorization design problem: the only channel was synchronous, human-in-the-loop approval.</p>
+    <p>Standing approvals make certain authorization decisions asynchronous. You decide in advance which categories of action are acceptable, under what conditions, and with what limits. The agent calls the approval channel, amux checks the rules, and either answers automatically or surfaces the request to you if no rule covers it.</p>
+
+    <h2 id="what-they-are">What Are Standing Approvals?</h2>
+    <p>A standing approval is a rule you define once in the amux dashboard. It says: "For this category of action, if the agent's request matches these conditions, respond with this answer."</p>
+    <p>Each rule has:</p>
+    <ul>
+      <li><strong>Title</strong> — a human-readable name, e.g. "Run tests and linters"</li>
+      <li><strong>Allowed</strong> — a plain-language sentence describing what is allowed, shown to you and logged on each use</li>
+      <li><strong>Category</strong> — one of six categories (see below)</li>
+      <li><strong>Limits</strong> — free-text constraints shown verbatim to the agent when the rule fires</li>
+      <li><strong>Caps</strong> — structured enforcement: max uses per day, maximum dollar amount per request</li>
+      <li><strong>Scope</strong> — global, a specific group, or a specific worker</li>
+      <li><strong>Expiry</strong> — optional date after which the rule stops firing</li>
+    </ul>
+    <p>Every time the rule fires, amux logs it: which agent asked, what they asked for, whether the cap was still available. You get a usage feed, not blind automation.</p>
+
+    <h2 id="categories">Approval Categories</h2>
+    <p>amux organizes requests into six categories, matched against the agent's escalation text:</p>
+
+    <table style="width:100%;border-collapse:collapse;font-size:0.9rem;margin:1.5rem 0;">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border);">
+          <th style="text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;">Category</th>
+          <th style="text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;">Covers</th>
+          <th style="text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;">Risk level</th>
+          <th style="text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;">Typical use</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;"><code>access</code></td>
+          <td style="padding:0.5rem 0.75rem;">File, network, or service access</td>
+          <td style="padding:0.5rem 0.75rem;">Low</td>
+          <td style="padding:0.5rem 0.75rem;">Reading config files, running tests, using linters</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;"><code>credential</code></td>
+          <td style="padding:0.5rem 0.75rem;">Using stored API keys or secrets</td>
+          <td style="padding:0.5rem 0.75rem;">Medium</td>
+          <td style="padding:0.5rem 0.75rem;">Read-only calls to Stripe, Slack, internal APIs</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;"><code>budget</code></td>
+          <td style="padding:0.5rem 0.75rem;">Spending, paid API calls</td>
+          <td style="padding:0.5rem 0.75rem;">Medium</td>
+          <td style="padding:0.5rem 0.75rem;">Sending emails, calling paid inference APIs, purchasing</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;"><code>decision</code></td>
+          <td style="padding:0.5rem 0.75rem;">Judgment calls on approach or scope</td>
+          <td style="padding:0.5rem 0.75rem;">Medium</td>
+          <td style="padding:0.5rem 0.75rem;">Choosing an implementation approach, refactoring scope</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;"><code>prod_data</code></td>
+          <td style="padding:0.5rem 0.75rem;">Reading or writing production data</td>
+          <td style="padding:0.5rem 0.75rem;">High</td>
+          <td style="padding:0.5rem 0.75rem;">Read-only prod DB queries for diagnostic purposes</td>
+        </tr>
+        <tr>
+          <td style="padding:0.5rem 0.75rem;"><code>customer_outbound</code></td>
+          <td style="padding:0.5rem 0.75rem;">Emails, messages, external notifications</td>
+          <td style="padding:0.5rem 0.75rem;">High</td>
+          <td style="padding:0.5rem 0.75rem;">Automated status emails to a known-safe list</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Low-risk categories (<code>access</code>, <code>credential</code> for read-only) are safe to pre-approve broadly. High-risk categories (<code>prod_data</code>, <code>customer_outbound</code>) should use narrow scope, strict require_terms, and low max_per_day caps.</p>
+
+    <h2 id="configure">How to Configure Standing Approvals</h2>
+    <p>In the amux dashboard, go to <strong>Settings &rsaquo; Approvals</strong>. Click <strong>Add approval</strong>.</p>
+    <ol>
+      <li><strong>Title:</strong> Name the rule clearly — "Run test suite (max 10/day)" is better than "Tests".</li>
+      <li><strong>Allowed:</strong> Write a plain sentence that describes what you are permitting. This text is shown in the usage feed on every invocation: "Agent may run the full test suite and all configured linters."</li>
+      <li><strong>Category:</strong> Choose the category from the six options. This is how amux routes incoming requests to the right rules — choose the category that best matches what you are authorizing.</li>
+      <li><strong>Limits:</strong> Add human-readable constraints to show the agent alongside the approval. Example: "Read-only. Do not modify any database records." These are informational — they are logged, not enforced programmatically.</li>
+      <li><strong>Caps:</strong> Set <strong>max_per_day</strong> to limit fires in a rolling 24h window. Set <strong>max_amount_usd</strong> if the rule covers spending — the rule will not fire if the agent's ask names a dollar figure above the cap.</li>
+      <li><strong>Scope:</strong> Choose global, group, or worker (see Scope section below).</li>
+      <li>Click <strong>Save</strong>. The rule is active immediately for all running sessions in its scope.</li>
+    </ol>
+
+    <h2 id="scope">Scope: Global, Group, Worker</h2>
+    <p>Scope controls which agents can invoke a standing approval:</p>
+    <ul>
+      <li><strong>global</strong> — all workers in your fleet. Use for low-risk rules you are comfortable applying everywhere (running linters, reading config files, creating git branches).</li>
+      <li><strong>group:&lt;name&gt;</strong> — only workers in the named group. Use when one team of agents has permissions that others should not. Example: the <code>devops</code> group can trigger CI; other groups cannot.</li>
+      <li><strong>worker:&lt;name&gt;</strong> — one named session. Use for the most sensitive rules, where you want exactly one agent to have the permission and no others.</li>
+    </ul>
+    <p>Scoping to worker is also useful when you are testing a new rule — apply it to one agent overnight, review the usage log in the morning, then expand scope if the behavior looks correct.</p>
+
+    <h2 id="caps">Limits and Caps</h2>
+    <p>Two structured cap fields protect against a rule firing more than intended:</p>
+    <ul>
+      <li><strong>max_per_day</strong> — the rule fires at most N times in any rolling 24-hour window. When the cap is reached, the next matching request surfaces to you as normal. This prevents an agent that gets into a loop from invoking the same rule 200 times in one run.</li>
+      <li><strong>max_amount_usd</strong> — for budget-category rules, the rule will not fire if the agent's request names a dollar amount above this cap. The amount is parsed from the escalation text. Use this for rules that authorize spending: "send up to $5/month in transactional email" becomes a concrete enforcement boundary rather than just a note in the limits field.</li>
+    </ul>
+    <p>The <strong>require_terms</strong> field is a precondition: a comma-separated list of words or phrases, at least one of which must appear in the agent's request text before the rule fires. If you set <code>require_terms = "test suite,linter,pytest"</code>, the rule will only fire for requests that mention one of those terms. Requests that technically fall in the same category but do not match will surface for your review.</p>
+
+    <h2 id="monitoring">Monitoring the Approval Feed</h2>
+    <p>Every invocation of a standing approval is logged in the usage feed, accessible at <strong>Settings &rsaquo; Approvals &rsaquo; Usage</strong>. Each entry shows:</p>
+    <ul>
+      <li>The timestamp and which session asked</li>
+      <li>The full text of the agent's request</li>
+      <li>Which rule fired (or "cap reached" if the rule was exhausted)</li>
+      <li>Whether the rule actually answered the request or the cap prevented it</li>
+    </ul>
+    <p>After an overnight run, review the usage feed before the morning review of agent output. If a rule fired 40 times in one session, that agent was looping on something — investigate the session output to understand why. If a rule never fired, either the agents did not encounter that category, or the require_terms filter was too narrow.</p>
+    <p>The usage feed is also the right place to catch a rule that is scoped too broadly. If you see unexpected sessions invoking a rule you intended for a specific worker, narrow the scope.</p>
+
+    <h2 id="vs-yolo">Standing Approvals vs. --yolo</h2>
+    <p>Claude Code's <code>--dangerously-skip-permissions</code> flag (often called --yolo mode) grants unlimited permission to all actions with no tracking and no caps. Standing approvals are the bounded alternative:</p>
+
+    <table style="width:100%;border-collapse:collapse;font-size:0.9rem;margin:1.5rem 0;">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border);">
+          <th style="text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;"></th>
+          <th style="text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;">Standing approvals</th>
+          <th style="text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;">--yolo / --dangerously-skip-permissions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;font-weight:500;">Scope</td>
+          <td style="padding:0.5rem 0.75rem;">Defined categories only</td>
+          <td style="padding:0.5rem 0.75rem;">Everything</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;font-weight:500;">Uncovered requests</td>
+          <td style="padding:0.5rem 0.75rem;">Surface to you</td>
+          <td style="padding:0.5rem 0.75rem;">Auto-approved</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;font-weight:500;">Caps</td>
+          <td style="padding:0.5rem 0.75rem;">Per-day limits, dollar caps</td>
+          <td style="padding:0.5rem 0.75rem;">None</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;font-weight:500;">Audit trail</td>
+          <td style="padding:0.5rem 0.75rem;">Full usage feed</td>
+          <td style="padding:0.5rem 0.75rem;">None</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.75rem;font-weight:500;">Scope control</td>
+          <td style="padding:0.5rem 0.75rem;">Global, group, or per-worker</td>
+          <td style="padding:0.5rem 0.75rem;">Per-session flag</td>
+        </tr>
+        <tr>
+          <td style="padding:0.5rem 0.75rem;font-weight:500;">External escalations</td>
+          <td style="padding:0.5rem 0.75rem;">Covered by amux alert rules</td>
+          <td style="padding:0.5rem 0.75rem;">Not routed through amux</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Use <code>--yolo</code> for short, well-understood, low-stakes sessions in an isolated environment where you have reviewed the code and trust the task scope. Use standing approvals for long overnight runs, mixed-trust fleets, or any run where you want accountability and a cap on runaway behavior.</p>
+
+    <h2 id="recipes">Recipes for Common Use Cases</h2>
+
+    <h3>Recipe 1: Safe overnight feature development</h3>
+    <p>Three rules cover most feature-development overnight runs without exposing sensitive surfaces:</p>
+    <pre><code># Rule 1: Tests and linters
+Title:    Run tests and linters
+Category: access
+Allowed:  Agent may run the test suite and all configured linters.
+max_per_day: 20
+Scope:    global
+
+# Rule 2: Create branches and commits
+Title:    Git operations (branch, commit, push to feature branch)
+Category: access
+Allowed:  Agent may create branches, commit, and push to non-main branches.
+Limits:   Do not push to main. Do not force-push.
+max_per_day: 30
+Scope:    global
+
+# Rule 3: Read internal config
+Title:    Read configuration files
+Category: access
+Allowed:  Agent may read .env.example, config/, and docs/.
+Limits:   Read-only. Do not write to these paths.
+max_per_day: 50
+Scope:    global</code></pre>
+
+    <h3>Recipe 2: Outbound email (marketing agent)</h3>
+    <p>A dedicated session that sends transactional emails from a CRM-triggered queue:</p>
+    <pre><code>Title:    Send transactional email (from queue)
+Category: customer_outbound
+Allowed:  Agent may send transactional emails to addresses in the active queue.
+Limits:   Plain-text or HTML. No attachments over 5MB. One email per record.
+require_terms: transactional,queue,crm
+max_per_day: 200
+max_amount_usd: 5.00
+Scope:    worker:email-sender</code></pre>
+
+    <h3>Recipe 3: Read-only production data access (diagnostics agent)</h3>
+    <pre><code>Title:    Read production DB (diagnostics, read-only)
+Category: prod_data
+Allowed:  Agent may run SELECT queries on the production database for diagnostic purposes.
+Limits:   SELECT only. No INSERT, UPDATE, DELETE, or DDL. Queries must be under 10s.
+require_terms: SELECT,diagnostic,read-only
+max_per_day: 10
+Scope:    worker:prod-diagnostics</code></pre>
+
+    <h2 id="faq">Frequently Asked Questions</h2>
+
+    <h3>What are AI agent standing approvals?</h3>
+    <p>Standing approvals are pre-defined permission rules you set once in the amux dashboard. When an AI coding agent hits a request that matches a rule, amux answers it automatically. Requests that do not match any rule still surface to you. This lets overnight and unattended runs proceed without hanging on every permission prompt, while preserving your control over the requests that genuinely need a judgment call.</p>
+
+    <h3>How do standing approvals differ from --yolo mode?</h3>
+    <p>The <code>--dangerously-skip-permissions</code> flag grants unlimited permission to all actions with no tracking and no caps. Standing approvals are categorical and bounded: you specify exactly which categories are pre-approved, set per-day limits, dollar caps, and scope them to specific workers. Requests outside your defined rules still surface to you rather than being auto-approved.</p>
+
+    <h3>What categories of actions can I pre-approve?</h3>
+    <p>Six categories: <code>access</code> (file, network, service), <code>credential</code> (API keys, secrets), <code>budget</code> (spending, paid APIs), <code>decision</code> (approach, scope), <code>prod_data</code> (production data), and <code>customer_outbound</code> (emails, messages). Each is treated separately — you can pre-approve <code>access</code> globally without touching <code>customer_outbound</code>.</p>
+
+    <h3>Can I limit how often a standing approval fires?</h3>
+    <p>Yes. Set <code>max_per_day</code> on any rule. Once the cap is spent in a rolling 24-hour window, the rule stops firing and subsequent matching requests surface to you. For budget rules, set <code>max_amount_usd</code> to add a dollar-amount guard on top of the per-day cap.</p>
+
+    <h3>Do standing approvals work with Codex and Gemini CLI?</h3>
+    <p>Yes. Standing approvals work with any agent that routes escalations through amux's alert or needsyou channels: Claude Code, OpenAI Codex CLI, Antigravity CLI (formerly Gemini CLI), and any custom agent that calls the amux alert API.</p>
+
+    <h3>Can I scope a standing approval to one agent?</h3>
+    <p>Yes. Set scope to <code>worker:&lt;session-name&gt;</code> to limit the rule to a single named session. This is the right approach for the most sensitive rules, where you want exactly one agent to have a permission and no others.</p>
+
+    <h2>Related Resources</h2>
+    <ul>
+      <li><a href="/guides/ai-coding-agents-overnight/">Running AI Coding Agents Overnight Unattended</a></li>
+      <li><a href="/guides/ai-agent-owner-alerts/">Owner Alerts: Push, Email and iMessage for Agent Escalations</a></li>
+      <li><a href="/guides/ai-agent-quality-gates/">AI Agent Quality Gates</a></li>
+      <li><a href="/for/startup-founders/">amux for Startup Founders</a></li>
+      <li><a href="/concierge/">amux Concierge — Managed Setup</a></li>
+    </ul>
+  </main>
+
+  <footer class="sub-footer">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <a href="/guides/">Guides</a>
+          <a href="/compare/">Compare</a>
+          <a href="/blog/">Blog</a>
+          <a href="/changelog/">Changelog</a>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Product</div>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+          <a href="/docs/">Docs</a>
+          <a href="/concierge/">Concierge</a>
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>amux &copy; 2026 &mdash; MIT + Commons Clause. <a href="/privacy/">Privacy</a></span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

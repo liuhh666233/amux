@@ -93,7 +93,9 @@ pub mod ids {
     pub const INVARIANTS: &str = "invariants-monitor";
     pub const SCHEDULER: &str = "scheduler";
     pub const HOST_METRICS: &str = "host-metrics";
+    pub const TRACE_ARCHIVE: &str = "trace-archive";
     pub const HOST_GUARD: &str = "host-guard";
+    pub const GOAL_KEEPER: &str = "goal-keeper";
     pub const ORCH_RUNTIME: &str = "orchestrator-runtime";
     pub const PROJECT_EXECUTION: &str = "project-execution";
     pub const EVENT_PROCESSORS: &str = "event-processors";
@@ -168,7 +170,9 @@ pub const ALL_IDS: &[&str] = &[
     ids::CONTEXT_HEALTH,
     ids::DISK_WATCH,
     ids::HOST_METRICS,
+    ids::TRACE_ARCHIVE,
     ids::HOST_GUARD,
+    ids::GOAL_KEEPER,
     ids::STATUS_HISTORY,
     ids::TOKEN_LEDGER,
     ids::BOARD_HYGIENE,
@@ -629,6 +633,18 @@ pub const CATALOG: &[Doc] = &[
         detail: Some("/api/reclaim/scan"),
     },
     Doc {
+        id: ids::TRACE_ARCHIVE,
+        name: "Trace archive",
+        purpose: "Keeps every agent trace. Sets Claude Code's cleanupPeriodDays when unset (it deletes sessions after 30 days by default) and warns when it is under a year. Gzips each Claude transcript, subagent transcript and Codex rollout that has been quiet for 2 hours into ~/.amux/traces (backed up with ~/.amux), indexed by worker with message, tool-call, error and token counts; marks traces whose original was deleted. Oldest first, bounded bytes per tick, paused while the host is critical.",
+        env: &[
+            EnvControl { var: "AMUX_TRACE_ARCHIVE_SECS", effect: "0 disables archiving and the retention guard", off: Some("0") },
+            EnvControl { var: "AMUX_TRACE_ARCHIVE_TICK_MB", effect: "source MB archived per 10-minute tick, default 400", off: None },
+            EnvControl { var: "AMUX_TRACE_ARCHIVE_QUIET_S", effect: "seconds a transcript must be unchanged before archiving, default 7200", off: None },
+        ],
+        pref: None,
+        detail: Some("/api/traces"),
+    },
+    Doc {
         id: ids::HOST_METRICS,
         name: "Host metrics history",
         purpose: "Samples the host analysis /api/metrics/host serves (CPU, load, memory, swap, disk, process counts) into host_metrics, so utilization over time is answerable rather than only right now. A failed probe is recorded as an unmeasured row, never as a gap.",
@@ -639,6 +655,19 @@ pub const CATALOG: &[Doc] = &[
         }],
         pref: None,
         detail: Some("/api/metrics/host/history"),
+    },
+    Doc {
+        id: ids::GOAL_KEEPER,
+        name: "Goal keeper",
+        purpose: "Continues a Claude worker whose owner-set /goal is not met (latest transcript goal_status met:false and the footer shows /goal active) once it has been idle 2 minutes, because Claude Code's own goal loop does not survive a resume. At most one continue per 10 minutes; two continues with no tool call stop it for that goal until the goal changes or the owner writes. Reaches isolated workers as owner configuration (goal: guard).",
+        env: &[
+            EnvControl { var: "AMUX_GOAL_KEEPER_SECS", effect: "0 disables the keeper", off: Some("0") },
+            EnvControl { var: "AMUX_GOAL_CONTINUE", effect: "0 opts a worker, group or the fleet out (scoped)", off: None },
+            EnvControl { var: "AMUX_GOAL_CONTINUE_IDLE_S", effect: "idle seconds before a continue, default 120", off: None },
+            EnvControl { var: "AMUX_GOAL_CONTINUE_INTERVAL_S", effect: "minimum seconds between continues, default 600", off: None },
+        ],
+        pref: None,
+        detail: None,
     },
     Doc {
         id: ids::HOST_GUARD,

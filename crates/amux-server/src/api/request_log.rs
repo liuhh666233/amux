@@ -2467,6 +2467,10 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/sessions/{name}/chat/stream",
         methods: &["GET"],
     },
+    RouteEntry {
+        path: "/api/sessions/{name}/chat/interrupt",
+        methods: &["POST"],
+    },
     // -- saved messages / habits / token-baseline reset (AMUX-2871)
     RouteEntry {
         path: "/api/saved-messages",
@@ -2614,6 +2618,23 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
     RouteEntry {
         path: "/api/grants/{id}/reject",
         methods: &["POST"],
+    },
+    // AMUX-5270 standing approvals.
+    RouteEntry {
+        path: "/api/approvals/standing",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/approvals/standing/uses",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/approvals/standing/check",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/approvals/standing/{id}",
+        methods: &["GET", "PATCH", "DELETE"],
     },
     RouteEntry {
         path: "/api/connectors",

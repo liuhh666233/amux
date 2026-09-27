@@ -295,7 +295,7 @@ async fn view(req: Request) -> Response {
             // the local checkout is behind origin/main (graft-push workflow).
             let cwd_qs = qs_get(&qs, "cwd").unwrap_or("");
             let fpath_qs = qs_get(&qs, "path").unwrap_or("");
-            if !cwd_qs.is_empty() && !fpath_qs.is_empty() {
+            if !fpath_qs.is_empty() && (!cwd_qs.is_empty() || Path::new(fpath_qs).is_absolute()) {
                 if let Some(resp) = view_from_git(cwd_qs, fpath_qs).await {
                     return resp;
                 }

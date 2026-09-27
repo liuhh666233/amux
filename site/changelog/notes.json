@@ -1,5 +1,59 @@
 [
   {
+    "hash": "498fbbc36803bf7ceb4d9c8cb513ecf9d74207d6",
+    "short": "498fbbc3",
+    "title": "Standing approvals: pre-approve agent actions by category",
+    "date": "2026-09-27",
+    "type": "feat",
+    "tags": ["approvals", "overnight", "automation", "unattended"],
+    "description": "Define standing approval rules in Settings > Approvals and amux will automatically answer matching agent escalations during overnight and unattended runs. Rules are scoped by category (access, credential, budget, production data, external outbound), support per-day caps and dollar-amount limits, and can be scoped to a specific worker, group, or fleet-wide. Every use is logged in a usage feed so you can review what was auto-approved after a run. Agents that hit a request outside your defined rules still surface to you as normal."
+  },
+  {
+    "hash": "aaa0f8b597d92665b54f5eff91cbca1722def6c7",
+    "short": "aaa0f8b5",
+    "title": "Goal keeper: the harness re-prompts agents until a goal is met",
+    "date": "2026-09-27",
+    "type": "feat",
+    "tags": ["goal", "automation", "steering", "overnight"],
+    "description": "Set a goal for a worker session using the /goal command and the amux harness will automatically continue the session if the goal is not met when the agent stops. For example, '/goal all tests pass' keeps the agent working through failures until the test suite is green, rather than stopping at the first green run. The goal keeper handles premature exits, context overflows, and intermediate stops without any manual intervention."
+  },
+  {
+    "hash": "fed54417c03076354f89986b6588057782d15ec6",
+    "short": "fed54417",
+    "title": "Chat workers work offline with message queuing",
+    "date": "2026-09-27",
+    "type": "feat",
+    "tags": ["chat", "offline", "workers", "dashboard"],
+    "description": "Chat workers (the conversational agent type alongside coding workers) now support offline operation with a persistent message queue. Messages sent to a chat worker while it is offline are queued and delivered when it reconnects, matching the offline behavior of coding workers. Combined with live streaming (turns render incrementally as they arrive) and turn retry (an interrupted turn can be re-sent without retyping), chat workers are now reliable for long-running asynchronous tasks."
+  },
+  {
+    "hash": "db218ce8d31fffa631bc790adde7c4fa8511586e",
+    "short": "db218ce8",
+    "title": "Collapsible tool-call blocks in the peek view",
+    "date": "2026-09-27",
+    "type": "feat",
+    "tags": ["dashboard", "peek", "ux"],
+    "description": "Tool-call output blocks in the session peek view are now collapsible. Long bash output, file reads, and multi-step tool sequences fold to a one-line summary and expand on click. This makes it significantly easier to scan an agent's recent turns without scrolling through hundreds of lines of command output — the decision-making turns are visible at a glance while details are one click away."
+  },
+  {
+    "hash": "57d5517027cd78bb463a6b688def272d0de5a7d3",
+    "short": "57d55170",
+    "title": "Workers-per-row layout override in Settings > Device",
+    "date": "2026-09-27",
+    "type": "feat",
+    "tags": ["dashboard", "layout", "mobile"],
+    "description": "A new device-level setting lets you override the automatic workers-per-row calculation in the dashboard grid. Set it to 1 on a phone for a single-column view, or push it to 4 on a wide monitor to pack more sessions onto one screen. The setting is per-device (stored locally) and does not affect other viewers of the same dashboard."
+  },
+  {
+    "hash": "cda5e753d46ca07f53e3cf9e068f65260fa12e04",
+    "short": "cda5e753",
+    "title": "Stalled builder is automatically kickstarted instead of just reported",
+    "date": "2026-09-27",
+    "type": "fix",
+    "tags": ["builder", "reliability", "deploy"],
+    "description": "When the amux auto-builder stalls without producing a new binary (detected by comparing the last build timestamp against recent commits), the runtime job now sends a kickstart signal instead of only logging a warning. This prevents the silent build-lag issue where a commit was pushed, the builder was stuck, and the server kept serving the old binary with no user-visible indication that anything was wrong."
+  },
+  {
     "hash": "66ace7f7",
     "short": "66ace7f7",
     "title": "Pinned notes: floating macOS overlays from the dashboard",

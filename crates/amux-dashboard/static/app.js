@@ -613,6 +613,7 @@ let filterStatuses = new Set();    // 'working' | 'blocked' | 'waiting' | 'idle'
 function _sessStatusKey(s) {
   if (s.status === 'starting') return 'starting';
   if (!s.running) return 'stopped';
+  if (s.agent_state === 'unknown') return 'unknown';
   if (s.status === 'rate_limited') return 'rate_limited';
   if (s.status === 'api_error') return 'api_error';
   if (s.status === 'error') return 'error';
@@ -5340,6 +5341,17 @@ async function _openStatusDetail(name) {
         + (report.sequence ? ' · event ' + esc(String(report.sequence)) : '')
         + (report.applied && ['native_hook','report'].includes(reason.decided_by) ? '' : ' · fallback in use') + '</p>';
       if (!report.native && evidence.running) html += '<p>Native hook evidence is unavailable; process, transcript and terminal observations are the fallback.</p>';
+      const pr = reason.projection;
+      if (pr) {
+        const t = pr.telemetry || {};
+        const row = (k, v) => '<tr><th style="text-align:left;padding:2px 12px 2px 0;font-weight:500;color:var(--dim)">' + k + '</th><td>' + esc(String(v ?? '—')) + '</td></tr>';
+        html += '<table class="status-projection" style="margin:6px 0 10px;font-size:0.85rem">'
+          + row('Agent', pr.agent_state) + row('Process', pr.process_state) + row('Turn', pr.turn_state)
+          + row('Activity', (pr.activity || '').replaceAll('_', ' ')) + row('Authority', pr.authority)
+          + row('Telemetry', (t.health || '') + (t.reason ? ' · ' + t.reason : ''))
+          + row('Last progress', pr.last_progress_at ? timeAgo(pr.last_progress_at) : 'no event from this run')
+          + '</table>';
+      }
       if (evidence.native_events?.length) html += '<details><summary>Recent native events (' + evidence.native_events.length + ')</summary><ol>' + evidence.native_events.slice(0,12).map(e => '<li>' + esc(e.event) + ' → ' + esc(e.state) + ' · ' + esc(new Date(e.event_ts * 1000).toLocaleTimeString()) + '</li>').join('') + '</ol></details>';
     } else html += '<p role="alert">Live status could not be verified. Retry when connected.</p>';
     const cards = Array.isArray(boardRes) ? boardRes : [];
@@ -5381,7 +5393,15 @@ function _workerExecutionBadge(s, runtimeBoard, opts) {
     ? '<span class="status-badge blocked" title="Pause has not finished stopping this worker. Retry Pause.">pause incomplete</span>'
     : '<span class="status-badge paused">paused</span>';
   let badge = '';
-  if (s.status === 'starting') badge = '<span class="status-badge idle">starting</span>';
+  const tele = s.telemetry || {};
+  // MSG-69352 items 2 and 4: a guess on an unhealthy status channel is shown
+  // as a guess, and a finished turn waiting on its own background shell is
+  // not "working".
+  if (s.running && s.agent_state === 'unknown') badge = '<button type="button" class="status-badge unknown" title="'
+    + esc('Agent state unknown: only a screen guess (' + (s.status || '?') + ') is available and the status channel is ' + (tele.health || 'unmeasured') + '. ' + (tele.reason || '') + ' Automation will not act on it.')
+    + '" onclick="event.stopPropagation();_openStatusDetail(\'' + escJs(s.name) + '\')">unknown ▾</button>';
+  else if (s.running && s.status === 'active' && s.activity === 'background_shell') badge = '<span class="status-badge background" title="The turn is finished; a background shell it started is still running. The agent resumes on its own when that ends.">background job</span>';
+  else if (s.status === 'starting') badge = '<span class="status-badge idle">starting</span>';
   else if (s.status === 'waiting') badge = '<span class="status-badge waiting"' + _waitingTitle(s) + '>' + _waitingLabel(s) + '</span>';
   else if (!s.running) badge = '<span class="status-badge idle">stopped</span>';
   else if (s.status === 'error') badge = '<button type="button" class="status-badge blocked" title="' + esc(s.error_detail || s.state_detail || 'Worker failed; inspect the terminal for the provider error') + '" onclick="event.stopPropagation();_openStatusDetail(\'' + escJs(s.name) + '\')">error ▾</button>';
@@ -5395,6 +5415,8 @@ function _workerExecutionBadge(s, runtimeBoard, opts) {
   else if (s.status === 'api_error') badge = `<button type="button" class="status-badge rate-limited" title="API Error ${esc(s.api_error_code || '5xx')} — server-side and retryable. Send &quot;continue&quot;." onclick="event.stopPropagation();_openStatusDetail('${escJs(s.name)}')">API ${esc(s.api_error_code || '5xx')} ▾</button>`;
   else if (s.status === 'idle')    badge = '<span class="status-badge idle"' + _idleMovedTitle(s) + '>idle' + _idleMovedSuffix(s) + '</span>';
 
+  if (s.running && (tele.health === 'degraded' || tele.health === 'missing')) badge += '<span class="status-badge telemetry-warn" title="'
+    + esc('Status channel ' + tele.health + ': ' + (tele.reason || '') + ' The status shown is ' + (s.status_authority || 'inferred') + '.') + '">⚠ telemetry</span>';
   // The worker-details header makes the pill itself the entry to this
   // evidence (updatePeekStatus), so it asks for no separate ⓘ button.
   if (opts && opts.inspect === false) return badge;
@@ -6002,6 +6024,7 @@ function render() {
   const focusedId = _active && _active.id ? _active.id : null;
   updateActiveCount();
   updateRateLimitPill();
+  updateTelemetryPill();
   // Active-filter preview chips (provider/model/log-search) + Filters button badge
   renderActiveFilters();
   // Build tag filter bar
@@ -8232,16 +8255,83 @@ async function refreshHostPressure() {
 }
 function showHostPressure() {
   const p = _hostPressure || {};
-  const lines = [(p.level || 'unknown').toUpperCase() + ': ' + ((p.reasons || []).join('; ') || 'no pressure')];
+  const r = p.readings || {};
+  let html = '<ul class="chip-detail-list">' + ((p.reasons || []).map(x => '<li>' + esc(x) + '</li>').join('') || '<li>No pressure.</li>') + '</ul>';
+  html += '<p class="ui-help">Load ' + (r.load5 != null ? r.load5.toFixed(1) : '?') + ' on ' + (r.ncpu || '?') + ' cores · memory level '
+    + (r.mem_level ?? '?') + ' · ' + (r.disk_free_gb != null ? Math.round(r.disk_free_gb) + ' GiB free' : 'disk ?') + '</p>';
+  if (p.level === 'critical') html += '<p>Automated dispatch, schedules and worker starts are paused until this eases. Your own actions are not affected.</p>';
   const run = p.runaways || [];
-  if (run.length) lines.push(run.length + ' long-running worker process' + (run.length === 1 ? '' : 'es') + ': '
-    + run.slice(0, 3).map(x => x.worker + ' ' + (x.command || '').split('/').pop() + ' (' + x.avg_cores + ' cores, ' + x.action + ')').join(', '));
-  const held = Object.entries(p.deferred || {}).map(([k, v]) => k + ' ' + v).join(', ');
-  if (held) lines.push('Deferred ticks: ' + held);
-  showToast(lines.join(' · '));
+  if (run.length) html += '<h4>Long-running worker processes</h4><ul class="chip-detail-list">' + run.map(x =>
+    '<li><div class="chip-detail-row"><strong>' + esc(x.worker) + '</strong><span class="ui-help">' + esc((x.command || '').split('/').pop()) + '</span></div>'
+    + '<p class="ui-help">' + esc(x.avg_cores + ' cores for ' + _fmtDur(x.elapsed_s * 1000) + ' · nice ' + x.nice + ' · ' + x.action.replaceAll('_', ' ')) + '</p></li>').join('') + '</ul>';
+  const held = Object.entries(p.deferred || {});
+  if (held.length) html += '<h4>Deferred automated ticks</h4><p class="ui-help">' + held.map(([k, v]) => esc(k) + ' ' + v).join(' · ') + '</p>';
+  _chipDetailModal('host-pressure-detail', 'Host ' + (p.level || 'unknown'), p.measured === false ? (p.why_unmeasured || 'not measured') : '', html);
 }
 setInterval(refreshHostPressure, 60000);
 setTimeout(refreshHostPressure, 3000);
+// STATUS COVERAGE CHIP (MSG-69352 item 1). How many running workers have a
+// healthy status channel. Hidden while every hooked worker is healthy;
+// computed from the session list, so it costs no request.
+function updateTelemetryPill() {
+  const pill = document.getElementById('telemetry-pill');
+  const txt = document.getElementById('telemetry-pill-text');
+  if (!pill || !txt) return;
+  const live = sessions.filter(s => s.running && !s.archived && s.telemetry && s.telemetry.health && s.telemetry.health !== 'unsupported');
+  const bad = live.filter(s => s.telemetry.health === 'degraded' || s.telemetry.health === 'missing');
+  if (!bad.length) { pill.classList.remove('show'); return; }
+  txt.textContent = 'Status ' + (live.length - bad.length) + '/' + live.length;
+  const cnt = document.getElementById('telemetry-pill-count');
+  if (cnt) cnt.textContent = String(bad.length);
+  pill.title = bad.map(s => s.name + ': ' + s.telemetry.health).join('\n') + '\n(status for these is a screen guess; tap for detail)';
+  pill.setAttribute('aria-label', bad.length + ' workers without a healthy status channel');
+  pill.classList.add('show');
+}
+// A header chip's detail, as the standard dialog (docs/ui-style-guide.md:
+// .modal-overlay > .modal > header / body / footer). A toast was the wrong
+// shape: on a phone it covered the list, vanished, and could not be acted on
+// (Ethan, 2026-09-26: "pressing 1 should open a modal").
+function _chipDetailModal(id, title, subtitle, bodyHtml) {
+  document.getElementById(id)?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = id; overlay.className = 'modal-overlay active';
+  overlay.innerHTML = '<section class="modal chip-detail" role="dialog" aria-modal="true" aria-labelledby="' + id + '-title">'
+    + '<header class="modal-header"><div><h3 id="' + id + '-title">' + esc(title) + '</h3>'
+    + (subtitle ? '<p class="ui-help">' + esc(subtitle) + '</p>' : '') + '</div>'
+    + '<button class="modal-close" aria-label="Close">×</button></header>'
+    + '<div class="modal-body">' + bodyHtml + '</div>'
+    + '<footer class="modal-footer"><span class="ui-help"></span><button class="btn" data-close>Close</button></footer></section>';
+  const close = () => overlay.remove();
+  overlay.onclick = e => { if (e.target === overlay) close(); };
+  overlay.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+  document.body.appendChild(overlay);
+  overlay.querySelector('.modal-close').onclick = close;
+  overlay.querySelector('[data-close]').onclick = close;
+  overlay.querySelector('.modal-close').focus();
+  return overlay;
+}
+function showTelemetryDetail() {
+  const live = sessions.filter(s => s.running && !s.archived && s.telemetry && s.telemetry.health);
+  const hooked = live.filter(s => s.telemetry.health !== 'unsupported');
+  const bad = hooked.filter(s => s.telemetry.health === 'degraded' || s.telemetry.health === 'missing');
+  const counts = {};
+  live.forEach(s => { counts[s.telemetry.health] = (counts[s.telemetry.health] || 0) + 1; });
+  const ago = sec => sec == null ? 'no report from this run' : 'last report ' + _fmtDur(Math.round(sec) * 1000) + ' ago';
+  let html = '<p class="ui-help">' + Object.entries(counts).map(([k, v]) => v + ' ' + k).join(' · ') + '</p>';
+  if (!bad.length) html += '<p>Every running worker with status hooks is reporting. Nothing is being guessed from the screen.</p>';
+  else html += '<p>These workers\' status is being read from their terminal, so it may be wrong. Automation will not dispatch to one it cannot see is idle.</p>'
+    + '<ul class="chip-detail-list">' + bad.map(s => {
+      const t = s.telemetry;
+      return '<li><div class="chip-detail-row"><strong>' + esc(s.name) + '</strong>'
+        + '<span class="status-badge ' + (t.health === 'missing' ? 'unknown' : 'telemetry-warn') + '">' + esc(t.health) + '</span>'
+        + '<span class="ui-help">' + esc((s.agent_state || s.status || '') + ' · ' + (s.status_authority || 'inferred') + ' · ' + ago(t.last_report_age_s)) + '</span></div>'
+        + '<p class="ui-help">' + esc(t.reason || '') + '</p>'
+        + '<div class="ui-guide-row"><button class="btn" onclick="document.getElementById(\'telemetry-detail\')?.remove();openPeek(\'' + escJs(s.name) + '\')">Open worker</button>'
+        + '<button class="btn" onclick="document.getElementById(\'telemetry-detail\')?.remove();_openStatusDetail(\'' + escJs(s.name) + '\')">Status detail</button></div></li>';
+    }).join('') + '</ul>';
+  _chipDetailModal('telemetry-detail', 'Status coverage',
+    (hooked.length - bad.length) + ' of ' + hooked.length + ' running workers are reporting their status', html);
+}
 function _scrollToFirstRateLimited() {
   const target = sessions.find(s => s.rate_limited_until) || sessions.find(s => s.credit_limited);
   if (!target) return;
@@ -12190,7 +12280,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1138';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1143';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -12325,6 +12415,7 @@ async function _offlineTrimToCap() {
   const names = Object.keys(_peekIndex).sort((a, b) => (_peekIndex[b].time||0) - (_peekIndex[a].time||0));
   for (const n of names.slice(_offlineCap)) {
     try { _idb.del('peek_' + n); } catch(e) {}
+    try { _idb.del('chat_' + n); } catch(e) {}
     try { _idb.del('file_' + n); } catch(e) {}
     delete _peekIndex[n];
   }
@@ -12350,8 +12441,9 @@ function _linkIsCheap() {
 // Priority: what you'd actually want offline, in order — sessions doing work
 // now, then ones you recently looked at, then the rest.
 function _prefetchOrder() {
-  // Only terminal-rendered workers have a peek frame worth saving offline.
-  const running = (sessions || []).filter(s => s.running && _workerRenderer(s.name) === 'terminal');
+  // Terminal workers save their scrollback; chat workers save their
+  // conversation (chat_<name>). Other renderers have nothing to save.
+  const running = (sessions || []).filter(s => s.running && ['terminal', 'chat'].includes(_workerRenderer(s.name)));
   const recent = new Set([peekSession, _lastPeekedSession].filter(Boolean));
   const rank = s => (s.status === 'active' || s.status === 'waiting' ? 0 : recent.has(s.name) ? 1 : 2);
   return running.sort((a, b) => rank(a) - rank(b) || (b.last_activity || 0) - (a.last_activity || 0));
@@ -12373,6 +12465,20 @@ async function _offlinePrefetch(manual) {
   const worker = async () => {
     while (list.length && !_prefetchAbort) {
       const s = list.shift();
+      if (_workerRenderer(s.name) === 'chat') {
+        try {
+          const r = await fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/chat?limit=' + _CHAT_CACHE_MSGS, { headers: _authHeaders() });
+          if (r.ok) {
+            const d = await r.json();
+            const before = _peekIndex[s.name] && _peekIndex[s.name].bytes;
+            await _chatCacheSave(s.name, d.messages || []);
+            const now = _peekIndex[s.name] && _peekIndex[s.name].bytes;
+            if (now === before) unchanged++; else { fetched++; bytes += now || 0; }
+          }
+        } catch (e) { /* skip; a dropped link should not kill the pass */ }
+        done++; report();
+        continue;
+      }
       try {
         const prev = _peekIndex[s.name];
         const h = _authHeaders();
@@ -12408,10 +12514,10 @@ async function _offlinePrefetch(manual) {
   // Evict stopped/vanished sessions and trim to the cap (oldest first).
   const live = new Set((sessions || []).filter(s => s.running).map(s => s.name));
   for (const name of Object.keys(_peekIndex)) {
-    if (!live.has(name)) { try { _idb.del('peek_' + name); } catch(e) {} delete _peekIndex[name]; }
+    if (!live.has(name)) { try { _idb.del('peek_' + name); _idb.del('chat_' + name); } catch(e) {} delete _peekIndex[name]; }
   }
   const names = Object.keys(_peekIndex).sort((a,b) => (_peekIndex[b].time||0) - (_peekIndex[a].time||0));
-  for (const n of names.slice(_offlineCap)) { try { _idb.del('peek_' + n); } catch(e) {} delete _peekIndex[n]; }
+  for (const n of names.slice(_offlineCap)) { try { _idb.del('peek_' + n); _idb.del('chat_' + n); } catch(e) {} delete _peekIndex[n]; }
   _peekIndexSave();
   _prefetchRunning = false;
   if (manual) {
@@ -12471,14 +12577,68 @@ function _workerRenderer(name) {
 }
 
 // Chat view state. One mounted view at a time, the one in the peek overlay.
-const _chat = { name: null, es: null, messages: [], streaming: null, loadedAt: 0, busy: false, queued: 0, gen: 0 };
+//
+// STREAMING (AMUX-5263). The server sends typed, seq-stamped events (see
+// crates/amux-server/src/api/chat_stream.rs). `_chatApply` folds them into the
+// live turn exactly as the server's `Assembly::apply` does, and `cursor`
+// (epoch:seq) is the last event applied, so a reconnect resumes from it
+// without duplicates and a `gap` refetches history instead of guessing.
+// Rendering is incremental: finished messages are built once; the live reply
+// repaints at most once per animation frame, and only its unsettled tail is
+// re-parsed (settled markdown blocks are frozen DOM). The finished message is
+// rendered from its full text, so it is what a full re-render produces.
+const _chat = { name: null, es: null, messages: [], streaming: null, loadedAt: 0, busy: false, queued: 0, gen: 0,
+  cursor: '', stick: true, unseen: false, raf: 0, onScroll: null, live: null, offlineNote: '' };
+
+// OFFLINE PARITY WITH CODING WORKERS (Ethan 2026-09-26: "make sure amux chat
+// has all the same offline capabilities as coding too"). A coding worker's
+// scrollback is saved to IndexedDB (`peek_<name>`), prefetched for offline,
+// counted against the offline cap and painted instantly on open. A chat
+// worker had none of that: offline it showed "Could not load the chat". Its
+// conversation is now saved as `chat_<name>` under the same index, cap and
+// eviction, and painted from the cache when the server cannot be reached.
+const _CHAT_CACHE_MSGS = 200;
+async function _chatCacheSave(name, messages) {
+  if (!name || !Array.isArray(messages)) return;
+  const kept = messages.slice(-_CHAT_CACHE_MSGS);
+  const rec = { messages: kept, time: Date.now(), offline: true };
+  try {
+    await _idb.set('chat_' + name, rec);
+    await _peekIndexLoad();
+    _peekIndex[name] = { etag: '', time: rec.time, bytes: JSON.stringify(kept).length, kind: 'chat' };
+    _peekIndexSave();
+  } catch (e) {}
+}
+async function _chatCacheGet(name) {
+  try { return await _idb.get('chat_' + name); } catch (e) { return null; }
+}
+// Paint the saved conversation. `reason` becomes the note above it.
+async function _chatPaintCached(name, reason) {
+  const gen = _chat.gen;
+  const rec = await _chatCacheGet(name);
+  if (!rec || !Array.isArray(rec.messages) || gen !== _chat.gen || _chat.name !== name) return false;
+  if (_chat.loadedAt && !reason) return false;   // the live snapshot already won
+  _chat.messages = rec.messages;
+  _chat.offlineNote = reason ? reason + ' Showing the conversation saved ' + _chatTime(rec.time / 1000) + '.' : '';
+  hidePeekLoading();
+  _chatRender();
+  return true;
+}
 
 function _chatUnmount() {
   if (_chat.es) { try { _chat.es.close(); } catch (e) {} }
-  _chat.es = null; _chat.name = null; _chat.messages = []; _chat.streaming = null; _chat.gen++;
-  for (const k in _chatToolsOpen) delete _chatToolsOpen[k];
+  if (_chat.raf) { cancelAnimationFrame(_chat.raf); clearTimeout(_chat.raf); }
   const body = document.getElementById('peek-body');
+  if (body && _chat.onScroll) body.removeEventListener('scroll', _chat.onScroll);
+  _chat.es = null; _chat.name = null; _chat.messages = []; _chat.streaming = null; _chat.gen++;
+  _chat.cursor = ''; _chat.stick = true; _chat.unseen = false; _chat.raf = 0; _chat.onScroll = null; _chat.live = null;
+  _chat.loadedAt = 0; _chat.offlineNote = ''; _chat.pendingShown = 0;
   if (body) body.classList.remove('peek-chat');
+}
+
+function _chatCursorParts(c) {
+  const i = (c || '').lastIndexOf(':');
+  return i < 0 ? { epoch: '', seq: 0 } : { epoch: c.slice(0, i), seq: +c.slice(i + 1) || 0 };
 }
 
 async function _chatLoad(name) {
@@ -12489,55 +12649,108 @@ async function _chatLoad(name) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     d = await r.json();
   } catch (e) {
-    if (gen === _chat.gen && _chat.name === name) _chatRender('Could not load the chat: ' + e.message);
+    if (gen !== _chat.gen || _chat.name !== name) return;
+    const why = (typeof online !== 'undefined' && !online) ? 'Offline.' : 'Could not reach the server (' + e.message + ').';
+    if (!(await _chatPaintCached(name, why))) _chatRender('Could not load the chat: ' + e.message);
     return;
   }
   if (gen !== _chat.gen || _chat.name !== name) return;
   hidePeekLoading();
+  _chat.offlineNote = '';
   _chat.messages = d.messages || [];
+  _chatCacheSave(name, _chat.messages);
   _chat.busy = !!d.busy; _chat.queued = d.queued || 0;
-  _chat.streaming = d.streaming && d.streaming.turn_id ? { turn_id: d.streaming.turn_id, text: d.streaming.text || '' } : null;
+  _chat.streaming = d.streaming && d.streaming.turn_id ? _chatNewTurn(d.streaming) : null;
   _chat.loadedAt = Date.now();
+  // The snapshot matches this cursor exactly; the stream resumes from it.
+  const reconnect = !_chat.es || d.cursor !== _chat.cursor;
+  _chat.cursor = d.cursor || '';
   _chatRender();
+  if (reconnect) _chatConnect(name);
+}
+
+// A live turn in the server's Assembly shape (a snapshot, or a fresh turn).
+function _chatNewTurn(src) {
+  const s = src || {};
+  return { turn_id: s.turn_id || '', text: s.text || '', thinking: s.thinking || '',
+    thinking_truncated: s.thinking_truncated || 0, tools: (s.tools || []).map(t => Object.assign({}, t)),
+    usage: s.usage || null, limit: s.limit || null, error: s.error || null, phase: s.phase || '', interrupted: false };
+}
+
+// Mirror of chat_stream.rs `Assembly::apply`. Keep the two in step.
+function _chatApply(a, ev) {
+  const tool = id => { for (let i = a.tools.length - 1; i >= 0; i--) if (a.tools[i].id === id) return a.tools[i]; return null; };
+  switch (ev.type) {
+    case 'delta': a.text += ev.text || ''; a.phase = 'writing'; break;
+    case 'thinking': a.thinking += ev.text || ''; a.phase = 'thinking'; break;
+    case 'tool_start': a.tools.push({ id: ev.id, name: ev.name, args: '', args_truncated: 0, result: null, result_truncated: 0, is_error: false, done: false }); a.phase = 'tool'; break;
+    case 'tool_args': { const t = tool(ev.id); if (t) { t.args += ev.text || ''; t.args_truncated += ev.truncated || 0; } break; }
+    case 'tool_input': {
+      const t = tool(ev.id);
+      if (t) { t.args = ev.input || ''; t.args_truncated = ev.truncated || 0; }
+      else a.tools.push({ id: ev.id, name: ev.name, args: ev.input || '', args_truncated: ev.truncated || 0, result: null, result_truncated: 0, is_error: false, done: false });
+      break;
+    }
+    case 'tool_result': { const t = tool(ev.id); if (t) { t.result = ev.text || ''; t.result_truncated = ev.truncated || 0; t.is_error = !!ev.is_error; t.done = true; } a.phase = 'requesting'; break; }
+    case 'usage': a.usage = ev; break;
+    case 'limit': a.limit = ev; break;
+    case 'error': a.error = ev.text || 'error'; break;
+    case 'phase': a.phase = ev.phase || ''; break;
+    case 'interrupted': a.interrupted = true; break;
+  }
 }
 
 function _chatConnect(name) {
   if (_chat.es) { try { _chat.es.close(); } catch (e) {} }
-  const es = new EventSource(_authUrl(API + '/api/sessions/' + encodeURIComponent(name) + '/chat/stream'));
+  // `after` is where the history snapshot left off. A browser reconnect sends
+  // Last-Event-ID instead, which the server prefers, so this URL never
+  // replays from a stale point.
+  const q = _chat.cursor ? '?after=' + encodeURIComponent(_chat.cursor) : '';
+  const es = new EventSource(_authUrl(API + '/api/sessions/' + encodeURIComponent(name) + '/chat/stream' + q));
   _chat.es = es;
   es.onmessage = (ev) => {
     if (_chat.es !== es || _chat.name !== name) return;
     let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m.type === 'user') {
-      if (!_chat.messages.some(x => x.turn_id === m.turn_id && x.role === 'user'))
-        _chat.messages.push({ role: 'user', text: m.text, turn_id: m.turn_id, origin: m.origin, ts: m.ts });
-      _chat.streaming = { turn_id: m.turn_id, text: '' };
-      _chat.busy = true;
-      _chat.queued = m.waiting || 0;
-    } else if (m.type === 'delta') {
-      if (!_chat.streaming || _chat.streaming.turn_id !== m.turn_id) _chat.streaming = { turn_id: m.turn_id, text: '' };
-      _chat.streaming.text += m.text || '';
-    } else if (m.type === 'tool') {
-      if (_chat.streaming) (_chat.streaming.tools = _chat.streaming.tools || []).push(m.name);
-    } else if (m.type === 'done') {
-      if (m.message) _chat.messages.push(Object.assign({ ts: Date.now() / 1000 }, m.message));
-      _chat.streaming = null;
-      _chat.busy = false;
-    } else if (m.type === 'queued') {
-      _chat.queued = m.waiting || 0;
-    } else if (m.type === 'stopped') {
-      _chat.streaming = null; _chat.busy = false; _chat.queued = 0;
-    } else if (m.type === 'lagged') {
-      _chatLoad(name);   // missed events: the event stream is the truth, refetch it
-      return;
-    } else {
-      return;   // hello / ping
-    }
-    _chatRender();
+    _chatOnEvent(name, m);
   };
-  // EventSource reconnects by itself; a reconnect may have missed a 'done', so
-  // resync from the persisted history when it comes back.
-  es.onopen = () => { if (_chat.name === name && _chat.loadedAt) _chatLoad(name); };
+}
+
+function _chatOnEvent(name, m) {
+  if (m.type === 'hello') {
+    // A different epoch means a new server process: our cursor is void.
+    if (_chat.cursor && _chatCursorParts(m.cursor).epoch !== _chatCursorParts(_chat.cursor).epoch) _chatLoad(name);
+    return;
+  }
+  if (m.type === 'gap') { _chatLoad(name); return; }   // missed events: the history is the truth
+  if (m.type === 'ping') return;
+  if (m.seq) {
+    const cur = _chatCursorParts(_chat.cursor);
+    if (m.epoch === cur.epoch && m.seq <= cur.seq) return;   // already applied (snapshot or replay)
+    _chat.cursor = m.epoch + ':' + m.seq;
+  }
+  if (m.type === 'user') {
+    if (!_chat.messages.some(x => x.turn_id === m.turn_id && x.role === 'user'))
+      _chat.messages.push({ role: 'user', text: m.text, turn_id: m.turn_id, origin: m.origin, ts: m.ts });
+    _chat.streaming = _chatNewTurn({ turn_id: m.turn_id });
+    _chat.busy = true;
+    _chat.queued = m.waiting || 0;
+    _chatRender();
+    return;
+  }
+  if (m.type === 'done') {
+    if (m.message && !_chat.messages.some(x => x.turn_id === m.turn_id && x.role === 'assistant'))
+      _chat.messages.push(Object.assign({ ts: Date.now() / 1000 }, m.message));
+    _chat.streaming = null; _chat.busy = false;
+    _chatCacheSave(name, _chat.messages);
+    _chatRender();
+    return;
+  }
+  if (m.type === 'queued') { _chat.queued = m.waiting || 0; _chatRender(); return; }
+  if (m.type === 'stopped') { _chat.streaming = null; _chat.busy = false; _chat.queued = 0; _chatRender(); return; }
+  if (m.type === 'retry') { if (_chat.streaming) _chat.streaming = _chatNewTurn({ turn_id: m.turn_id }); _chatRender(); return; }
+  if (!_chat.streaming || (m.turn_id && _chat.streaming.turn_id !== m.turn_id)) _chat.streaming = _chatNewTurn({ turn_id: m.turn_id });
+  _chatApply(_chat.streaming, m);
+  _chatScheduleLive();
 }
 
 function _chatMount(name) {
@@ -12545,23 +12758,45 @@ function _chatMount(name) {
   _chatUnmount();
   _chat.name = name;
   const body = document.getElementById('peek-body');
-  if (body) { body.classList.add('peek-chat'); body.innerHTML = '<div class="peek-loading"><div class="peek-spin-lg"></div><span>Loading chat…</span></div>'; }
-  _chatConnect(name);
+  if (body) {
+    body.classList.add('peek-chat');
+    body.innerHTML = '<div class="peek-loading"><div class="peek-spin-lg"></div><span>Loading chat…</span></div>';
+    // Follow the stream only while the reader is at the bottom; scrolling up
+    // to read earlier output pins the view until they come back down.
+    _chat.onScroll = () => {
+      const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+      _chat.stick = atBottom;
+      if (atBottom && _chat.unseen) { _chat.unseen = false; _chatJumpPill(); }
+    };
+    body.addEventListener('scroll', _chat.onScroll, { passive: true });
+  }
+  // Same as a coding worker's open-time cache paint: show the saved
+  // conversation at once; the live snapshot replaces it when it arrives.
+  _chatPaintCached(name, (typeof online !== 'undefined' && !online) ? 'Offline.' : '');
   _chatLoad(name);
 }
 
 // The peek poller calls this in place of the terminal frame fetch. The stream
 // carries live updates; the poll only re-syncs a view that has gone quiet.
 function _chatRefresh(name) {
-  if (_chat.name !== name || !_chat.es) { _chatMount(name); return Promise.resolve(); }
+  if (_chat.name !== name) { _chatMount(name); return Promise.resolve(); }
   if (Date.now() - _chat.loadedAt > 15000 && !_chat.streaming) return _chatLoad(name);
   return Promise.resolve();
 }
 
-function _chatBubble(role, html, meta, cls) {
-  return '<div class="chat-msg chat-' + role + (cls ? ' ' + cls : '') + '">'
+// Re-send the exact text an interrupted turn never got to answer (see the
+// `m.interrupted` branch in `_chatRender`). Plain `doSend` — the same path
+// the compose box uses — not a new endpoint.
+async function _chatRetryTurn(name, text) {
+  if (!text) return;
+  await doSend(name, text);
+  if (_chat.name === name) _chatLoad(name);
+}
+
+function _chatBubble(role, html, meta, cls, attrs) {
+  return '<div class="chat-msg chat-' + role + (cls ? ' ' + cls : '') + '"' + (attrs || '') + '>'
     + '<div class="chat-bubble">' + html + '</div>'
-    + (meta ? '<div class="chat-meta">' + meta + '</div>' : '') + '</div>';
+    + '<div class="chat-meta">' + (meta || '') + '</div></div>';
 }
 
 function _chatTime(ts) {
@@ -12570,74 +12805,282 @@ function _chatTime(ts) {
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-// Expand/collapse state for the tool-call accordion, keyed by turn_id and
-// persisted across re-renders (_chatRender rebuilds the whole log's innerHTML
-// on every SSE event, so any native <details> open state would be discarded
-// without this). Explicit user choice always wins over the default.
-const _chatToolsOpen = {};
-function _chatToggleTools(turnId) {
-  const key = turnId || '';
-  const wasOpen = key in _chatToolsOpen ? _chatToolsOpen[key] : (_chat.streaming && _chat.streaming.turn_id === key);
-  _chatToolsOpen[key] = !wasOpen;
-  _chatRender();
-}
-function _chatToolsHtml(turnId, tools, active) {
-  if (!tools || !tools.length) return '';
-  const key = turnId || '';
-  const open = key in _chatToolsOpen ? _chatToolsOpen[key] : !!active;
-  const label = tools.length + ' tool call' + (tools.length > 1 ? 's' : '') + (active ? '…' : '');
-  const items = tools.map((t, i) => '<div class="chat-tool-item'
-    + (active && i === tools.length - 1 ? ' is-active' : '') + '">' + esc(t) + '</div>').join('');
-  return '<div class="chat-tools' + (open ? ' open' : '') + '">'
-    + '<button type="button" class="chat-tools-toggle" onclick="_chatToggleTools(&#39;' + escJs(key) + '&#39;)">'
-    + '<span class="chat-tools-caret">' + (open ? '&#x25be;' : '&#x25b8;') + '</span> ' + esc(label) + '</button>'
-    + (open ? '<div class="chat-tools-list">' + items + '</div>' : '') + '</div>';
+// One line that says what a tool call is doing: the command, path or query.
+function _chatToolSummary(t) {
+  let a = null;
+  try { a = JSON.parse(t.args || ''); } catch (e) {}
+  if (a && typeof a === 'object') {
+    const v = a.command || a.file_path || a.path || a.pattern || a.query || a.url || a.description || a.prompt;
+    if (v) return String(v).split('\n')[0].slice(0, 140);
+  }
+  return (t.args || '').replace(/\s+/g, ' ').slice(0, 140);
 }
 
+function _chatToolArgsPretty(t) {
+  try { return JSON.stringify(JSON.parse(t.args), null, 2); } catch (e) { return t.args || ''; }
+}
+
+// A tool call card: <details> so its open state is the browser's, and the
+// live view patches the card in place rather than rebuilding it.
+function _chatToolCard(t) {
+  const state = !t.done ? 'is-running' : t.is_error ? 'is-error' : 'is-done';
+  return '<details class="chat-tool ' + state + '" data-tool="' + esc(t.id || '') + '">'
+    + '<summary><span class="chat-tool-icon"></span><span class="chat-tool-name">' + esc(t.name || 'tool') + '</span>'
+    + '<span class="chat-tool-sum">' + esc(_chatToolSummary(t)) + '</span></summary>'
+    + '<div class="chat-tool-body">' + _chatToolBody(t) + '</div></details>';
+}
+function _chatToolBody(t) {
+  let h = '';
+  if (t.args) h += '<div class="chat-tool-label">input</div><pre class="chat-tool-pre">' + esc(_chatToolArgsPretty(t)) + '</pre>'
+    + (t.args_truncated ? '<div class="chat-tool-trunc">' + t.args_truncated + ' more bytes not shown</div>' : '');
+  if (t.result != null) h += '<div class="chat-tool-label">' + (t.is_error ? 'error' : 'result') + '</div><pre class="chat-tool-pre">' + esc(t.result) + '</pre>'
+    + (t.result_truncated ? '<div class="chat-tool-trunc">' + t.result_truncated + ' more bytes not shown</div>' : '');
+  return h || '<div class="chat-tool-label">running…</div>';
+}
+function _chatToolsHtml(tools, names) {
+  if (tools && tools.length) return '<div class="chat-tools">' + tools.map(_chatToolCard).join('') + '</div>';
+  // Messages recorded before tool calls were structured carry only names.
+  if (names && names.length) return '<div class="chat-tools">' + names.map(n => _chatToolCard({ id: '', name: n, done: true })).join('') + '</div>';
+  return '';
+}
+function _chatThinkingHtml(text, live, truncated) {
+  if (!text && !live) return '';
+  return '<details class="chat-thinking' + (live ? ' is-live' : '') + '"><summary>' + (live ? 'Thinking' : 'Thought')
+    + '</summary><div class="chat-thinking-body">' + esc(text || '') + (truncated ? '\n[' + truncated + ' more bytes not kept]' : '') + '</div></details>';
+}
+function _chatUsageBits(m) {
+  const bits = [];
+  const u = m.usage || {};
+  if (u.output_tokens) bits.push(u.output_tokens + ' tok');
+  const cost = m.cost_usd != null ? m.cost_usd : u.cost_usd;
+  if (cost) bits.push('$' + Number(cost).toFixed(3));
+  return bits;
+}
+function _chatLimitHtml(limit) {
+  if (!limit || !limit.status || limit.status === 'allowed' || limit.status === 'allowed_warning') return '';
+  const at = limit.resets_at ? ' until ' + _chatTime(limit.resets_at) : '';
+  return '<div class="chat-limit">Usage limit reached' + esc(at) + '. amux resumes this worker when it resets.</div>';
+}
+
+function _chatMessageHtml(m) {
+  if (m.role === 'user') {
+    const who = m.origin === 'automation' ? 'amux' : 'you';
+    // The send-time stamp stays in what the model received (the shared send
+    // contract); the bubble's meta line already shows the time.
+    const shown = _hasSendTimeStamp(m.text) ? (m.text || '').replace(/^\[[^\]]*\]\s/, '') : (m.text || '');
+    return _chatBubble('user', esc(shown).replace(/\n/g, '<br>'), esc(who) + ' · ' + _chatTime(m.ts));
+  }
+  const head = _chatThinkingHtml(m.thinking, false, m.thinking_truncated) + _chatToolsHtml(m.tool_calls, m.tools);
+  if (m.error) {
+    // AF-960: a restart-interrupted turn offers to resend the exact text the
+    // user already sent (it is right above this bubble); _stampSendTime is
+    // idempotent, so resending the stored, already-stamped text is safe.
+    const original = m.interrupted
+      ? (_chat.messages.find(x => x.role === 'user' && x.turn_id === m.turn_id) || {}).text
+      : '';
+    const retryBtn = original
+      ? '<button type="button" class="btn chat-retry-btn" onclick="_chatRetryTurn(\'' + escJs(_chat.name) + '\',\'' + escJs(original) + '\')">Retry</button>'
+      : '';
+    return _chatBubble('assistant', head + _chatLimitHtml(m.limit) + '<span class="chat-error">' + esc(m.error) + '</span>'
+      + (m.text ? renderMarkdown(m.text) : '') + retryBtn, 'failed · ' + _chatTime(m.ts), 'is-error');
+  }
+  const bits = [_chatTime(m.ts)];
+  if (m.duration_ms) bits.push((m.duration_ms / 1000).toFixed(1) + 's');
+  bits.push(..._chatUsageBits(m));
+  if (m.interrupted) bits.push('stopped');
+  return _chatBubble('assistant', head + renderMarkdown(m.text || ''), esc(bits.filter(Boolean).join(' · ')),
+    m.interrupted ? 'is-interrupted' : '');
+}
+
+// Full rebuild: history loads and turn boundaries only. Deltas never come
+// through here; they go to _chatPaintLive.
 function _chatRender(errorText) {
   const body = document.getElementById('peek-body');
   if (!body || peekSession !== _chat.name) return;
-  const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
   const s = sessions.find(x => x.name === _chat.name) || {};
   let html = '';
+  if (_chat.offlineNote) html += '<div class="chat-offline-note" role="status">' + esc(_chat.offlineNote) + '</div>';
   if (errorText) html += '<div class="chat-empty">' + esc(errorText) + '</div>';
-  if (!_chat.messages.length && !_chat.streaming && !errorText) {
+  const pendingSends = _pendingSendsFor(_chat.name);
+  if (!_chat.messages.length && !_chat.streaming && !errorText && !pendingSends.length) {
     html += '<div class="chat-empty">' + (s.running
       ? 'No messages yet. Say something below.'
       : 'This chat worker is stopped. Sending a message starts it.') + '</div>';
   }
-  for (const m of _chat.messages) {
-    if (m.role === 'user') {
-      const who = m.origin === 'automation' ? 'amux' : 'you';
-      // The send-time stamp stays in what the model received (the shared send
-      // contract); the bubble's meta line already shows the time.
-      const shown = _hasSendTimeStamp(m.text) ? (m.text || '').replace(/^\[[^\]]*\]\s/, '') : (m.text || '');
-      html += _chatBubble('user', esc(shown).replace(/\n/g, '<br>'), esc(who) + ' · ' + _chatTime(m.ts));
-    } else if (m.error) {
-      html += _chatBubble('assistant', _chatToolsHtml(m.turn_id, m.tools, false)
-        + '<span class="chat-error">' + esc(m.error) + '</span>'
-        + (m.text ? renderMarkdown(m.text) : ''), 'failed · ' + _chatTime(m.ts), 'is-error');
-    } else {
-      const bits = [_chatTime(m.ts)];
-      if (m.duration_ms) bits.push((m.duration_ms / 1000).toFixed(1) + 's');
-      html += _chatBubble('assistant', _chatToolsHtml(m.turn_id, m.tools, false) + renderMarkdown(m.text || ''),
-        esc(bits.filter(Boolean).join(' · ')));
+  for (const m of _chat.messages) html += _chatMessageHtml(m);
+  // Messages sent while offline, shown in the conversation where they will
+  // land (a coding worker shows them only in the pending pill).
+  for (const p of pendingSends) html += _chatBubble('user', esc(p.text).replace(/\n/g, '<br>'),
+    online ? 'waiting to send' : 'saved offline &middot; sends when connected', 'chat-pending');
+  body.innerHTML = '<div class="chat-log">' + html + '<div class="chat-live-slot"></div>'
+    + '<div class="chat-queued-slot">' + (_chat.queued > 0 ? '<div class="chat-queued">' + _chat.queued + ' message'
+      + (_chat.queued > 1 ? 's' : '') + ' queued</div>' : '') + '</div></div>'
+    + '<button type="button" class="chat-jump" hidden onclick="_chatJumpToLatest()">Latest &#x2193;</button>';
+  _chat.live = null;
+  if (_chat.streaming) _chatPaintLive();
+  if (_chat.stick) body.scrollTop = body.scrollHeight;
+}
+
+// One paint per frame. A slow device (or a busy one) gets breathing room:
+// when the last paint cost more than two frames, the next waits about twice
+// that long, so scrolling and typing stay responsive while text still flows.
+function _chatScheduleLive() {
+  if (_chat.raf) return;
+  const run = () => requestAnimationFrame(() => {
+    _chat.raf = 0;
+    const t = performance.now();
+    _chatPaintLive();
+    _chat.paintCost = performance.now() - t;
+  });
+  const cost = _chat.paintCost || 0;
+  if (cost > 32) _chat.raf = setTimeout(run, Math.min(cost * 2, 250));
+  else _chat.raf = run();
+}
+
+async function _chatInterrupt() {
+  const name = _chat.name;
+  if (!name) return;
+  const btn = document.querySelector('.chat-stop');
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/chat/interrupt', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!d.interrupted) showToast('Nothing to stop: ' + (d.detail || 'no turn running'));
+  } catch (e) {
+    showToast('Stop failed: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Stop'; }
+  }
+}
+
+function _chatJumpToLatest() {
+  const body = document.getElementById('peek-body');
+  if (!body) return;
+  _chat.stick = true; _chat.unseen = false;
+  body.scrollTo({ top: body.scrollHeight, behavior: 'smooth' });
+  _chatJumpPill();
+}
+function _chatJumpPill() {
+  const b = document.querySelector('#peek-body .chat-jump');
+  if (b) b.hidden = !_chat.unseen;
+}
+
+// Split streamed markdown into blocks that can no longer change and the tail
+// that still can. A block is settled only once a blank-line separator follows
+// it, so a paragraph or list still being written stays in the tail.
+function _chatSplitSettled(text) {
+  // No blank line before the last character means nothing can have settled;
+  // skip the lexer entirely (the common case: mid-paragraph deltas).
+  const nn = text.indexOf('\n\n');
+  if (nn < 0 || nn >= text.length - 2) return { settled: [], rest: text };
+  if (typeof marked === 'undefined' || !marked.lexer) return { settled: [], rest: text };
+  let toks;
+  try { toks = marked.lexer(text); } catch (e) { return { settled: [], rest: text }; }
+  // marked folds the blank line into a heading's or table's own raw rather
+  // than emitting a separate space token, so either form marks a boundary.
+  let lastSpace = -1;
+  for (let i = 0; i < toks.length - 1; i++) if (toks[i].type === 'space' || /\n\n$/.test(toks[i].raw)) lastSpace = i;
+  if (lastSpace < 0) return { settled: [], rest: text };
+  const settled = [];
+  let used = 0;
+  for (let i = 0; i <= lastSpace; i++) {
+    used += toks[i].raw.length;
+    if (toks[i].type !== 'space' && toks[i].type !== 'def') settled.push(toks[i].raw);
+  }
+  // raw lengths must add up to a prefix of the text, or we do not trust it.
+  if (text.slice(0, used) !== toks.slice(0, lastSpace + 1).map(t => t.raw).join('')) return { settled: [], rest: text };
+  return { settled, rest: text.slice(used), used };
+}
+
+// A table's header row arrives before its |---| row, and until then it is a
+// paragraph of pipes (seen in the 390px e2e shot). remend does not cover
+// tables, so hold a trailing pipe block back until its delimiter row starts.
+function _chatHoldPartialTable(t) {
+  const i = t.lastIndexOf('\n\n');
+  const blk = i < 0 ? t : t.slice(i + 2);
+  const lines = blk.split('\n');
+  if (!lines[0].trimStart().startsWith('|')) return t;
+  if (lines.length >= 2 && /^\s*\|?\s*:?-/.test(lines[1])) return t;
+  return i < 0 ? '' : t.slice(0, i);
+}
+
+// Paint the in-flight reply. Called at most once per frame. Settled markdown
+// blocks are appended once (and animated in); only the tail is re-rendered.
+function _chatPaintLive() {
+  const body = document.getElementById('peek-body');
+  const st = _chat.streaming;
+  if (!body || peekSession !== _chat.name) return;
+  const slot = body.querySelector('.chat-live-slot');
+  if (!slot) return;
+  if (!st) { slot.innerHTML = ''; _chat.live = null; return; }
+  let L = _chat.live;
+  if (!L || L.turn_id !== st.turn_id || !slot.firstChild) {
+    slot.innerHTML = _chatBubble('assistant',
+      '<div class="chat-live-thinking"></div><div class="chat-tools"></div><div class="chat-live-limit"></div>'
+      + '<div class="chat-live-md"><div class="md-settled"></div><div class="md-tail"></div></div>'
+      + '<span class="chat-typing"><i></i><i></i><i></i></span><span class="chat-error chat-live-error" hidden></span>',
+      '<span class="chat-live-status">responding…</span> <button type="button" class="chat-stop" onclick="_chatInterrupt()">Stop</button>',
+      'is-streaming');
+    const root = slot.firstChild;
+    L = _chat.live = { turn_id: st.turn_id, root, settledLen: 0, tools: {}, thinkingLen: -1,
+      md: root.querySelector('.md-settled'), tail: root.querySelector('.md-tail'), toolsEl: root.querySelector('.chat-tools'),
+      thinking: root.querySelector('.chat-live-thinking'), typing: root.querySelector('.chat-typing'),
+      status: root.querySelector('.chat-live-status'), err: root.querySelector('.chat-live-error'),
+      limit: root.querySelector('.chat-live-limit') };
+    _anim(root, { opacity: [0, 1], transform: ['translateY(6px)', 'translateY(0)'] });
+  }
+  const grew = body.scrollHeight;
+  // Thinking: collapsed; the summary pulses while the model is thinking.
+  if (st.thinking.length !== L.thinkingLen || L.phase !== st.phase) {
+    if (!L.thinking.firstChild && st.thinking) L.thinking.innerHTML = _chatThinkingHtml('', true, 0);
+    const d = L.thinking.firstChild;
+    if (d) {
+      d.classList.toggle('is-live', st.phase === 'thinking');
+      d.querySelector('.chat-thinking-body').textContent = st.thinking;
+    }
+    L.thinkingLen = st.thinking.length;
+    L.phase = st.phase;
+  }
+  // Tool cards fill in live, patched in place so an open card stays open.
+  for (const t of st.tools) {
+    const key = t.id || t.name;
+    const sig = t.args.length + ':' + (t.result == null ? -1 : t.result.length) + ':' + t.done + ':' + t.is_error;
+    let rec = L.tools[key];
+    if (!rec) {
+      L.toolsEl.insertAdjacentHTML('beforeend', _chatToolCard(t));
+      rec = L.tools[key] = { el: L.toolsEl.lastElementChild, sig: '' };
+      _anim(rec.el, { opacity: [0, 1], transform: ['scale(0.98)', 'scale(1)'] });
+    }
+    if (rec.sig !== sig) {
+      rec.el.className = 'chat-tool ' + (!t.done ? 'is-running' : t.is_error ? 'is-error' : 'is-done');
+      rec.el.querySelector('.chat-tool-sum').textContent = _chatToolSummary(t);
+      rec.el.querySelector('.chat-tool-body').innerHTML = _chatToolBody(t);
+      rec.sig = sig;
     }
   }
-  if (_chat.streaming) {
-    // STREAMED TEXT IS HEALED BEFORE IT IS RENDERED (chat-demo, for Ethan,
-    // 2026-09-25). A reply mid-stream has an unclosed fence, a half-written
-    // link or a dangling ** that would flash as raw markup or swallow the rest
-    // of the bubble. remend (Streamdown's healing step) closes them for this
-    // frame only; the finished message renders from its own complete text.
-    const t = (typeof remend === 'function') ? remend(_chat.streaming.text) : _chat.streaming.text;
-    const tools = _chatToolsHtml(_chat.streaming.turn_id, _chat.streaming.tools, true);
-    html += _chatBubble('assistant', tools + (t ? renderMarkdown(t) : (tools ? '' : '<span class="chat-typing"><i></i><i></i><i></i></span>')),
-      'responding…', 'is-streaming');
+  // Text: freeze newly settled blocks, re-render only the tail.
+  const rest = st.text.slice(L.settledLen);
+  const split = _chatSplitSettled(rest);
+  for (const raw of split.settled) {
+    const div = document.createElement('div');
+    div.className = 'md-blk';
+    div.innerHTML = renderMarkdown(raw);
+    L.md.appendChild(div);   // fades in via CSS: this path runs per block, Motion is kept for per-turn entrances
   }
-  if (_chat.queued > 0) html += '<div class="chat-queued">' + _chat.queued + ' message' + (_chat.queued > 1 ? 's' : '') + ' queued</div>';
-  body.innerHTML = '<div class="chat-log">' + html + '</div>';
-  if (nearBottom || _chat.streaming) body.scrollTop = body.scrollHeight;
+  if (split.used) L.settledLen += split.used;
+  const tailRaw = st.text.slice(L.settledLen);
+  // remend closes an unfinished fence, link or emphasis for this frame only
+  // (Streamdown's healing step), so raw markup never flashes.
+  const healed = _chatHoldPartialTable((typeof remend === 'function') ? remend(tailRaw) : tailRaw);
+  if (L.tailRaw !== tailRaw) { L.tail.innerHTML = healed ? renderMarkdown(healed) : ''; L.tailRaw = tailRaw; }
+  L.typing.hidden = !!st.text || (st.phase === 'tool');
+  L.root.classList.toggle('has-text', !!st.text);
+  const phase = st.interrupted ? 'stopping…' : st.phase === 'thinking' ? 'thinking…' : st.phase === 'tool' ? 'running a tool…' : 'responding…';
+  if (L.status.textContent !== phase) L.status.textContent = phase;
+  if (st.error) { L.err.hidden = false; L.err.textContent = st.error; }
+  const lim = _chatLimitHtml(st.limit);
+  if (L.limitHtml !== lim) { L.limit.innerHTML = lim; L.limitHtml = lim; }
+  if (_chat.stick) body.scrollTop = body.scrollHeight;
+  else if (body.scrollHeight > grew || split.settled.length) { _chat.unseen = true; _chatJumpPill(); }
 }
 
 // Create modal: the type row, rendered from the registry.
@@ -19615,6 +20058,11 @@ async function _pendingCancel(id) {
 // Normal delivery is visible in Messages. Only offline or delayed messages
 // need a notice above the composer; do not flash a queued pill on every Send.
 function _updatePendingPill() {
+  // A mounted chat shows pending sends as bubbles; repaint when the queue moves.
+  if (peekSession && _chat.name === peekSession && _workerRenderer(peekSession) === 'chat') {
+    const n = _pendingSendsFor(peekSession).length;
+    if (n !== _chat.pendingShown) { _chat.pendingShown = n; _chatRender(); }
+  }
   const pill = document.getElementById('peek-pending-pill');
   if (!pill) return;
   const n = peekSession ? _pendingSendsFor(peekSession)
@@ -20859,13 +21307,13 @@ function closeFiltersModal() {
 const _PROVIDER_LABELS = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini', iterm2: 'iTerm2' };
 const _MODEL_LABELS = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable', gpt: 'GPT', gemini: 'Gemini', 'o-series': 'o-series' };
 function _mLabel(x){ return _MODEL_LABELS[x] || (x.charAt(0).toUpperCase()+x.slice(1)); }
-const _STATUS_LABELS = { starting: 'Starting', error: 'Error', working: 'Working', blocked: 'Blocked', waiting: 'Waiting', rate_limited: 'Rate limited', api_error: 'API error', idle: 'Idle', stopped: 'Stopped' };
+const _STATUS_LABELS = { starting: 'Starting', error: 'Error', working: 'Working', blocked: 'Blocked', waiting: 'Waiting', rate_limited: 'Rate limited', api_error: 'API error', idle: 'Idle', stopped: 'Stopped', unknown: 'Unknown' };
 function renderFilterOptions() {
   const live = sessions.filter(s => !s.archived && !_workerLifecycleInactive(s));
   // Status chips — fixed order, only states that exist (or are selected)
   const sEl = document.getElementById('filter-statuses');
   if (sEl) {
-    const opts = ['working', 'blocked', 'waiting', 'rate_limited', 'api_error', 'idle', 'stopped']
+    const opts = ['working', 'blocked', 'waiting', 'rate_limited', 'api_error', 'idle', 'unknown', 'stopped']
       .filter(k => filterStatuses.has(k) || live.some(x => _sessStatusKey(x) === k));
     sEl.innerHTML = opts.length ? opts.map(k => {
       const on = filterStatuses.has(k);
@@ -37805,6 +38253,7 @@ function toggleSettings() {
     loadCommitGuard();
     loadTaskGuard();
     loadAlertConfig();
+    _standingApprovalsLoad();
     loadUsage();
   }
 }
@@ -38065,6 +38514,60 @@ async function loadSpendAttribution() {
     // with an error.
     box.innerHTML = '';
   }
+}
+// AMUX-5270: standing approvals. Answers the owner already gave, which the
+// server applies to worker escalations instead of paging him (two such pages
+// on 2026-09-27 were for asks he had approved the day before). Revoke sends NO
+// worker header on purpose: the server reads its absence as the owner, the
+// same rule the grant buttons rely on. 44px targets (mobile-first).
+async function _standingApprovalsLoad() {
+  const list = document.getElementById('standing-approvals-list');
+  const usesEl = document.getElementById('standing-approvals-uses');
+  if (!list) return;
+  try {
+    const r = await fetch(API + '/api/approvals/standing', { headers: _authHeaders() });
+    const d = await r.json();
+    if (!r.ok || !Array.isArray(d.approvals)) { list.textContent = 'Could not load (' + (d.error || r.status) + ')'; return; }
+    if (!d.approvals.length) {
+      list.innerHTML = '<div style="color:var(--dim);">None recorded. Every worker ask still goes to you.</div>';
+    } else {
+      list.innerHTML = d.approvals.map(a =>
+        '<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--border);">'
+        + '<div style="flex:1;min-width:0;">'
+        + '<div style="font-weight:600;">' + esc(a.id) + ' · ' + esc(a.title) + '</div>'
+        + '<div style="color:var(--dim);font-size:0.72rem;">' + esc(a.category) + ' · ' + esc(a.scope) + '</div>'
+        + '<div style="margin-top:2px;">' + esc(a.allowed) + '</div>'
+        + '<div style="color:var(--dim);font-size:0.72rem;margin-top:2px;">Limits: ' + esc(a.limits_line) + '</div>'
+        + (a.source ? '<div style="color:var(--dim);font-size:0.72rem;">Source: ' + esc(a.source) + '</div>' : '')
+        + '</div>'
+        + '<button class="btn" style="min-height:44px;min-width:64px;font-size:0.75rem;" '
+        + 'onclick="event.stopPropagation();_standingApprovalRevoke(\'' + escJs(a.id) + '\',this)">Revoke</button>'
+        + '</div>').join('');
+    }
+  } catch (e) { list.textContent = 'Could not load standing approvals'; }
+  if (!usesEl) return;
+  try {
+    const r = await fetch(API + '/api/approvals/standing/uses?limit=10', { headers: _authHeaders() });
+    const d = await r.json();
+    const uses = Array.isArray(d.uses) ? d.uses : [];
+    usesEl.innerHTML = !uses.length ? 'None yet.'
+      : uses.map(u => '<div style="padding:4px 0;border-bottom:1px solid var(--border);">'
+          + '<b>' + esc(u.approval) + '</b> ' + (u.verdict === 'applied' ? 'answered' : 'cap spent, you were asked')
+          + ' · ' + esc(u.door) + ' from ' + esc(u.session || '?') + ' · ' + _notifTimeAgo(u.ts * 1000)
+          + '<div style="color:var(--fg);">' + esc((u.ask || '').slice(0, 160)) + '</div></div>').join('')
+        + (d.total > uses.length ? '<div style="margin-top:4px;">' + uses.length + ' of ' + d.total + ' shown</div>' : '');
+  } catch (e) { usesEl.textContent = 'Could not load the FYI feed'; }
+}
+async function _standingApprovalRevoke(id, btn) {
+  if (!confirm('Revoke ' + id + '? Workers will escalate these asks to you again.')) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Revoking…'; }
+  try {
+    const r = await fetch(API + '/api/approvals/standing/' + encodeURIComponent(id), { method: 'DELETE' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) { showToast(d.error || ('revoke failed (' + r.status + ')')); if (btn) { btn.disabled = false; btn.textContent = 'Revoke'; } return; }
+    showToast('Revoked ' + id);
+  } catch (e) { showToast('revoke failed: ' + String(e)); }
+  _standingApprovalsLoad();
 }
 async function loadAlertConfig() {
   try {

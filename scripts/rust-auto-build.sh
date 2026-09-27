@@ -44,6 +44,41 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# THE BASH CLI SHIPS WITH THE SERVER IT TALKS TO. This builder installs only
+# amux-server; the bash `amux` in ~/.local/bin and /usr/local/bin was copied
+# once by install.sh and then went stale. Measured 2026-09-27: the server
+# answered /api/approvals/standing while `amux approvals` said "unknown
+# command", and a day earlier the start-through-server launch fix sat on
+# origin for hours while every worker restart still used the old CLI.
+#
+# `amux` is not a build input (the stamp key covers crates/ and Cargo.*), so a
+# CLI-only commit never triggers a rebuild. This runs on every authorized tick
+# instead: take `amux` from the sha this builder is authorized to activate,
+# syntax-check it, and rename it over each installed REGULAR-FILE copy whose
+# bytes differ. rename(2) gives a new inode, so a running `amux` finishes on
+# the bytes it started with. Symlinks and absent copies are left alone.
+sync_bash_cli() {
+  local sha="$1" tmp dest
+  [ "${AMUX_CLI_SYNC:-1}" = "0" ] && return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/amux-cli-sync.XXXXXX")" || return 0
+  if ! git -C "$REPO" show "${sha}:amux" > "$tmp" 2>/dev/null || ! bash -n "$tmp" 2>/dev/null; then
+    echo "== $(date '+%F %T') CLI SYNC SKIPPED sha=$sha verdict=bash_cli_sync_invalid (git show or bash -n failed)" >> "$LOG"
+    rm -f "$tmp"; return 0
+  fi
+  chmod 0755 "$tmp"
+  for dest in "${AMUX_CLI_INSTALL:-$HOME/.local/bin/amux}" /usr/local/bin/amux; do
+    [ -f "$dest" ] && [ ! -L "$dest" ] && [ -w "$(dirname "$dest")" ] || continue
+    cmp -s "$tmp" "$dest" && continue
+    if cp "$tmp" "${dest}.new.$$" && chmod 0755 "${dest}.new.$$" && mv -f "${dest}.new.$$" "$dest"; then
+      echo "== $(date '+%F %T') CLI SYNCED sha=$sha dest=$dest verdict=bash_cli_synced" >> "$LOG"
+    else
+      rm -f "${dest}.new.$$"
+      echo "== $(date '+%F %T') CLI SYNC FAILED sha=$sha dest=$dest verdict=bash_cli_sync_failed" >> "$LOG"
+    fi
+  done
+  rm -f "$tmp"
+}
+
 # The sha that will actually be BUILT — the worktree below is created from
 # `rev-parse HEAD`. `$head` is a different thing: the last commit that touched
 # the build inputs, used as the rebuild stamp key. They differ routinely on a
@@ -188,6 +223,7 @@ if [ "${AMUX_RS_BUILD_PROVENANCE_ONLY:-}" != "1" ] \
   if ! activation_authorized; then
     exit 0
   fi
+  sync_bash_cli "$built_sha"
   if [ "$head" = "$last" ]; then
     if ! measure_live_identity; then
       echo "== $(date '+%F %T') !! ACTIVATION IDENTITY UNMEASURED expected=$built_sha trigger=$head $identity_reason measured=false action=defer — unavailable health is not evidence of image drift" >> "$LOG"

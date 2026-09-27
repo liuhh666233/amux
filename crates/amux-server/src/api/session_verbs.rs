@@ -3061,6 +3061,12 @@ pub const SESSION_SCOPED_FIELDS: &[(&str, RenameDisposition)] = &[
         RenameDisposition::KeepForAudit("a scan is a dated observation, not live state"),
     ),
     (
+        "standing_approval_uses",
+        RenameDisposition::KeepForAudit(
+            "a use records which lane an approval answered at the time (AMUX-5270)",
+        ),
+    ),
+    (
         "_amux_request_log.amux_session",
         RenameDisposition::KeepForAudit("the caller name records who made the request at the time"),
     ),
@@ -3620,7 +3626,18 @@ pub(crate) fn transcript_evidence(name: &str) -> (Option<String>, Option<u64>) {
 /// conv-id first, then title match, then the single unclaimed candidate.
 pub(crate) fn session_jsonl_path(name: &str) -> Option<PathBuf> {
     let cfg = parse_env(name);
-    let wd = cfg.get_or("CC_DIR", "").trim().to_string();
+    let mut wd = cfg.get_or("CC_DIR", "").trim().to_string();
+    // A chat worker with no configured dir runs its turns in a private
+    // scratch dir (chat_worker::chat_work_dir), and its provider writes the
+    // transcript under THAT cwd. Without this, every transcript reader
+    // (rate-limit sweep, transcript history, owner-ask fallback) saw no
+    // transcript for a default chat worker (AMUX-5263 parity audit).
+    if wd.is_empty()
+        && super::worker_exec::worker_type_of_env(cfg.get("CC_WORKER_TYPE")).as_str()
+            == amux_core::worker_type::WorkerTypeId::CHAT
+    {
+        wd = super::chat_worker::default_chat_dir(name);
+    }
     if wd.is_empty() {
         return None;
     }
@@ -8131,7 +8148,7 @@ async fn steer_enqueue_precond_with_id(
     // can still have schedulers they should"). A schedule is standing
     // configuration of that worker, not amux steering it, so it is exempt
     // here; board nudges, callbacks and peer relays still are not.
-    let isolated_schedule = is_schedule_guard(guard) && session_is_isolated(name);
+    let isolated_schedule = is_owner_configured_guard(guard) && session_is_isolated(name);
     if automation && !isolated_schedule && session_is_isolated(name) {
         return Err(
             "target is an isolated (raw-agent) worker: amux automation is not \
@@ -11082,6 +11099,15 @@ pub(crate) fn is_schedule_guard(guard: &str) -> bool {
     guard.starts_with("sched:")
 }
 
+/// Guards for deliveries that carry the OWNER's own standing configuration
+/// rather than amux steering: a schedule (`sched:`) and the goal keeper
+/// continuing an owner-set /goal (`goal:`, Ethan 2026-09-26: "this needs to
+/// have been continued automatically on the harness level. especially since
+/// its a /goal"). Both reach isolated workers, as owner input.
+pub(crate) fn is_owner_configured_guard(guard: &str) -> bool {
+    is_schedule_guard(guard) || guard.starts_with("goal:")
+}
+
 pub(crate) async fn deliver_automated(
     state: &AppState,
     name: &str,
@@ -11090,9 +11116,9 @@ pub(crate) async fn deliver_automated(
 ) -> AutoDelivery {
     // A schedule into an isolated worker is delivered as owner input; see
     // `is_schedule_guard` and the queue's isolation gate.
-    let origin = if is_schedule_guard(guard) && session_is_isolated(name) {
+    let origin = if is_owner_configured_guard(guard) && session_is_isolated(name) {
         tracing::info!(session = %name, guard, verdict = "isolated_schedule_delivered",
-            "schedule delivering into an isolated worker as owner configuration");
+            "owner configuration (schedule or /goal) delivering into an isolated worker");
         SendOrigin::Owner
     } else {
         SendOrigin::Automation
@@ -15599,7 +15625,7 @@ pub(crate) async fn stop_verified_worker(state: &AppState, name: &str) -> Result
         .await
         .ok_or("could not measure worker activity before retirement")?;
     let (_, explain) =
-        signals.derive_status_explain(name, signals.agent_running(&format!("amux-{name}")));
+        signals.derive_status_explain(name, signals.worker_running(name));
     if explain["subagents_working"] == true || explain["provider_background_working"] == true {
         return Err("worker still has live child work".into());
     }
@@ -17865,7 +17891,15 @@ fn write_claude_memory(name: &str, work_dir: &str) {
     // BEFORE the roster, deliberately. The comment above says the tail is what a
     // read ceiling drops and the roster is the re-derivable thing; a credential
     // gap is the more actionable of the two, so it sits above it (AF-372).
-    let composed = composed + &preserved + &credential_preflight() + &fleet_roster();
+    // Standing approvals sit with the credential gaps, above the roster, for
+    // the same reason: they change what a lane should DO before it escalates
+    // (AMUX-5270: two owner pages on 2026-09-27 for asks he had already
+    // approved, one of them approved only in another lane's terminal).
+    let composed = composed
+        + &preserved
+        + &credential_preflight()
+        + &super::standing_approvals::memory_section(name)
+        + &fleet_roster();
     let _ = std::fs::write(&claude_mem_file, &composed);
 }
 
@@ -22467,13 +22501,24 @@ async fn get_dispatch(
             // (derive_status_explain IS the derivation; the list discards the
             // explanation). When a badge is wrong, this is one GET instead of
             // a screenshot investigation (AMUX-3426; ethos rule 4).
+            //
+            // `running` must go through `worker_running` (ACW-6), not
+            // `agent_running` directly: this comment claimed "the SAME code
+            // path the session list uses" while computing `running` from the
+            // tmux pane alone, which a chat worker never has. Measured live
+            // 2026-09-26: `amux-chatbot` mid-turn (`/chat` reported
+            // `busy: true`) explained itself here as `decided_by:
+            // "not_running"`, while the session list — which already used
+            // the type-aware adapter — correctly showed `running: true`. Two
+            // answers to "is this worker running" is the exact drift this
+            // endpoint exists to make visible, not commit.
             let store = state.store.clone();
             let nm = name.to_string();
             let joined = crate::db::interactions::spawn_blocking(move || -> anyhow::Result<_> {
                 let conn = store.read()?;
                 let mut fs = crate::api::sessions_legacy::FleetSignals::load(&conn);
                 fs.capture_panes();
-                let running = fs.agent_running(&format!("amux-{nm}"));
+                let running = fs.worker_running(&nm);
                 let (status, explain) = fs.derive_status_explain(&nm, running);
                 // THE RETROSPECTIVE HALF (AMUX-3761). Everything above answers
                 // "why is this lane's badge what it is RIGHT NOW", and every
@@ -25831,6 +25876,21 @@ pub(crate) async fn keys_verb(name: &str, body: &Value) -> Response {
     let keys = body_str(body, "keys");
     if keys.is_empty() {
         return jresp(StatusCode::BAD_REQUEST, json!({"error": "missing 'keys'"}));
+    }
+    // A chat worker has no pane: Escape / C-c mean "stop this turn", which
+    // its adapter does by signalling the provider (AMUX-5263). Any other key
+    // falls through and is refused as "not running" like before.
+    if matches!(keys.trim(), "Escape" | "C-c") {
+        if let super::worker_exec::Dispatch::Handled((ok, msg)) =
+            super::worker_exec::adapter_for_session(name).interrupt(name).await
+        {
+            tracing::info!(session = %name, keys = %keys, ok, detail = %msg, measured = true,
+                n_considered = 1, verdict = "keys_routed_to_adapter_interrupt", "keys verb");
+            return jresp(
+                StatusCode::OK,
+                json!({"ok": ok, "accepted": ok, "effect": if ok { "interrupted" } else { "no_turn" }, "message": msg}),
+            );
+        }
     }
     let (ok, msg) = send_keys_op(name, &keys).await;
     // A key press had no log line at all, so "no Enter in the log" could not
@@ -33362,7 +33422,11 @@ mod tests {
         assert!(src.contains("if automation && !isolated_schedule && session_is_isolated(name) {"));
         let body = src.split_once("pub(crate) async fn deliver_automated(").unwrap().1;
         let body = body.split_once("\n}\n").unwrap().0;
-        assert!(body.contains("if is_schedule_guard(guard) && session_is_isolated(name)"));
+        assert!(body.contains("if is_owner_configured_guard(guard) && session_is_isolated(name)"));
+        // Owner configuration is a schedule or the goal keeper, and nothing else.
+        assert!(is_owner_configured_guard("sched:SCHED-12") && is_owner_configured_guard("goal:gs-10"));
+        assert!(!is_owner_configured_guard("board-drive") && !is_owner_configured_guard("")
+            && !is_owner_configured_guard("project-steering"));
         assert!(!body.contains("send_text(state, name, text, false, SendOrigin::Automation)"),
             "the direct send must use the computed origin");
     }
@@ -33607,7 +33671,7 @@ mod tests {
             body.contains("            origin,\n") && body.contains("SendOrigin::Automation\n    };"),
             "the at-boundary fast path must use the computed origin, whose default is Automation"
         );
-        assert!(body.contains("if is_schedule_guard(guard) && session_is_isolated(name)"));
+        assert!(body.contains("if is_owner_configured_guard(guard) && session_is_isolated(name)"));
     }
 
     /// The test above spawned real sessions, so this pins the property that

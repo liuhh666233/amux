@@ -22,9 +22,9 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/site.js"></script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},{"@type":"ListItem","position":3,"name":"Running AI Coding Agents Overnight","item":"https://amux.io/guides/ai-coding-agents-overnight/"}]}</script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"The Complete Guide to Running AI Coding Agents Overnight","description":"Step-by-step guide to running AI coding agents unattended while you sleep. Task queues, guardrails, monitoring, and morning review workflows.","url":"https://amux.io/guides/ai-coding-agents-overnight/","datePublished":"2026-04-03","dateModified":"2026-09-10","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"The Complete Guide to Running AI Coding Agents Overnight","description":"Step-by-step guide to running AI coding agents unattended while you sleep. Task queues, guardrails, monitoring, and morning review workflows.","url":"https://amux.io/guides/ai-coding-agents-overnight/","datePublished":"2026-04-03","dateModified":"2026-09-27","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"How to Run AI Coding Agents Overnight","description":"Set up a fleet of AI coding agents that work while you sleep, with guardrails and monitoring.","step":[{"@type":"HowToStep","name":"Decompose tasks","text":"Break work into atomic, verifiable tasks that agents can complete independently."},{"@type":"HowToStep","name":"Configure your fleet","text":"Register sessions, assign directories, and set model preferences per task complexity."},{"@type":"HowToStep","name":"Set guardrails","text":"Configure CLAUDE.md rules, git hooks, file permissions, and cost caps."},{"@type":"HowToStep","name":"Set up owner alerts","text":"Configure amux to send push notifications and email when any agent needs attention. Use amux alert or the built-in owner-alert channel."},{"@type":"HowToStep","name":"Launch and monitor","text":"Start all agents, verify initial progress, then let the watchdog handle failures."},{"@type":"HowToStep","name":"Morning review","text":"Triage overnight output, review PRs, and merge completed work."}]}</script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is it safe to run AI coding agents overnight on production codebases?","acceptedAnswer":{"@type":"Answer","text":"Yes, with proper guardrails. Use separate git branches per agent, restrict file access via CLAUDE.md, enforce pre-commit hooks with linting and tests, and set cost caps. Never give overnight agents access to deployment pipelines, auth systems, or payment code."}},{"@type":"Question","name":"How many AI coding agents can I run overnight?","acceptedAnswer":{"@type":"Answer","text":"On a laptop: 5-7 agents comfortably (constrained by RAM and API rate limits). On a cloud VM (4+ cores, 16GB RAM): 20-50 agents. The bottleneck is usually API rate limits, not local compute. Stagger agent starts by 10-30 seconds to avoid hitting limits simultaneously."}},{"@type":"Question","name":"What tasks should I NOT give to overnight AI agents?","acceptedAnswer":{"@type":"Answer","text":"Avoid tasks that touch authentication, payment processing, infrastructure/deployment, database migrations on production, or anything requiring human judgment about business logic. Also avoid open-ended tasks like 'refactor the codebase' — agents need specific, bounded scope to work unattended."}},{"@type":"Question","name":"How much does it cost to run AI agents overnight?","acceptedAnswer":{"@type":"Answer","text":"With Claude Code on the Max plan ($200/month), you get unlimited usage — running 10 agents for 8 hours costs the same flat rate. On API pricing, expect $5-15 per agent-hour for Opus, $0.50-2 per agent-hour for Sonnet. A typical 8-hour overnight run with 10 agents on mixed models costs $50-100 on API pricing."}},{"@type":"Question","name":"What happens if an agent gets stuck or crashes overnight?","acceptedAnswer":{"@type":"Answer","text":"With amux's self-healing watchdog, crashed agents are automatically restarted and their last message is replayed. Context overflow triggers auto-compaction. Stuck agents (no output for a configurable timeout) are detected and restarted. You can also set hard time limits per agent."}},{"@type":"Question","name":"How do I get notified when an overnight AI agent needs attention?","acceptedAnswer":{"@type":"Answer","text":"amux has a built-in owner-alert channel that sends push notifications and email when agents page you. Agents call amux alert from their CLAUDE.md instructions for situations that warrant waking you up: a blocker, an unexpected error, or a finished queue. Alerts go to your phone via push and email simultaneously. The health invariant alert.channel_can_deliver verifies delivery works before your next overnight run."}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is it safe to run AI coding agents overnight on production codebases?","acceptedAnswer":{"@type":"Answer","text":"Yes, with proper guardrails. Use separate git branches per agent, restrict file access via CLAUDE.md, enforce pre-commit hooks with linting and tests, and set cost caps. Never give overnight agents access to deployment pipelines, auth systems, or payment code."}},{"@type":"Question","name":"How many AI coding agents can I run overnight?","acceptedAnswer":{"@type":"Answer","text":"On a laptop: 5-7 agents comfortably (constrained by RAM and API rate limits). On a cloud VM (4+ cores, 16GB RAM): 20-50 agents. The bottleneck is usually API rate limits, not local compute. Stagger agent starts by 10-30 seconds to avoid hitting limits simultaneously."}},{"@type":"Question","name":"What tasks should I NOT give to overnight AI agents?","acceptedAnswer":{"@type":"Answer","text":"Avoid tasks that touch authentication, payment processing, infrastructure/deployment, database migrations on production, or anything requiring human judgment about business logic. Also avoid open-ended tasks like 'refactor the codebase' — agents need specific, bounded scope to work unattended."}},{"@type":"Question","name":"How much does it cost to run AI agents overnight?","acceptedAnswer":{"@type":"Answer","text":"With Claude Code on the Max plan ($200/month), you get unlimited usage — running 10 agents for 8 hours costs the same flat rate. On API pricing, expect $5-15 per agent-hour for Opus, $0.50-2 per agent-hour for Sonnet. A typical 8-hour overnight run with 10 agents on mixed models costs $50-100 on API pricing."}},{"@type":"Question","name":"What happens if an agent gets stuck or crashes overnight?","acceptedAnswer":{"@type":"Answer","text":"With amux's self-healing watchdog, crashed agents are automatically restarted and their last message is replayed. Context overflow triggers auto-compaction. Stuck agents (no output for a configurable timeout) are detected and restarted. You can also set hard time limits per agent."}},{"@type":"Question","name":"How do I get notified when an overnight AI agent needs attention?","acceptedAnswer":{"@type":"Answer","text":"amux has a built-in owner-alert channel that sends push notifications and email when agents page you. Agents call amux alert from their CLAUDE.md instructions for situations that warrant waking you up: a blocker, an unexpected error, or a finished queue. Alerts go to your phone via push and email simultaneously. The health invariant alert.channel_can_deliver verifies delivery works before your next overnight run."}},{"@type":"Question","name":"How do I stop AI agents from pausing overnight to ask for permission?","acceptedAnswer":{"@type":"Answer","text":"Use standing approvals (AMUX-5270). You pre-authorize specific action categories — filesystem writes, git commits, test runners, API calls — before the overnight run starts. Agents proceed without interruption. Each category has a per-day cap and an optional dollar limit, so you retain meaningful control. When a cap is hit, the agent sends you an alert instead of silently stalling."}}]}</script>
 </head>
 <body>
   <header class="site-header">
@@ -41,7 +41,8 @@
   </header>
   <main>
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>Running AI Coding Agents Overnight</span></div>
-    <!-- EXP-086: top-of-page CTA on overnight guide (Sept 2026) -->
+    <!-- EXP-100: overnight guide Sept 2026 enrichment — standing approvals, goal keeper -->
+    <!-- EXP-086: original top-of-page CTA on overnight guide -->
     <div style="background:#0d7c42;border-radius:8px;padding:1rem 1.2rem;margin-bottom:1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
       <span style="font-size:.9rem;color:#fff">Open-source control plane for AI agent teams. Run dozens of agents overnight from your phone or browser.</span>
       <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="typeof posthog!=='undefined'&&posthog.capture('exp086_overnight_topofpage_cta_click')" style="background:#fff;color:#0d7c42;padding:0.45rem 1rem;border-radius:6px;font-size:.875rem;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0">View amux on GitHub ★</a>
@@ -57,6 +58,7 @@
         <li><a href="#architecture" style="color:var(--dim);text-decoration:none;">Architecture Overview</a></li>
         <li><a href="#task-decomposition" style="color:var(--dim);text-decoration:none;">Task Decomposition: The Most Important Step</a></li>
         <li><a href="#fleet-setup" style="color:var(--dim);text-decoration:none;">Setting Up Your Agent Fleet</a></li>
+        <li><a href="#standing-approvals" style="color:var(--dim);text-decoration:none;">Standing Approvals: Pre-Authorize Agent Actions</a></li>
         <li><a href="#guardrails" style="color:var(--dim);text-decoration:none;">Guardrails: Safety While You Sleep</a></li>
         <li><a href="#monitoring" style="color:var(--dim);text-decoration:none;">Monitoring &amp; Observability</a></li>
         <li><a href="#alerts" style="color:var(--dim);text-decoration:none;">Owner Alerts: Push, Email &amp; iMessage</a></li>
@@ -77,10 +79,12 @@
     <p><strong>Who this is for:</strong> Developers who are already using AI coding agents (Claude Code, Codex CLI, Gemini CLI) and want to run them unattended at scale. If you have never used an AI coding agent, start with <a href="/guides/getting-started/">Getting Started</a> first.</p>
 
     <h2 id="whats-new">What's new in September 2026</h2>
-    <p>This guide was updated September 2026 to reflect two significant amux releases that improve overnight reliability:</p>
+    <p>This guide was updated September 2026 to cover new amux features that improve overnight reliability:</p>
     <ul>
-      <li><strong>Board hygiene runtime job:</strong> A new background job automatically ages out stale <code>needsyou</code> cards, deduplicates autofix alerts, and filters conversational acks. Overnight runs generate less noise, and your morning review queue contains real decisions rather than resolved notifications.</li>
-      <li><strong>Mobile terminal streaming:</strong> The mobile dashboard now renders terminal output incrementally, showing diffs as they arrive. If you check your phone at 3am, you see live progress rather than a snapshot.</li>
+      <li><strong><a href="/guides/ai-agent-standing-approvals/">Standing approvals (AMUX-5270):</a></strong> Pre-authorize specific action categories so agents never pause overnight to ask permission. Filesystem writes, git operations, API calls, and test runs can all be granted upfront — with per-day caps and dollar limits. The overnight hang problem is solved. See the <a href="/guides/ai-agent-standing-approvals/">full standing approvals guide</a>.</li>
+      <li><strong>Goal keeper:</strong> Run a worker session until a declared <code>/goal</code> is met, not just until the context window fills. Agents that were previously running out of context mid-task now continue across as many turns as needed to reach the goal.</li>
+      <li><strong>Board hygiene runtime job:</strong> A background job automatically ages out stale <code>needsyou</code> cards, deduplicates autofix alerts, and filters conversational acks. Your morning review queue contains real decisions rather than noise.</li>
+      <li><strong>Mobile terminal streaming:</strong> The mobile dashboard renders terminal output incrementally, showing diffs as they arrive. Check your phone at 3am and see live progress.</li>
     </ul>
 
     <h2 id="architecture">Architecture Overview</h2>
@@ -290,6 +294,59 @@ done</code></pre>
         </tr>
       </tbody>
     </table>
+
+    <h2 id="standing-approvals">Standing Approvals: Pre-Authorize Agent Actions</h2>
+    <p>The single biggest reason overnight runs stall is the approval prompt. An agent reaches a file write, a git push, or an API call — and pauses until a human says yes. At 3am, nobody says yes.</p>
+    <p><strong>Standing approvals</strong> (shipped AMUX-5270, September 2026) solve this. You define which action categories are pre-approved before the run starts, and agents proceed without asking.</p>
+    <table style="width:100%;border-collapse:collapse;font-size:0.88rem;margin:1rem 0;">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border);">
+          <th style="text-align:left;padding:0.6rem;">Category</th>
+          <th style="text-align:left;padding:0.6rem;">What it covers</th>
+          <th style="text-align:left;padding:0.6rem;">Typical overnight setting</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.6rem;"><code>filesystem</code></td>
+          <td style="padding:0.6rem;">File reads, writes, directory creation</td>
+          <td style="padding:0.6rem;">Approve (bounded by CLAUDE.md scope)</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.6rem;"><code>git</code></td>
+          <td style="padding:0.6rem;">Commits, branch creation, worktree ops</td>
+          <td style="padding:0.6rem;">Approve commits; require review for push</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.6rem;"><code>shell</code></td>
+          <td style="padding:0.6rem;">Shell commands, test runners, build scripts</td>
+          <td style="padding:0.6rem;">Approve test/lint; deny deploy scripts</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.6rem;"><code>api_calls</code></td>
+          <td style="padding:0.6rem;">HTTP requests from agent code</td>
+          <td style="padding:0.6rem;">Approve read-only; deny write mutations</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.6rem;"><code>mcp_tools</code></td>
+          <td style="padding:0.6rem;">MCP tool invocations</td>
+          <td style="padding:0.6rem;">Per-tool; approve safe tools by name</td>
+        </tr>
+        <tr>
+          <td style="padding:0.6rem;"><code>spending</code></td>
+          <td style="padding:0.6rem;">Model API costs</td>
+          <td style="padding:0.6rem;">Set dollar cap per session</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Configure standing approvals in the amux dashboard under <strong>Settings → Standing Approvals</strong>, or via the scoped environment flag:</p>
+    <pre><code># Per-session scope — only affects this worker
+AMUX_APPROVE_FILESYSTEM=1
+AMUX_APPROVE_GIT_COMMITS=1
+AMUX_APPROVE_SHELL_TESTS=1
+AMUX_APPROVE_DAILY_CAP=50   # max approvals/day before requiring human review</code></pre>
+    <p>Each approval category has a per-day cap and an optional dollar limit. When a cap is reached, the agent pauses and sends you an alert — so you retain meaningful control without having to babysit every action.</p>
+    <p>For a full reference including scope (global / group / worker), limits, and the approval feed, see the <a href="/guides/ai-agent-standing-approvals/">Standing Approvals guide</a>.</p>
 
     <h2 id="guardrails">Guardrails: Safety While You Sleep</h2>
     <p>Guardrails are what separate "agents running overnight" from "agents running amok overnight." Set these up before you start your first overnight run.</p>
@@ -602,6 +659,9 @@ amux cron add --schedule "0 23 * * *" \
 
     <h3>Can I use this with agents other than Claude Code?</h3>
     <p>amux works with any CLI agent that runs in a terminal: Claude Code, Codex CLI, Gemini CLI, Aider, and others. The orchestration layer (task board, watchdog, dashboard) is agent-agnostic.</p>
+
+    <h3>How do I stop AI agents from pausing overnight to ask for permission?</h3>
+    <p>Use <a href="/guides/ai-agent-standing-approvals/">standing approvals</a> (AMUX-5270). Before the run, you pre-authorize the action categories you trust -- filesystem writes, git commits, test runners, API calls. Agents proceed without prompting you. Each category has a per-day cap and an optional dollar limit, so a cap hit sends you an alert instead of a prompt at 3am.</p>
 
     <div class="cta-box">
       <h3>Start running agents overnight</h3>

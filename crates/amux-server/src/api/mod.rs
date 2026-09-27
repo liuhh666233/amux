@@ -17,6 +17,7 @@ pub mod browser;
 pub mod browser_import;
 pub mod calendar;
 pub mod channels;
+pub mod chat_stream;
 pub mod chat_worker;
 pub mod commit_mentions;
 pub mod config_iac;
@@ -61,6 +62,7 @@ pub mod memories;
 pub mod messages;
 pub(crate) mod native_status;
 pub mod metrics;
+pub mod traces;
 pub mod observability;
 pub mod offline_origin;
 pub mod orchestrate;
@@ -95,6 +97,7 @@ pub mod settings;
 pub mod simple;
 pub mod skills;
 pub mod signals;
+pub mod standing_approvals;
 pub mod skin;
 pub mod speedtest;
 pub mod sql;
@@ -161,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/models", axum::routing::get(workers::model_catalog))
         .nest("/api/memories", memories::routes())
+        .nest("/api/traces", traces::routes())
         .nest("/api/messages", messages::routes())
         .nest("/api/schedules", schedules::routes())
         // AMUX-5237: named clearance signals. A card waits with
@@ -299,6 +303,8 @@ pub fn router(state: AppState) -> Router {
         .merge(connectors::routes())
         .nest("/api/telegram", telegram::routes())
         .merge(grants::routes())
+        // AMUX-5270: the owner's standing answers to escalations.
+        .merge(standing_approvals::routes())
         .merge(vault::routes())
         .merge(self_update::routes())
         .nest("/api/proxies", proxies::routes())

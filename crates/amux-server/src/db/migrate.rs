@@ -523,6 +523,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "0092_pinned_notes",
         sql: include_str!("../../migrations/0092_pinned_notes.sql"),
     },
+    Migration {
+        version: 93,
+        name: "0093_standing_approvals",
+        sql: include_str!("../../migrations/0093_standing_approvals.sql"),
+    },
+    Migration {
+        version: 94,
+        name: "0094_trace_archive",
+        sql: include_str!("../../migrations/0094_trace_archive.sql"),
+    },
 ];
 
 /// Migrations embedded in THIS binary that the DB has not recorded yet.
