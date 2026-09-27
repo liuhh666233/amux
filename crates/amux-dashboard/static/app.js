@@ -5418,9 +5418,17 @@ function _workerExecutionBadge(s, runtimeBoard, opts) {
   if (s.running && (tele.health === 'degraded' || tele.health === 'missing')) badge += '<span class="status-badge telemetry-warn" title="'
     + esc('Status channel ' + tele.health + ': ' + (tele.reason || '') + ' The status shown is ' + (s.status_authority || 'inferred') + '.') + '">⚠ telemetry</span>';
   // The worker-details header makes the pill itself the entry to this
-  // evidence (updatePeekStatus), so it asks for no separate ⓘ button.
+  // evidence (updatePeekStatus), so it asks for no change here.
   if (opts && opts.inspect === false) return badge;
-  return badge + '<button type="button" class="status-badge" aria-label="Status evidence for ' + esc(s.name) + '" title="Inspect live status evidence" onclick="event.stopPropagation();_openStatusDetail(\'' + escJs(s.name) + '\')">ⓘ</button>';
+  // THE PILL IS THE BUTTON (Ethan, 2026-09-27: "make the status indicator
+  // pill thing what u click to show what the (i) shows and remove the (i)
+  // button"). A plain pill becomes a button that opens the status detail,
+  // like the worker-details header; pills that were already buttons (error,
+  // blocked, API error, unknown) open it already.
+  return badge.replace(/^<span class="status-badge([^"]*)"([^>]*)>([\s\S]*?)<\/span>/, (m, cls, attrs, inner) =>
+    '<button type="button" class="status-badge' + cls + '"' + (/\btitle=/.test(attrs) ? attrs : attrs + ' title="Show status detail"')
+    + ' aria-label="' + esc(s.name) + ' status: ' + esc(inner.replace(/<[^>]*>/g, '')) + '. Show detail"'
+    + ' onclick="event.stopPropagation();_openStatusDetail(\'' + escJs(s.name) + '\')">' + inner + '</button>');
 }
 
 function updatePeekStatus() {
@@ -12280,7 +12288,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1143';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1144';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
