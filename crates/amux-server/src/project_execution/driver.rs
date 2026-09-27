@@ -1288,7 +1288,11 @@ fn committed_assets_match(w: &workspace::Workspace, report: &planner::Report, he
 async fn recover_reported_head(w: &workspace::Workspace, report: &planner::Report) -> Option<String> {
     if report.head.len() != 40 || !report.head.bytes().all(|byte| byte.is_ascii_hexdigit())
         || report.assets.is_empty() { return None; }
-    if workspace::git(&w.path, &["cat-file", "-t", &report.head]).await.as_deref() == Ok("commit") {
+    // `-e <sha>^{commit}` succeeds only for an existing commit: the same test
+    // as reading `cat-file -t`, without a `-t` the tmux target audit reads as
+    // an unexact tmux session name.
+    let as_commit = format!("{}^{{commit}}", report.head);
+    if workspace::git(&w.path, &["cat-file", "-e", &as_commit]).await.is_ok() {
         return Some(report.head.clone());
     }
     let prefix = &report.head[..10];

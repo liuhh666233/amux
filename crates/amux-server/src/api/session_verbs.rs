@@ -9868,6 +9868,16 @@ pub(crate) fn send_failure_status(msg: &str) -> (StatusCode, Option<&'static str
             Some("the message is in the lane's composer and submits at its next idle boundary; do not resend it"),
         );
     }
+    // --- 409: the composer still holds text after two C-u clears, usually
+    //     because a picker or dialog is covering it (9397589f). The send was
+    //     ABORTED before pasting so nothing got concatenated; nothing was
+    //     delivered and the lane's own state has to change first.
+    if m.starts_with("composer could not be cleared before pasting") {
+        return (
+            StatusCode::CONFLICT,
+            Some("nothing was pasted: the lane's composer holds text or a dialog is open. Open the worker, submit or clear what is there, then resend"),
+        );
+    }
     // --- 404: the target does not exist.
     if m.starts_with("session '") && m.ends_with("not found") {
         return (
@@ -20822,8 +20832,10 @@ fn orphan_landing(session: &str, text: &str, queued_at: f64) -> OrphanLanding {
         return OrphanLanding::Landed;
     }
     // Pasted but not submitted: re-queueing would type it twice.
+    // Exact-match target, so a sibling `amux-<session>-2` is never read instead.
+    let pt = crate::backend::tmux::pane_target(&format!("amux-{session}"));
     let pane = std::process::Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", &format!("amux-{session}"), "-S", "-80"])
+        .args(["capture-pane", "-p", "-t", &pt, "-S", "-80"])
         .output()
         .ok()
         .filter(|o| o.status.success())

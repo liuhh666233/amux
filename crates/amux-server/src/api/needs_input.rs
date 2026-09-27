@@ -647,17 +647,9 @@ mod tests {
     #[test]
     fn build_dedupes_filters_orders_and_snoozes() {
         let dir = tempfile::tempdir().unwrap();
-        // The columns build() reads, and nothing else: a pure-SQL fixture.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE prefs (key TEXT PRIMARY KEY, value TEXT);
-             CREATE TABLE issues (id TEXT PRIMARY KEY, title TEXT NOT NULL, desc TEXT NOT NULL DEFAULT '',
-               status TEXT, session TEXT, created INTEGER, updated INTEGER, deleted INTEGER, type TEXT,
-               archived INTEGER NOT NULL DEFAULT 0, ask_type TEXT, ask_question TEXT, ask_unblocks TEXT,
-               ask_actor TEXT, decision_question TEXT, decision_rationale TEXT, waiting_on TEXT,
-               entered_state_at INTEGER);",
-        )
-        .unwrap();
+        // The real migration chain, so a column build() starts reading exists
+        // here the moment its migration does (tests/schema_fixtures.rs).
+        let conn = crate::db::migrate::test_memdb();
         seed(
             &conn,
             (

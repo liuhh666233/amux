@@ -243,8 +243,11 @@ async fn tick(app: crate::api::AppState) {
         let n2 = name.clone();
         let (records, footer) = tokio::task::spawn_blocking(move || {
             let records = crate::api::session_verbs::iter_jsonl_tail(&path, 6_000_000);
+            // Exact-match target: a bare `amux-x` resolves to a sibling
+            // `amux-x-2` pane while `amux-x` is briefly absent.
+            let pt = crate::backend::tmux::pane_target(&format!("amux-{n2}"));
             let footer = std::process::Command::new("tmux")
-                .args(["capture-pane", "-p", "-t", &format!("amux-{n2}"), "-S", "-12"])
+                .args(["capture-pane", "-p", "-t", &pt, "-S", "-12"])
                 .output()
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains("/goal active"))
