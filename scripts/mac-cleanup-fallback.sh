@@ -45,7 +45,7 @@ if [ -f "$LAST" ] && [ -z "$(find "$LAST" -mmin "+$STALE_MIN" 2>/dev/null)" ] &&
   exit 0
 fi
 if [ -f "$LAST" ]; then
-  age_min=$(( ( $(date +%s) - $(stat -f %m "$LAST" 2>/dev/null || stat -c %Y "$LAST") ) / 60 ))
+  age_min=$(( ( $(date +%s) - $(stat -c %Y "$LAST" 2>/dev/null || stat -f %m "$LAST") ) / 60 ))
   if grep -q '^mac-cleanup: done' "$LAST"; then why="last tick output is ${age_min}m old (over ${STALE_MIN}m)"
   else why="the last tick (${age_min}m ago) did not finish: no done line and no tick running, so it was killed"; fi
 else

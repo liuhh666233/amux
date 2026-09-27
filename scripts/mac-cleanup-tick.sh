@@ -351,7 +351,10 @@ lima_disks_report() { # <lima_root> [show_kb]
     elif [ -d "$root/$name" ]; then state=stopped
     else state=ORPHANED; orph=$((orph+kb)); fi
     if [ "$state" != stopped ] || [ "$kb" -ge "$show" ]; then
-      age=$(( ( $(date +%s) - $(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo 0) ) / 86400 ))
+      # GNU first: GNU `stat -f` means --file-system, so `stat -f %m` prints a
+      # multi-line "File: ..." block on Linux instead of failing, and the
+      # arithmetic below dies on "File: unbound variable". BSD refuses -c.
+      age=$(( ( $(date +%s) - $(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0) ) / 86400 ))
       detail="${detail}mac-cleanup:   $(fmt_kb "$kb") ${name} ${state} (last written ${age}d ago)"$'\n'
     fi
   done
