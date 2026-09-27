@@ -5321,7 +5321,7 @@ async function openNeedsInput() {
     ov.id = 'ni-overlay';
     ov.className = 'modal-overlay active ni-overlay';
     ov.innerHTML = '<section class="modal ni-modal" role="dialog" aria-modal="true" aria-labelledby="ni-title">'
-      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span><button type="button" id="ni-older-toggle" class="ni-older-toggle" hidden onclick="_niToggleOlder()"></button></div>'
+      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span><button type="button" id="ni-older-toggle" class="ni-older-toggle" hidden onclick="_niToggleOlder()"></button><button type="button" id="ni-approve-all" class="ni-approve-all" hidden onclick="_niApproveAllArm()"></button></div>'
       + '<div class="ni-nav"><button class="btn ni-prev" aria-label="Previous" onclick="_niStep(-1)">&#8249;</button>'
       + '<button class="btn ni-next" aria-label="Next" onclick="_niStep(1)">&#8250;</button>'
       + '<button class="modal-close ni-close" aria-label="Close triage" onclick="closeNeedsInput()">&times;</button></div></header>'
@@ -5392,6 +5392,12 @@ function _niRenderCounter() {
   if (!el) return;
   const { n } = _niCurrent();
   el.textContent = n ? (_niIdx + 1) + ' of ' + n : '';
+  const all = document.getElementById('ni-approve-all');
+  if (all) {
+    const k = _niApprovable().length;
+    all.hidden = !k || _niBusy;
+    all.textContent = 'Approve all (' + k + ')';
+  }
   const tog = document.getElementById('ni-older-toggle');
   if (tog) {
     tog.hidden = !_niOlderCount;
@@ -5434,6 +5440,7 @@ function _niRender() {
     + (it.context ? '<details class="ni-context" open><summary>Context</summary><pre>' + esc(it.context) + '</pre></details>' : '')
     + _niPanelHtml(it);
   const hasTarget = !!(it.worker || it.kind === 'email' || it.card);
+  if (_niAllArmed) { foot.innerHTML = _niApproveAllConfirmHtml(); return; }
   foot.innerHTML = '<div class="ni-actions">'
     + '<button class="btn primary ni-approve" onclick="_niAct(\'approve\')"' + (hasTarget ? '' : ' disabled') + '>' + (it.kind === 'email' ? 'Send' : 'Approve') + '</button>'
     + '<button class="btn danger ni-decline" onclick="_niAct(\'decline\')"' + (hasTarget ? '' : ' disabled') + '>Decline</button>'
@@ -5619,6 +5626,56 @@ async function _niAct(action) {
   const label = { approve: 'Approved', approve_always: 'Approved and saved rule', decline: 'Declined', reply: 'Replied' }[action];
   showToast(label + ': ' + done.join(', '));
   _niDone(it);
+}
+
+// APPROVE ALL (Ethan, 2026-09-27 15:07: "maybe add an approve all button").
+// Two taps: the first shows exactly what it will do (how many outbound sends,
+// how much spend), the second runs it. It walks the queue through _niAct, the
+// same path as one tap on Approve, so every send is deduped, every card note
+// carries its marker, and a refusal leaves that item in the queue. Asks that
+// only the owner can DO (mint a key, sign in, grant access) are skipped:
+// "approved" cannot complete them.
+let _niAllArmed = false;
+function _niApprovable() {
+  return _niItems(_niShowOlder).filter(i => !!(i.worker || i.kind === 'email' || i.card)
+    && !['credential', 'access'].includes(i.ask_type));
+}
+function _niApproveAllArm() {
+  if (_niBusy) return;
+  _niAllArmed = true; _niRender();
+}
+function _niApproveAllCancel() { _niAllArmed = false; _niRender(); }
+function _niApproveAllConfirmHtml() {
+  const items = _niApprovable();
+  const by = c => items.filter(i => (i.kind === 'email' ? 'outbound' : i.category) === c).length;
+  const out = by('outbound'), money = by('money'), prod = by('prod_data');
+  const other = items.length - out - money - prod;
+  const skipped = _niItems(_niShowOlder).length - items.length;
+  const parts = [out && out + ' outbound (emails and posts go out)', money && money + ' spend', prod && prod + ' production data', other && other + ' other']
+    .filter(Boolean).join(', ');
+  return '<div class="ni-confirm-all" role="alertdialog" aria-labelledby="ni-confirm-all-t">'
+    + '<p id="ni-confirm-all-t"><strong>Approve ' + items.length + ' item' + (items.length === 1 ? '' : 's') + '?</strong> ' + esc(parts) + '.'
+    + (skipped ? ' Leaves ' + skipped + ' that need you to act yourself (keys, sign-ins, grants).' : '') + '</p>'
+    + '<div class="ni-actions"><button class="btn primary ni-approve" onclick="_niApproveAllRun()">Approve all ' + items.length + '</button>'
+    + '<button class="btn" onclick="_niApproveAllCancel()">Cancel</button></div></div>';
+}
+async function _niApproveAllRun() {
+  if (_niBusy) return;
+  _niAllArmed = false;
+  const skip = new Set();
+  let ok = 0, refused = 0;
+  for (let guard = 0; guard < 200; guard++) {
+    const list = _niItems(_niShowOlder);
+    const next = list.findIndex(i => !skip.has(i.key) && _niApprovable().some(a => a.key === i.key));
+    if (next < 0) break;
+    const key = list[next].key;
+    _niIdx = next;
+    await _niAct('approve');
+    if (_niItems(_niShowOlder).some(i => i.key === key)) { skip.add(key); refused++; } else ok++;
+  }
+  _niLog('approve_all', { key: 'batch', card: '', worker: '' }, refused ? (ok ? 'partial' : 'refused') : 'ok', ok + ' approved, ' + refused + ' refused');
+  showToast('Approved ' + ok + (refused ? '; ' + refused + ' refused and left in the queue' : ''));
+  _niIdx = 0; _niRender();
 }
 
 async function _niSnooze(minutes) {

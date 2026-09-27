@@ -7606,3 +7606,9 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
 .ni-older-toggle { margin-left: 8px; background: none; border: 1px solid var(--border); border-radius: 999px;
   color: var(--dim); font-size: 0.75rem; padding: 4px 10px; min-height: 32px; cursor: pointer; }
 @media (max-width: 600px) { .ni-older-toggle { min-height: 44px; } }
+
+/* Approve all: header button and the confirmation that replaces the footer. */
+.ni-approve-all { margin-left: 8px; background: var(--green, #1a7f37); color: #fff; border: none; border-radius: 999px;
+  font-size: 0.75rem; font-weight: 600; padding: 4px 12px; min-height: 32px; cursor: pointer; }
+@media (max-width: 600px) { .ni-approve-all { min-height: 44px; } }
+.ni-confirm-all p { margin: 0 0 10px; line-height: 1.45; }

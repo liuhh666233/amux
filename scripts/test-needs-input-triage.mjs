@@ -98,7 +98,7 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
     if (!u.pathname.includes('/ni-fixture')) { writes.push({ url: u.pathname, body: {}, leaked: true }); return r.fulfill({ status: 403, body: '{}' }); }
     const body = JSON.parse(r.request().postData() || '{}');
     writes.push({ url: new URL(r.request().url()).pathname, body });
-    const dup = writes.filter(w => w.body.msg_id && w.body.msg_id === body.msg_id).length > 1;
+    const dup = writes.filter(w => w.body && w.body.msg_id && w.body.msg_id === body.msg_id).length > 1;
     r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, id: 'm1', submitted: true, deduped: dup }) });
   });
   await page.route(/\/api\/board\/(NI-1|TP-37|GL-9)$/, r => {
@@ -129,15 +129,17 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
   await pill.waitFor({ state: 'visible', timeout: 25000 });
   await page.waitForFunction(() => typeof _niQueue !== 'undefined' && _niQueue && _niQueue.length === 3, null, { timeout: 15000 });
   const pillText = mobile ? await page.locator('#needs-input-pill-count').innerText() : await page.locator('#needs-input-pill-text').innerText();
-  // 3 server items + GL-9 (blocked worker whose card is not in the queue); TP-37 deduped.
-  check(mobile ? pillText.trim() === '4' : /4 need input/.test(pillText), `${label}: pill counts the merged queue (${pillText.trim()})`);
+  // The higher bar (69e7e227): TP-37 (credential), NI-1 (spend) and the email
+  // count; GL-9 ("which retry policy") is a call the worker makes, behind Show more.
+  check(mobile ? pillText.trim() === '3' : /3 need input/.test(pillText), `${label}: pill counts only what needs the owner (${pillText.trim()})`);
   await pill.click();
   const modal = page.locator('#ni-overlay .ni-modal');
   await modal.waitFor({ timeout: 5000 });
   const counter = page.locator('#ni-counter');
   const question = page.locator('#ni-question');
-  check((await counter.innerText()) === '1 of 4', `${label}: opens at 1 of 4`);
-  check(/\$40 of GPU/.test(await question.innerText()), `${label}: money ask first`);
+  check((await counter.innerText()) === '1 of 3', `${label}: opens at 1 of 3`);
+  check(/Sign in once/.test(await question.innerText()), `${label}: the worker blocked right now comes first`);
+  check(/Show 1 more/.test(await page.locator('#ni-older-toggle').innerText()), `${label}: the rest is one tap away (Show 1 more)`);
   const mb = await modal.boundingBox();
   if (mobile) check(mb && mb.width >= 389 && mb.height >= 800, `${label}: full-screen sheet (${mb && Math.round(mb.width)}x${mb && Math.round(mb.height)})`);
   else check(mb && mb.width <= 640 && mb.x > 200, `${label}: centered modal (${mb && Math.round(mb.width)} wide at x=${mb && Math.round(mb.x)})`);
@@ -160,15 +162,16 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
     } else await page.keyboard.press(dir > 0 ? 'j' : 'ArrowLeft');
   };
   await step(1);
-  check((await counter.innerText()) === '2 of 4' && /nathan@example.com/.test(await question.innerText()), `${label}: ${mobile ? 'swipe' : 'j'} steps to the email approval (2 of 4)`);
+  check((await counter.innerText()) === '2 of 3' && /nathan@example.com/.test(await question.innerText()), `${label}: ${mobile ? 'swipe' : 'j'} steps to the email approval, newest first (2 of 3)`);
   check(await page.locator('#ni-overlay .ni-always').isDisabled(), `${label}: no standing rule from an email approval`);
   await page.screenshot({ path: path.join(out, `triage-2-email-${label}.png`) });
   await step(1);
-  check((await counter.innerText()) === '3 of 4' && /Sign in once/.test(await question.innerText()), `${label}: steps to TP-37 (3 of 4)`);
+  check((await counter.innerText()) === '3 of 3' && /\$40 of GPU/.test(await question.innerText()), `${label}: steps to the spend ask (3 of 3)`);
   await step(-1);
-  check((await counter.innerText()) === '2 of 4', `${label}: ${mobile ? 'swipe back' : 'ArrowLeft'} returns to 2 of 4`);
+  check((await counter.innerText()) === '2 of 3', `${label}: ${mobile ? 'swipe back' : 'ArrowLeft'} returns to 2 of 3`);
   await step(-1);
-  check((await counter.innerText()) === '1 of 4', `${label}: back at 1 of 4`);
+  check((await counter.innerText()) === '1 of 3', `${label}: back at 1 of 3`);
+  await page.evaluate(() => { _niIdx = _niItems(false).findIndex(x => x.card === 'NI-1'); _niPanel = ''; _niRender(); });
 
   // APPROVE the money ask.
   await page.locator('#ni-overlay .ni-approve').click();
@@ -184,7 +187,7 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
     check(send && /^Approved \(NI-1\): Approve about \$40/.test(send.body.text) && /Proceed\.$/.test(send.body.text), `${label}: approve sends the owner message (${send && send.body.text.slice(0, 50)})`);
     check(patch && patch.body.status === 'todo' && /Approved by owner/.test(patch.body.desc_append || ''), `${label}: approve moves NI-1 to todo and appends the decision`);
     check(/Approved: message queued for ni-fixture-spend, NI-1 moved to todo/.test(tmsg), `${label}: toast says what happened (${tmsg})`);
-    check((await counter.innerText()) === '1 of 3' && /nathan@example.com/.test(await question.innerText()), `${label}: auto-advances to the next item (1 of 3)`);
+    check(/ of 2$/.test(await counter.innerText()), `${label}: auto-advances, one fewer left (${await counter.innerText()})`);
     const log = writes.find(w => w.url === '/api/needs-input/log' && w.body.action === 'approve');
     check(log && log.body.outcome === 'ok' && log.body.card === 'NI-1', `${label}: triage_action logged server-side`);
   } else {
@@ -192,7 +195,7 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
     check(/Refused: NI-1: cross-lane needsyou move requires authorized_by/.test(ref), `${label}: a board refusal is shown verbatim (${ref})`);
     const log = writes.find(w => w.url === '/api/needs-input/log' && w.body.action === 'approve');
     check(log && log.body.outcome === 'partial', `${label}: the refusal is logged as partial`);
-    check((await counter.innerText()) === '1 of 4', `${label}: a refused item stays put for a retry`);
+    check((await counter.innerText()) === '3 of 3', `${label}: a refused item stays put for a retry`);
     // Idempotent retry: same msg_id (server dedups), and the board now accepts.
     await page.locator('#ni-overlay .ni-approve').click();
     await page.waitForTimeout(600);
@@ -202,7 +205,7 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
     await page.waitForTimeout(1500);
     const sends = writes.filter(w => w.url === '/api/sessions/ni-fixture-spend/send');
     check(sends.length >= 1 && new Set(sends.map(x => x.body.msg_id)).size === 1, `${label}: the retry reuses the msg_id (${sends.length} deliveries, 1 id)`);
-    check((await counter.innerText()) === '1 of 3', `${label}: auto-advances after the retry lands`);
+    check(/ of 2$/.test(await counter.innerText()), `${label}: auto-advances after the retry lands`);
   }
   await page.screenshot({ path: path.join(out, `triage-3-after-approve-${label}.png`) });
 
@@ -228,8 +231,32 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
   const sn = writes.find(w => w.url === '/api/needs-input/snooze');
   const tnow = Date.now() / 1000;
   check(sn && sn.body.key === cur && sn.body.until > tnow + 3500 && sn.body.until < tnow + 3700, `${label}: snooze 1h stored server-side for ${cur}`);
-  check((await counter.innerText()) !== before, `${label}: snoozed item leaves the queue (${before} -> ${await counter.innerText()})`);
+  check(!(await page.evaluate(k => _niItems(true).some(i => i.key === k), cur)), `${label}: snoozed item leaves the queue (${cur})`);
   await page.screenshot({ path: path.join(out, `triage-5-after-snooze-${label}.png`) });
+
+  // APPROVE ALL (15:07): two taps, skips what only the owner can do.
+  queue = fixtureQueue.map(x => ({ ...x }));
+  cards['NI-1'].status = 'needsyou'; cards['TP-37'].status = 'needsyou';
+  await page.evaluate(async () => { _niHandled.clear(); await _niFetch(); _niIdx = 0; _niPanel = ''; _niRender(); });
+  const before_all = writes.length;
+  const allBtn = page.locator('#ni-approve-all');
+  check(await allBtn.isVisible() && /Approve all \(2\)/.test(await allBtn.innerText()), `${label}: Approve all offered for the 2 approvable items (${await allBtn.innerText()})`);
+  await allBtn.click();
+  const conf = await page.locator('#ni-overlay .ni-confirm-all').innerText();
+  check(/Approve 2 items\?/.test(conf) && /1 outbound/.test(conf) && /1 spend/.test(conf) && /Leaves 1 that need you/.test(conf), `${label}: first tap only confirms, and says what goes out (${conf.replace(/\s+/g, ' ').slice(0, 120)})`);
+  check(writes.length === before_all, `${label}: nothing written before the confirm tap`);
+  await page.screenshot({ path: path.join(out, `triage-7-approve-all-confirm-${label}.png`) });
+  await page.locator('#ni-overlay .ni-confirm-all .ni-approve').click();
+  const doneAll = await waitToast(/^Approved \d+/, 15000);
+  const sends_all = writes.slice(before_all).filter(w => w.url === '/api/sessions/ni-fixture-spend/send');
+  const email_all = writes.slice(before_all).filter(w => /\/api\/email\/approve/.test(w.url));
+  check(/^Approved 2$/.test(doneAll), `${label}: approve all reports its result (${doneAll})`);
+  // NI-1 was approved earlier in this run with the same text, so the owner
+  // message is deduped client-side and only the card records the decision.
+  const ni1_all = writes.slice(before_all).filter(w => w.url === '/api/board/NI-1');
+  check((sends_all.length >= 1 || ni1_all.length >= 1) && email_all.length === 1, `${label}: approve all approved the spend and sent the email (sends ${sends_all.length}, NI-1 patches ${ni1_all.length}, email ${email_all.length})`);
+  check(/Sign in once/.test(await question.innerText()) && (await counter.innerText()) === '1 of 1', `${label}: the credential ask stays for the owner`);
+  await page.screenshot({ path: path.join(out, `triage-8-after-approve-all-${label}.png`) });
 
   // EMPTY STATE.
   queue = []; sess = [];

@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2290,
+  "n_considered": 2295,
   "command_handlers": {
     "_applyEmbedView": {
       "kind": "command._applyEmbedView",
@@ -1576,6 +1576,12 @@
     },
     "_niAct": {
       "kind": "command._niAct",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niApproveAllRun": {
+      "kind": "command._niApproveAllRun",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
