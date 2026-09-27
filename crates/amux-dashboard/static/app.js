@@ -5412,7 +5412,7 @@ function _niRenderCounter() {
   }
 }
 function _niCatLabel(c) {
-  return { money: 'Money', outbound: 'Outbound', prod_data: 'Prod data' }[c] || '';
+  return { money: 'Money', outbound: 'Outbound', prod_data: 'Prod data', credential: 'Credential' }[c] || '';
 }
 function _niRender() {
   const body = document.getElementById('ni-body');
@@ -5438,7 +5438,9 @@ function _niRender() {
   const s = it.worker ? sessions.find(x => x.name === it.worker) : null;
   const st = s ? (s.running ? (s.status === 'waiting' && s.waiting_reason === 'owner' ? 'waiting on you' : (s.status || 'running')) : 'stopped') : (it.worker ? 'not in fleet' : '');
   const cat = _niCatLabel(it.category);
-  const ref = it.kind === 'email' ? 'Email approval' : (it.card || 'No card');
+  // Re-asks of this card from other lanes are folded into it server-side.
+  const also = (it.also_asked_by || []).join(', ');
+  const ref = it.kind === 'email' ? 'Email approval' : (it.card || 'No card') + (also ? ' (also ' + also + ')' : '');
   body.innerHTML = '<div class="ni-meta">'
     + (it.worker ? '<span class="ni-worker">' + esc(it.worker) + '</span>' : '')
     + (st ? '<span class="ni-status">' + esc(st) + '</span>' : '')
@@ -13244,7 +13246,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1155';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1156';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.

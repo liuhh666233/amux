@@ -104,6 +104,15 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
     if ask_type == "customer_outbound" {
         return ("outbound", 0);
     }
+    // A credential ask is a credential ask, whatever else its text mentions
+    // (Ethan, 2026-09-27 19:22: "i dont think the needs input are even
+    // correct"). MF-730 "add two repo secrets ... this is a copy, not a
+    // provisioning decision" read as money on "provisioning"; MD-219 "rotate
+    // NPM_TOKEN ... publish has been dead" read as outbound on "publish".
+    // A dollar figure still makes it money.
+    if matches!(ask_type, "credential" | "access") && !dollar && reads_like_credential(&t) {
+        return ("credential", 0);
+    }
     if spends {
         return ("money", 0);
     }
@@ -260,6 +269,48 @@ pub struct Queue {
     pub excluded_peer_actor: usize,
 }
 
+/// Drop a card whose question OPENS by naming another queued card: it is a
+/// re-ask of that one, and answering the named card answers it. Measured
+/// 2026-09-27: GCA-137 and MC-1455 ("Can you run the one-line MF-730 grant"),
+/// MM-86 ("The Teal key (MM-84) is still waiting on you"), BR-25 ("hold
+/// publishing until BR-42 goes green"). Only the opening counts: GP-48 cites
+/// MS-1345 as evidence 1,000 characters in and is its own ask. The target
+/// carries `also_asked_by` so the folded card stays visible.
+fn fold_reasks(by_key: &mut BTreeMap<String, Value>) {
+    const OPENING: usize = 160;
+    let mut folds: Vec<(String, String)> = Vec::new();
+    for (key, item) in by_key.iter() {
+        let me = item["card"].as_str().unwrap_or("");
+        let q = item["question"].as_str().unwrap_or("");
+        let head: String = q.chars().take(OPENING).collect();
+        let target = card_ids(&head)
+            .into_iter()
+            .find(|id| id != me && by_key.contains_key(&format!("card:{id}")));
+        if let Some(t) = target {
+            folds.push((key.clone(), format!("card:{t}")));
+        }
+    }
+    // A fold into a card that is itself folded would lose both: skip those.
+    let sources: std::collections::HashSet<&String> = folds.iter().map(|(k, _)| k).collect();
+    let folds: Vec<(String, String)> =
+        folds.iter().filter(|(_, t)| !sources.contains(t)).cloned().collect();
+    for (src, dst) in folds {
+        if let Some(item) = by_key.remove(&src) {
+            if let Some(d) = by_key.get_mut(&dst) {
+                let mut also = d["also_asked_by"].as_array().cloned().unwrap_or_default();
+                also.push(item["card"].clone());
+                d["also_asked_by"] = Value::Array(also);
+            }
+        }
+    }
+}
+
+/// Board ids like `MF-730` or `G5OC-10` in text.
+fn card_ids(text: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"\b([A-Z][A-Z0-9]{0,9}-[0-9]{1,6})\b").expect("card id regex");
+    re.captures_iter(text).map(|c| c[1].to_string()).collect()
+}
+
 /// Build the ordered, deduped queue from the card store and the approvals dir.
 pub fn build(conn: &Connection, home: &Path, now: f64) -> rusqlite::Result<Queue> {
     let snoozes = load_snoozes(conn, now);
@@ -333,7 +384,9 @@ pub fn build(conn: &Connection, home: &Path, now: f64) -> rusqlite::Result<Queue
             ask_unb.clone()
         };
         let (category, rank) = classify(&ask_type, &format!("{question} {title}"));
-        let since = [entered, updated, created]
+        // NOT `updated`: any edit (a log line, a sweep, a WIP move) bumps it,
+        // so AG-41, drafted 2026-08-29, read "0d" on 09-27 and sorted as new.
+        let since = [entered, created, updated]
             .into_iter()
             .find(|t| *t > 0)
             .unwrap_or(0);
@@ -352,6 +405,7 @@ pub fn build(conn: &Connection, home: &Path, now: f64) -> rusqlite::Result<Queue
             }),
         );
     }
+    fold_reasks(&mut by_key);
     for doc in crate::api::email_approval::list_pending(home) {
         n_considered += 1;
         let id = doc["id"].as_str().unwrap_or("").to_string();
@@ -631,7 +685,7 @@ mod tests {
         );
         assert_eq!(
             classify("credential", "Sign in once at the vercel app"),
-            ("other", 1)
+            ("credential", 0)
         );
         // A bare $ with no digit is not money.
         assert_eq!(classify("", "set $AMUX_URL first?"), ("other", 1));
@@ -672,6 +726,42 @@ mod tests {
         assert!(actor_is_owner("Ethan"));
         assert!(actor_is_owner("ethan (sign-in)"));
         assert!(!actor_is_owner("mvs-infra"));
+    }
+
+    #[test]
+    fn a_credential_ask_is_categorised_credential_not_by_incidental_words() {
+        // Live specimens, 2026-09-27.
+        let mf730 = "Two repo secrets, one action each: add GTM_MIXPEEK_API_KEY and MIXPEEK_PROBE_API_KEY to mixpeek/mixpeek repo secrets. Both values already exist in GCP Secret Manager under the same names, so this is a copy, not a provisioning decision.";
+        assert_eq!(classify("access", mf730).0, "credential");
+        let md219 = "Can you rotate NPM_TOKEN in the mixpeek org's GitHub secrets? Publish has been dead on both mixpeek and @mixpeek/n8n-nodes-mixpeek since 2026-08-27, 13 days.";
+        assert_eq!(classify("access", md219).0, "credential");
+        // A dollar figure is still money; an undeclared ask is not promoted.
+        assert_eq!(classify("credential", "Top up the API key's $200 credit?").0, "money");
+        assert_eq!(classify("decision", md219).0, "outbound");
+        assert!(clears_owner_bar("access", md219));
+    }
+
+    #[test]
+    fn a_reask_that_opens_by_naming_a_queued_card_folds_into_it() {
+        let mut m: BTreeMap<String, Value> = BTreeMap::new();
+        for (id, q) in [
+            ("MF-730", "Two repo secrets, one action each: add GTM_MIXPEEK_API_KEY."),
+            ("GCA-137", "Can you run the one-line MF-730 grant (roles/secretmanager.secretAccessor for github-actions-ci)?"),
+            ("MM-84", "Can you create the write key in Studio under the Teal Renewables org?"),
+            ("MM-86", "May mxp-marketing proceed with this: The Teal key (MM-84) is still waiting on you"),
+            ("MS-1345", "Approve a low-risk hygiene delete of 21 PII-at-rest objects?"),
+            ("BACKE-3504", "Approve the shipped BACKE-3504 design on its two owner points?"),
+        ] {
+            m.insert(format!("card:{id}"), json!({"card": id, "question": q}));
+        }
+        let long = format!("Approve building the canvas CDN purge capability? {} (read-only S3 check, MS-1345)", "x".repeat(300));
+        m.insert("card:GP-48".into(), json!({"card": "GP-48", "question": long}));
+        fold_reasks(&mut m);
+        assert!(!m.contains_key("card:GCA-137") && !m.contains_key("card:MM-86"));
+        assert_eq!(m["card:MF-730"]["also_asked_by"], json!(["GCA-137"]));
+        assert_eq!(m["card:MM-84"]["also_asked_by"], json!(["MM-86"]));
+        // Evidence deep in the text, and a card naming itself, do not fold.
+        assert!(m.contains_key("card:GP-48") && m.contains_key("card:BACKE-3504"));
     }
 
     #[test]
