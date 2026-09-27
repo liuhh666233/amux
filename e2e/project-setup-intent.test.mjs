@@ -149,8 +149,15 @@ test('normal executor capacity queues do not make the project outcome failed',()
  vm.runInContext(source.slice(source.indexOf('function _projectOutcomeVerdict('),source.indexOf('function _projectOutcomeCard(')),ctx);
  const data={acceptance:{state:'pending',criteria:[{id:'runtime',verifier:{type:'execution'}}]},cards:[{phase:'working'},{phase:'waiting',execution_plan:{waiting_reason:'executor_capacity',waiting_label:'Waiting for executor capacity'}},{phase:'waiting',execution_plan:{waiting_reason:'required_output:T1'}}]};
  assert.equal(ctx._projectOutcomeVerdict(data).tone,'running');
+ // A task held for authorization is not a failure (8fbd2c36): with other work
+ // still active it reads "work continues; a task is held", and with nothing
+ // else active it is held for review.
  data.cards[1].execution_plan.waiting_reason='authorization_required';
- assert.equal(ctx._projectOutcomeVerdict(data).tone,'failed');
+ const held=ctx._projectOutcomeVerdict(data);
+ assert.equal(held.tone,'running');
+ assert.equal(held.title,'Work continues; a task is held');
+ const onlyHeld={...data,cards:[data.cards[1]]};
+ assert.equal(ctx._projectOutcomeVerdict(onlyHeld).tone,'review');
  data.acceptance.state='failed';data.cards[1].execution_plan.waiting_reason='executor_capacity';
  assert.equal(ctx._projectOutcomeVerdict(data).tone,'failed');
 });

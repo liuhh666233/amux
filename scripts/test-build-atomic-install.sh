@@ -20,9 +20,12 @@ printf '[workspace]\n' > "$REPO/Cargo.toml"
 printf 'fixture\n' > "$REPO/crates/input.rs"
 cat > "$REPO/scripts/safe-cargo.sh" <<'EOF'
 #!/bin/sh
-mkdir -p "$CARGO_TARGET_DIR/release"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" new-build' > "$CARGO_TARGET_DIR/release/amux-server"
-chmod 0755 "$CARGO_TARGET_DIR/release/amux-server"
+# Output dir the way cargo picks it: --profile NAME, else --release.
+out=release; prev=
+for a in "$@"; do [ "$prev" = --profile ] && out="$a"; prev="$a"; done
+mkdir -p "$CARGO_TARGET_DIR/$out"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" new-build' > "$CARGO_TARGET_DIR/$out/amux-server"
+chmod 0755 "$CARGO_TARGET_DIR/$out/amux-server"
 EOF
 chmod +x "$REPO/scripts/safe-cargo.sh"
 (

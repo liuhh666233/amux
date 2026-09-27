@@ -38,9 +38,12 @@ cat > "$AUTH/scripts/safe-cargo.sh" <<'EOF'
 set -eu
 sha=$(git rev-parse HEAD)
 printf 'build %s\n' "$sha" >> "$TRACE"
-mkdir -p "$CARGO_TARGET_DIR/release"
-printf '#!/bin/sh\necho %s\n' "$sha" > "$CARGO_TARGET_DIR/release/amux-server"
-chmod 0755 "$CARGO_TARGET_DIR/release/amux-server"
+# Output dir the way cargo picks it: --profile NAME, else --release.
+out=release; prev=
+for a in "$@"; do [ "$prev" = --profile ] && out="$a"; prev="$a"; done
+mkdir -p "$CARGO_TARGET_DIR/$out"
+printf '#!/bin/sh\necho %s\n' "$sha" > "$CARGO_TARGET_DIR/$out/amux-server"
+chmod 0755 "$CARGO_TARGET_DIR/$out/amux-server"
 EOF
 chmod +x "$AUTH/scripts/safe-cargo.sh"
 (
