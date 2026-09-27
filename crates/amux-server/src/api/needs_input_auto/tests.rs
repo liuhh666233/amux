@@ -77,11 +77,11 @@ fn defaults_approve_judgment_and_small_spend_only() {
 #[test]
 fn credential_and_access_are_never_approved() {
     let all = Policy { prod_data: true, outbound: true, money_cap_usd: 1e9, ..Policy::default() };
-    assert_eq!(decide(&all, &item("card", "other", "credential", "Mint a key")), Decision::Never);
-    assert_eq!(decide(&all, &item("card", "other", "access", "Add me to the GCP project")), Decision::Never);
+    assert!(matches!(decide(&all, &item("card", "other", "credential", "Mint a key")), Decision::Never(_)));
+    assert!(matches!(decide(&all, &item("card", "other", "access", "Add me to the GCP project")), Decision::Never(_)));
     // Filed without the ask type, recognised by the text.
-    assert_eq!(decide(&all, &item("card", "other", "decision", "Sign in once at the vercel app?")), Decision::Never);
-    assert_eq!(decide(&all, &item("card", "other", "", "Paste the Stripe API key into server.env")), Decision::Never);
+    assert!(matches!(decide(&all, &item("card", "other", "decision", "Sign in once at the vercel app?")), Decision::Never(_)));
+    assert!(matches!(decide(&all, &item("card", "other", "", "Paste the Stripe API key into server.env")), Decision::Never(_)));
 }
 
 // ---- scoped resolution -----------------------------------------------------
@@ -303,4 +303,20 @@ async fn job_approves_new_items_once_and_leaves_the_rest() {
     let rep = tick_with(&mock, &st, &home, now + 240.0).await;
     assert!(!rep.ran);
     assert_eq!(card(&st, "NEW-AFTER-KILL").status, "needsyou");
+}
+
+#[test]
+fn owner_action_and_public_surface_are_never_auto_approved_but_mentions_are() {
+    let all = Policy { enabled: true, other: true, money: true, money_cap_usd: 50.0, prod_data: true, outbound: true, ..Default::default() };
+    let never = |at: &str, q: &str| matches!(decide(&all, &item("card", "other", at, q)), Decision::Never(_));
+    // Live 2026-09-27: asks the OWNER must act on.
+    assert!(never("decision", "Will you run `! ~/.amux/seed-standing-approvals.sh` once to record the two standing approvals?"));
+    assert!(never("credential", "Can you mint a new Ethan Personal org API key in Studio?"));
+    // Repo rule: new endpoints and public surface stay with the owner.
+    assert!(never("decision", "Should POST /v1/organizations/billing/estimate be reachable without an API key?"));
+    assert!(never("decision", "Sign off (or amend) the MP-106 PITR API design so restore-to-an-older-checkpoint can be built?"));
+    // Mentions are not asks: these are the worker's call.
+    assert!(!never("credential", "Want me to do that pass, or would you rather look at the categories yourself first?"));
+    assert!(!never("decision", "Want me to go after the Gemini source now, or wait for gs-4 to say whether it's theirs?"));
+    assert!(!never("decision", "Should Mixpeek offer a sandbox or demo API key so a prospect can test one call?") );
 }

@@ -294,33 +294,57 @@ fn ask_text(item: &Value) -> String {
         .join(" ")
 }
 
-/// Asks only the owner can DO: mint a key, sign in, grant access. "Approved"
-/// cannot complete them, so they are never auto-approved. The declared
-/// `ask_type` is the signal; the text list catches the ones filed without it.
-pub fn is_credential_or_access(item: &Value) -> bool {
+/// Why an ask can never be auto-approved, if it cannot. `None` = the policy
+/// decides. Measured 2026-09-27 (Ethan: "auto is on but its not continuing
+/// each"): the sweep approved 0 of 74, skipping most as credential_or_access on
+/// loose words: "Sign off (or amend) the MP-106 PITR API design" read as a
+/// sign-in, "reachable without an API key" and "a sandbox or demo API key" as
+/// credential asks. And the opposite: AMUX-5276, "Will you run `! ~/.amux/
+/// seed-standing-approvals.sh`", was auto-approved although only the owner can
+/// run it.
+pub fn never_reason(item: &Value) -> Option<&'static str> {
     let at = item["ask_type"].as_str().unwrap_or("");
-    if matches!(at, "credential" | "access") {
-        return true;
+    let text = ask_text(item);
+    let t = text.to_ascii_lowercase();
+    // A declared credential/access ask that reads like one.
+    if matches!(at, "credential" | "access") && crate::api::needs_input::reads_like_credential(&t) {
+        return Some("credential_or_access");
     }
-    let t = ask_text(item).to_ascii_lowercase();
-    [
-        "api key",
-        "sign in",
-        "sign-in",
-        "log in",
-        "login",
-        "credential",
-        "password",
-        "grant access",
-        "grant me access",
-        "access to the",
-        "oauth",
-        "2fa",
-        "mfa",
-        "token for",
-    ]
-    .iter()
-    .any(|w| t.contains(w))
+    // The ask is for the OWNER to do something: approval cannot complete it.
+    let owner_act = [
+        r"(^|[.?!]\s*)(can|could|will|would) you\b",
+        r"\bsign(ing)?[ -]?in\b",
+        r"\blog(ging)?[ -]?in\b",
+        r"\bre-?auth",
+        r"\bmint\b",
+        r"\brotate (the|a|an|these|those|this|\d)",
+        r"`!\s",
+        r"\brun `",
+        r"\btop (it )?up\b",
+        r"\badd me\b",
+        r"\bgive me\b",
+        r"\binvite (me|us|amux)\b",
+        r"\bpaste\b",
+        r"\bshare (the|a|your)\b.*\b(key|token|password|secret)",
+    ];
+    if owner_act.iter().any(|re| regex::Regex::new(re).map(|r| r.is_match(&t)).unwrap_or(false)) {
+        return Some("owner_must_act");
+    }
+    // Repo rule (Mixpeek CLAUDE.md): new endpoints and new primitives need
+    // explicit human approval, so a public-surface decision stays with him.
+    let surface = [
+        "/v1/", "new endpoint", "new primitive", "public surface", "api design", "pricing page",
+        "new sourcetype", "new source type",
+    ];
+    if surface.iter().any(|w| t.contains(w)) {
+        return Some("public_surface");
+    }
+    None
+}
+
+/// Kept for callers and tests: true when an ask can never be auto-approved.
+pub fn is_credential_or_access(item: &Value) -> bool {
+    never_reason(item).is_some()
 }
 
 /// Parse one number starting at byte `i` of `b` (digits, `,` thousands groups,
@@ -413,8 +437,9 @@ pub enum Decision {
     Approve,
     /// The worker's resolved policy is off.
     Off,
-    /// Credential or access: only the owner can do it.
-    Never,
+    /// Only the owner can complete it (credential, an action of his, or a
+    /// public-surface decision the repo rule reserves).
+    Never(&'static str),
     /// The category's switch is off.
     SkipCategory(String),
     /// Money: over the cap, or no figure to compare (None).
@@ -433,8 +458,8 @@ pub fn decide(policy: &Policy, item: &Value) -> Decision {
     if !policy.enabled {
         return Decision::Off;
     }
-    if is_credential_or_access(item) {
-        return Decision::Never;
+    if let Some(why) = never_reason(item) {
+        return Decision::Never(why);
     }
     let cat = category_of(item);
     let on = match cat.as_str() {
@@ -885,11 +910,16 @@ pub async fn tick_with(acts: &dyn Actions, state: &AppState, home: &Path, now: f
                 skips.push(entry_for(item, &dk, "off", String::new(), now));
                 rep.off.push(label);
             }
-            Decision::Never => {
+            Decision::Never(why) => {
                 tracing::info!(verdict = "needs_input_auto_skipped_category", key = %key, worker = %worker,
-                    reason = "credential_or_access",
-                    "needs-input auto-approve: credential and access asks are never approved automatically");
-                skips.push(entry_for(item, &dk, "never", "credential or access: only the owner can do it".into(), now));
+                    reason = why,
+                    "needs-input auto-approve: only the owner can complete this ask");
+                let label_why = match why {
+                    "owner_must_act" => "only you can do this (it asks you to act)",
+                    "public_surface" => "a new endpoint or public surface: yours by the repo rule",
+                    _ => "credential or access: only you can do it",
+                };
+                skips.push(entry_for(item, &dk, "never", label_why.into(), now));
                 rep.skipped_category.push(label);
             }
             Decision::SkipCategory(c) => {

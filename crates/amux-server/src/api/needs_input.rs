@@ -138,14 +138,20 @@ pub fn clears_owner_bar(ask_type: &str, text: &str) -> bool {
     // A declared credential/access ask must LOOK like one: amux-meta-helper
     // filed "Want me to do that pass, or would you rather look at the
     // categories yourself first?" as ask_type=credential (AMH-16, 2026-09-27).
-    let t = text.to_ascii_lowercase();
-    let credential_words = [
+    (matches!(ask_type, "credential" | "access") && reads_like_credential(&text.to_ascii_lowercase()))
+        || matches!(classify(ask_type, text).0, "money" | "outbound" | "prod_data")
+}
+
+/// Does lowercase ask text name a sign-in, key, token, secret, grant, role,
+/// permission or password? Shared by the owner bar and auto-approve.
+pub fn reads_like_credential(t: &str) -> bool {
+    [
         "sign in", "sign-in", "signin", "log in", "login", "re-auth", "reauth", "oauth", "api key",
         " key ", "key in", "token", "secret", "password", "2fa", "mfa", "grant", "role", "permission",
         "iam", "access to", "admin", "credential",
-    ];
-    (matches!(ask_type, "credential" | "access") && credential_words.iter().any(|w| t.contains(w)))
-        || matches!(classify(ask_type, text).0, "money" | "outbound" | "prod_data")
+    ]
+    .iter()
+    .any(|w| t.contains(w))
 }
 
 /// Standing-approval category for an ask (the closed vocabulary in
