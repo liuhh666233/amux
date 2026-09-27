@@ -274,8 +274,11 @@ pub struct Queue {
 /// 2026-09-27: GCA-137 and MC-1455 ("Can you run the one-line MF-730 grant"),
 /// MM-86 ("The Teal key (MM-84) is still waiting on you"), BR-25 ("hold
 /// publishing until BR-42 goes green"). Only the opening counts: GP-48 cites
-/// MS-1345 as evidence 1,000 characters in and is its own ask. The target
-/// carries `also_asked_by` so the folded card stays visible.
+/// MS-1345 as evidence 1,000 characters in and is its own ask. And naming is
+/// not enough: MS-1345 opens "Approve a ... delete of 21 PII objects (or
+/// defer to GP-48)?" and BR-25 "hold publishing until BR-42 goes green",
+/// both separate decisions that folding would hide. So the opening must also
+/// say it is a re-ask. The target carries `also_asked_by`.
 fn fold_reasks(by_key: &mut BTreeMap<String, Value>) {
     const OPENING: usize = 160;
     let mut folds: Vec<(String, String)> = Vec::new();
@@ -283,6 +286,11 @@ fn fold_reasks(by_key: &mut BTreeMap<String, Value>) {
         let me = item["card"].as_str().unwrap_or("");
         let q = item["question"].as_str().unwrap_or("");
         let head: String = q.chars().take(OPENING).collect();
+        let lower = head.to_ascii_lowercase();
+        let reask = ["still waiting on you", "the one-line", "the existing", "same ask", "same as "];
+        if !reask.iter().any(|w| lower.contains(w)) {
+            continue;
+        }
         let target = card_ids(&head)
             .into_iter()
             .find(|id| id != me && by_key.contains_key(&format!("card:{id}")));
@@ -754,9 +762,12 @@ mod tests {
         ] {
             m.insert(format!("card:{id}"), json!({"card": id, "question": q}));
         }
+        m.insert("card:MS-1345".into(), json!({"card": "MS-1345", "question": "INVESTIGATION RESOLVED. Approve a low-risk hygiene delete of 21 PII-at-rest objects + confirm the retention/version-record policy (or defer to GP-48)?"}));
         let long = format!("Approve building the canvas CDN purge capability? {} (read-only S3 check, MS-1345)", "x".repeat(300));
         m.insert("card:GP-48".into(), json!({"card": "GP-48", "question": long}));
         fold_reasks(&mut m);
+        // Naming another card in a separate decision does not fold it.
+        assert!(m.contains_key("card:MS-1345") && m["card:GP-48"].get("also_asked_by").is_none());
         assert!(!m.contains_key("card:GCA-137") && !m.contains_key("card:MM-86"));
         assert_eq!(m["card:MF-730"]["also_asked_by"], json!(["GCA-137"]));
         assert_eq!(m["card:MM-84"]["also_asked_by"], json!(["MM-86"]));
