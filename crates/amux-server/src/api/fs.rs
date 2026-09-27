@@ -525,13 +525,92 @@ pub(crate) async fn git_resolve_rel(cwd: &str, rel: &str) -> Option<String> {
 
 /// Read a file's content from `origin/main` in the nearest git repo.
 pub(crate) async fn git_show_file(cwd: &str, rel: &str) -> Option<(String, Vec<u8>)> {
+    // AN ABSOLUTE PATH IS RELATIVE TO ITS OWN REPO, NOT TO "/". The dashboard
+    // sends terminal links already joined onto the worker's directory, so the
+    // old trim of the leading '/' asked git for
+    // `origin/main:Users/ethan/Dev/mixpeek/server/...`, which cannot exist.
+    // Measured 2026-09-27: gs-4's REALIZATION-LEDGER-2026-09-27.md was on
+    // origin/main (graft-push never updates the checkout), the relative form
+    // served it, and the absolute form the viewer sends said "file not found".
+    let (cwd_owned, rel_owned);
+    let (cwd, rel) = if Path::new(rel.trim()).is_absolute() {
+        let (dir, rel_to_top) = abs_to_repo_rel(Path::new(rel.trim())).await?;
+        cwd_owned = dir;
+        rel_owned = rel_to_top;
+        (cwd_owned.as_str(), rel_owned.as_str())
+    } else {
+        (cwd, rel)
+    };
     let rel_clean = rel.trim().trim_start_matches('/').trim_start_matches("./");
     if rel_clean.is_empty() {
         return None;
     }
     let toplevel = git_toplevel_of(cwd).await?;
+    if let Some(hit) = git_show_candidates(&toplevel, cwd, rel_clean).await {
+        return Some(hit);
+    }
+    // The local origin/main can lag what a worker just pushed. Fetch once and
+    // retry, at most once a minute per repo, so a burst of dead links cannot
+    // become a burst of fetches.
+    if claim_fetch_slot(&toplevel) {
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new("git")
+                .args(["-C", &toplevel, "fetch", "-q", "origin", "main"])
+                .output(),
+        )
+        .await
+        .is_ok_and(|o| o.is_ok_and(|o| o.status.success()));
+        tracing::info!(repo = %toplevel, path = %rel_clean, fetched,
+            verdict = "file_git_fallback_fetched",
+            "file viewer: path not on the local origin/main, fetched once and retried");
+        if fetched {
+            return git_show_candidates(&toplevel, cwd, rel_clean).await;
+        }
+    }
+    None
+}
+
+/// At most once a minute per repo.
+fn claim_fetch_slot(repo: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let mut m = LAST
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    match m.get(repo) {
+        Some(t) if now.duration_since(*t) < Duration::from_secs(60) => false,
+        _ => {
+            m.insert(repo.to_string(), now);
+            true
+        }
+    }
+}
+
+/// (repo toplevel, path relative to it) for an absolute path that may not
+/// exist on disk: resolve the nearest existing ancestor, ask git for its
+/// toplevel, and re-attach the missing tail. Both sides are canonicalized so
+/// /tmp versus /private/tmp style aliases still strip.
+pub(crate) async fn abs_to_repo_rel(abs: &Path) -> Option<(String, String)> {
+    let mut anc = abs.parent()?;
+    while !anc.is_dir() {
+        anc = anc.parent()?;
+    }
+    let tail = abs.strip_prefix(anc).ok()?.to_path_buf();
+    let top = git_toplevel_of(&anc.to_string_lossy()).await?;
+    let anc_canon = std::fs::canonicalize(anc).ok()?;
+    let top_canon = std::fs::canonicalize(&top).ok()?;
+    let rel = anc_canon.strip_prefix(&top_canon).ok()?.join(tail);
+    Some((top, rel.to_string_lossy().into_owned()))
+}
+
+async fn git_show_candidates(toplevel: &str, cwd: &str, rel_clean: &str) -> Option<(String, Vec<u8>)> {
     let mut candidates = vec![rel_clean.to_string()];
-    if let Ok(cwd_rel) = Path::new(cwd).strip_prefix(&toplevel) {
+    if let Ok(cwd_rel) = Path::new(cwd).strip_prefix(toplevel) {
         let joined = cwd_rel.join(rel_clean);
         let s = joined.to_string_lossy().into_owned();
         if s != rel_clean {
@@ -542,7 +621,7 @@ pub(crate) async fn git_show_file(cwd: &str, rel: &str) -> Option<(String, Vec<u
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             tokio::process::Command::new("git")
-                .args(["-C", &toplevel, "show", &format!("origin/main:{candidate}")])
+                .args(["-C", toplevel, "show", &format!("origin/main:{candidate}")])
                 .output(),
         )
         .await;
@@ -3598,5 +3677,51 @@ mod open_native_locality_tests {
             spy
         ));
         assert_eq!(seen.borrow().as_str(), "fd7a::1", "IPv6 brackets stripped");
+    }
+}
+
+#[cfg(test)]
+mod git_fallback_tests {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let o = std::process::Command::new("git").arg("-C").arg(dir).args(args)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    /// The 2026-09-27 shape: a lane graft-pushes a file, the shared checkout
+    /// never receives it and has not fetched since, and the viewer asks with
+    /// the ABSOLUTE path it joined onto the worker's directory, no cwd.
+    #[tokio::test]
+    async fn an_absolute_path_pushed_but_not_fetched_is_served_from_origin_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin.git");
+        let shared = tmp.path().join("shared");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+        git(tmp.path(), &["clone", "-q", origin.to_str().unwrap(), "shared"]);
+        std::fs::write(shared.join("README.md"), "x").unwrap();
+        git(&shared, &["add", "."]);
+        git(&shared, &["commit", "-q", "-m", "init"]);
+        git(&shared, &["push", "-q", "origin", "HEAD:main"]);
+        git(tmp.path(), &["clone", "-q", origin.to_str().unwrap(), "other"]);
+        std::fs::create_dir_all(other.join("server/infra/gke")).unwrap();
+        std::fs::write(other.join("server/infra/gke/LEDGER.md"), "# ledger\n").unwrap();
+        git(&other, &["add", "."]);
+        git(&other, &["commit", "-q", "-m", "ledger"]);
+        git(&other, &["push", "-q", "origin", "HEAD:main"]);
+
+        let abs = shared.join("server/infra/gke/LEDGER.md");
+        assert!(!abs.exists(), "the precondition: not on disk in the shared checkout");
+        let (path, bytes) = git_show_file("", abs.to_str().unwrap()).await.expect("served after one fetch");
+        assert_eq!(bytes, b"# ledger\n");
+        assert!(path.ends_with("server/infra/gke/LEDGER.md"), "{path}");
+        // A path that exists nowhere is still None, not a guess.
+        let none = shared.join("server/infra/gke/NOPE.md");
+        assert!(git_show_file("", none.to_str().unwrap()).await.is_none());
     }
 }
