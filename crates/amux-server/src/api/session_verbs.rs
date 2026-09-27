@@ -11131,7 +11131,11 @@ pub(crate) fn is_schedule_guard(guard: &str) -> bool {
 /// have been continued automatically on the harness level. especially since
 /// its a /goal"). Both reach isolated workers, as owner input.
 pub(crate) fn is_owner_configured_guard(guard: &str) -> bool {
-    is_schedule_guard(guard) || guard.starts_with("goal:")
+    // `owner-policy:` is standing authority the owner configured (Ethan,
+    // 2026-09-27 13:20: "it needs to be optimized for auto pushing"): an
+    // in-boundary ask from an isolated lane is answered "proceed" on his behalf
+    // instead of parking as a card only he can clear. Same class as a schedule.
+    is_schedule_guard(guard) || guard.starts_with("goal:") || guard.starts_with("owner-policy:")
 }
 
 pub(crate) async fn deliver_automated(
