@@ -83,6 +83,21 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
         "production db",
         "migrate prod",
         "delete prod",
+        // Risky production changes, not every deploy (workers deploy to prod
+        // within their authority all day): G1ZBC-38 "promote MVS to production
+        // ... MVS-STANDBY-REPLICA", gs-10's "roll the MVS prod primary without
+        // a warm standby".
+        "without a warm standby",
+        "without a standby",
+        "without standby",
+        "prod primary",
+        "production primary",
+        "standby-replica",
+        "failover",
+        "fail over",
+        "restore over",
+        "truncate",
+        "drop the ",
     ]) {
         return ("prod_data", 0);
     }
@@ -120,7 +135,16 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
 /// One definition for the pill, the triage queue's default view and the
 /// per-worker "Needs input" status, so the three cannot disagree.
 pub fn clears_owner_bar(ask_type: &str, text: &str) -> bool {
-    matches!(ask_type, "credential" | "access")
+    // A declared credential/access ask must LOOK like one: amux-meta-helper
+    // filed "Want me to do that pass, or would you rather look at the
+    // categories yourself first?" as ask_type=credential (AMH-16, 2026-09-27).
+    let t = text.to_ascii_lowercase();
+    let credential_words = [
+        "sign in", "sign-in", "signin", "log in", "login", "re-auth", "reauth", "oauth", "api key",
+        " key ", "key in", "token", "secret", "password", "2fa", "mfa", "grant", "role", "permission",
+        "iam", "access to", "admin", "credential",
+    ];
+    (matches!(ask_type, "credential" | "access") && credential_words.iter().any(|w| t.contains(w)))
         || matches!(classify(ask_type, text).0, "money" | "outbound" | "prod_data")
 }
 
@@ -560,6 +584,17 @@ mod tests {
         assert!(clears_owner_bar("access", "May amux-ops get roles/artifactregistry.admin on the us-east1 repo?"));
         assert!(clears_owner_bar("budget", "Do you approve a TS indexer node (about $90-130/mo spot)?"));
         assert!(clears_owner_bar("external", "Post the 526-character launch tweet natively from X yourself (file gtm/launch-videos/amux-launch.mp4)?"));
+    }
+
+    #[test]
+    fn declared_credentials_must_read_like_one_and_risky_prod_counts() {
+        assert!(!clears_owner_bar("credential", "Want me to do that pass, or would you rather look at the categories yourself first?"));
+        assert!(clears_owner_bar("credential", "Can you mint a new Ethan Personal org API key in Studio?"));
+        assert!(clears_owner_bar("access", "Two repo secrets, one action each: add GTM_MIXPEEK_API_KEY and MIXPEEK_PROBE_API_KEY"));
+        assert!(clears_owner_bar("decision", "May the zero-base pipeline promote MVS to production with ZB_PROMOTE_ACK=MVS-STANDBY-REPLICA and then verify its rollback?"));
+        assert!(clears_owner_bar("decision", "May I roll the MVS prod primary without a warm standby?"));
+        // An ordinary deploy is the worker's call.
+        assert!(!clears_owner_bar("decision", "Deploy the fixed api image to production?"));
     }
 
     #[test]
