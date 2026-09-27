@@ -57,7 +57,7 @@ if [ -z "$TICK_CMD" ]; then
   # Fetch with a short timeout: a dead network must not stop the cleanup, it only
   # means running the last-fetched committed bytes.
   perl -e 'alarm 30; exec @ARGV' git -C "$REPO" fetch -q origin main 2>/dev/null || echo "mac-cleanup-fallback: fetch failed, using the last-fetched origin/main"
-  R=$(mktemp -t mac-cleanup-tick) || exit 1
+  R=$(mktemp "${TMPDIR:-/tmp}/mac-cleanup-tick.XXXXXX") || exit 1
   git -C "$REPO" show origin/main:scripts/mac-cleanup-tick.sh > "$R" || { echo "mac-cleanup-fallback: could not read the committed tick"; rm -f -- "${R:?}"; exit 1; }
   TICK_CMD="bash $R"
 fi
@@ -72,7 +72,9 @@ echo "mac-cleanup-fallback: tick exited $rc"
 if [ -z "${AMUX_CLEANUP_FALLBACK_TICK:-}" ] || [ -n "${AMUX_CLEANUP_FALLBACK_LIB:-}" ]; then
   # Seam: AMUX_CLEANUP_FALLBACK_LIB names the tick to load file_card from (the
   # test's checkout copy); otherwise the committed one, as for the run itself.
-  L=$(mktemp -t mac-cleanup-lib)
+  # A template with X's: GNU mktemp refuses `-t name` ("too few X's"), which left
+  # L empty, file_card unloaded and $STATE_DIR unbound on Linux.
+  L=$(mktemp "${TMPDIR:-/tmp}/mac-cleanup-lib.XXXXXX")
   if [ -n "${AMUX_CLEANUP_FALLBACK_LIB:-}" ]; then cp "$AMUX_CLEANUP_FALLBACK_LIB" "$L"
   else git -C "$REPO" show origin/main:scripts/mac-cleanup-tick.sh > "$L" 2>/dev/null; fi
   # shellcheck source=/dev/null
