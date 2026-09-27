@@ -48,6 +48,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # check/clippy, doctests and the CLI smokes. The workspace test suite used
+  # to run here too, serially after clippy: 7 min to compile the test
+  # binaries, then 10 min running amux-server's 3300 lib tests on one 4-core
+  # runner (run 36323581857). It now runs in `test-build` + `test-shards`,
+  # in parallel with this job.
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -61,44 +66,10 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # AF-150 (AREA silent-partial). A test fixture created a directory in the
-      # checkout to prove a refusal, the refusal was later removed, and the
-      # residue outlived the run — turning a green test red on every machine
-      # WITH history while CI, freshly checked out, stayed green (67137cc).
-      # CI is the right place to catch it precisely because a fresh checkout
-      # has no history for residue to hide in: this run is the only thing that
-      # could have made it.
-      #
-      # The self-test runs FIRST as a negative control. A guard nobody has
-      # watched fail is a guard nobody should trust — and this one's own
-      # self-test shipped once asserting merely "non-zero", which passed while
-      # carrying the exact bug the control existed to catch (7ca3f68).
-      - name: Tree-residue guard — self-test (negative control)
-        run: bash scripts/test-tree-clean.sh --self-test
-      # Wrapped, not run-after, so the guard cannot drift away from what it
-      # guards. Exit codes (7ca3f68): 0 clean · 3 command SUCCEEDED but left
-      # residue · anything else is the command's own rc, which always wins.
-      #
-      # ADVISORY ON RESIDUE FOR NOW, deliberately: this gates every lane's
-      # push, and a detector that has never been observed silent across real
-      # runs should not block — that is the threshold-below-baseline trap in a
-      # new suit. Only code 3 is downgraded, so a genuine cargo failure still
-      # fails the job. Flip to blocking (delete the `if`) once it has been
-      # quiet for a few days; leaving it advisory forever would make it
-      # decoration.
-      - name: cargo test (workspace) — tree-residue guarded
-        env:
-          AMUX_REQUIRE_TMUX: '1'
-        run: |
-          set -uo pipefail
-          command -v tmux >/dev/null || { sudo apt-get update && sudo apt-get install -y tmux; } || exit 1
-          bash scripts/test-tree-clean.sh cargo test --workspace
-          rc=$?
-          if [ "$rc" = "3" ]; then
-            echo "::warning title=Tree residue::A test left residue in the checkout. Advisory during the AF-150 trial period; the diff is above. Fix the FIXTURE, not .gitignore."
-            exit 0
-          fi
-          exit $rc
+      # nextest (the `test` shards below) cannot run doctests, so they run
+      # here, beside check and clippy, rather than on the test critical path.
+      - name: cargo test --doc (workspace)
+        run: cargo test --doc --workspace
       # AF-74. The `amux` bash CLI is a shipped client with no compiler behind
       # it, and `bash -n` (the pre-commit gate) proves the file PARSES, not that
       # its names resolve. This catches the classes shellcheck CAN see.
@@ -196,6 +167,107 @@ jobs:
       # clean CI tree.
       - name: runtime smoke -- hooks install from HEAD, not the worktree (AMUX-3682)
         run: bash scripts/test-hook-install-from-head.sh
+
+  # Compile every test binary ONCE and hand the shards a nextest archive, so
+  # no shard pays the ~7 min compile. The env below applies to this job only.
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Debuginfo is most of the link time and archive size for binaries this
+      # large. Panic messages keep file:line without it (core::panic::Location).
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Build all workspace test binaries into a nextest archive
+        run: cargo nextest archive --workspace --archive-file ${{ runner.temp }}/nextest.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}/nextest.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
+  # The workspace suite, split across runners by nextest partition. Every
+  # test in the archive runs in exactly one shard; `test` below refuses a
+  # green unless every shard succeeded.
+  test-shards:
+    needs: test-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}
+      # AF-150 (AREA silent-partial). A test fixture created a directory in the
+      # checkout to prove a refusal, the refusal was later removed, and the
+      # residue outlived the run — turning a green test red on every machine
+      # WITH history while CI, freshly checked out, stayed green (67137cc).
+      # CI is the right place to catch it precisely because a fresh checkout
+      # has no history for residue to hide in: this run is the only thing that
+      # could have made it.
+      #
+      # The self-test runs FIRST as a negative control. A guard nobody has
+      # watched fail is a guard nobody should trust — and this one's own
+      # self-test shipped once asserting merely "non-zero", which passed while
+      # carrying the exact bug the control existed to catch (7ca3f68).
+      - name: Tree-residue guard — self-test (negative control)
+        run: bash scripts/test-tree-clean.sh --self-test
+      # Wrapped, not run-after, so the guard cannot drift away from what it
+      # guards. Exit codes (7ca3f68): 0 clean · 3 command SUCCEEDED but left
+      # residue · anything else is the command's own rc, which always wins.
+      #
+      # ADVISORY ON RESIDUE FOR NOW, deliberately: this gates every lane's
+      # push, and a detector that has never been observed silent across real
+      # runs should not block — that is the threshold-below-baseline trap in a
+      # new suit. Only code 3 is downgraded, so a genuine cargo failure still
+      # fails the job. Flip to blocking (delete the `if`) once it has been
+      # quiet for a few days; leaving it advisory forever would make it
+      # decoration.
+      - name: cargo nextest (shard ${{ matrix.shard }}/8) — tree-residue guarded
+        env:
+          AMUX_REQUIRE_TMUX: '1'
+        run: |
+          set -uo pipefail
+          command -v tmux >/dev/null || { sudo apt-get update && sudo apt-get install -y tmux; } || exit 1
+          # Extracting into the workspace puts the binaries back at the target/
+          # path env!("CARGO_BIN_EXE_*") baked in at compile time (target/ is
+          # gitignored, so the residue guard does not see it). --no-fail-fast
+          # matches cargo test: report every failure, not the first.
+          bash scripts/test-tree-clean.sh cargo nextest run \
+            --archive-file "$RUNNER_TEMP/nextest.tar.zst" \
+            --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
+            --partition count:${{ matrix.shard }}/8 --no-fail-fast
+          rc=$?
+          if [ "$rc" = "3" ]; then
+            echo "::warning title=Tree residue::A test left residue in the checkout. Advisory during the AF-150 trial period; the diff is above. Fix the FIXTURE, not .gitignore."
+            exit 0
+          fi
+          exit $rc
+
+  # One check name for the whole suite; a green subset cannot satisfy it.
+  test:
+    needs: test-shards
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every test shard to succeed
+        env:
+          SHARDS: ${{ needs.test-shards.result }}
+        run: test "$SHARDS" = success
 
   e2e-shards:
     # PR Full Gate tier (plan §CI tiers): the golden scenarios in a real
