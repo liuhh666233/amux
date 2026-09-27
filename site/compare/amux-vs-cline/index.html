@@ -40,7 +40,7 @@
     "description": "Cline is an interactive VS Code AI coding assistant with per-step tool approval and multi-model support. amux is the headless fleet orchestrator for running dozens of parallel Claude Code, Codex, or Gemini CLI agents overnight — web dashboard, iOS app, self-healing watchdog. Complementary tools: use Cline for interactive feature work, amux for parallel batch fleet management.",
     "url": "https://amux.io/compare/amux-vs-cline/",
     "datePublished": "2026-07-15",
-    "dateModified": "2026-08-27",
+    "dateModified": "2026-09-27",
     "author": {"@type": "Organization", "name": "amux", "url": "https://amux.io/"}
   }
   </script>
@@ -121,7 +121,7 @@
       Fleet orchestrator for parallel headless agents vs interactive single-agent VS Code assistant —
       different problems, complementary solutions.
     </p>
-    <p style="color:var(--muted);font-size:0.85rem">Last updated: August 27, 2026</p>
+    <p style="color:var(--muted);font-size:0.85rem">Last updated: September 27, 2026</p>
 
     <!-- EXP-064: cline compare top-of-page green CTA -->
     <div style="background:linear-gradient(135deg,#064e3b,#065f46);border:1px solid #059669;border-radius:10px;padding:1.25rem 1.5rem;margin:1.5rem 0;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem"
@@ -549,6 +549,15 @@
         </tr>
       </tbody>
     </table>
+
+    <h2>What's new in amux — September 2026</h2>
+
+    <ul>
+      <li><strong>Standing approvals</strong> — define permission rules by category (access, credential, budget, production data, external outbound) so overnight agents can answer their own escalations within defined limits. No more sessions hanging at 3am waiting for a response. Cline requires per-step manual approval in VS Code with no equivalent automation layer.</li>
+      <li><strong>Goal keeper</strong> — set a goal for a session (e.g. "all tests pass") and the harness automatically continues the session until the goal is met. If the agent stops early, it is re-prompted. Works across all supported runtimes.</li>
+      <li><strong>Chat workers</strong> — a new worker type for conversational tasks. Chat workers run alongside coding workers in the same dashboard, stream live, work offline, and retry interrupted turns. Cline is focused on coding tasks only.</li>
+      <li><strong>Deploy-wake notifications</strong> — when a commit from a specific agent's session goes live in CI/CD, amux wakes that session to run a smoke check against the live environment. Cline has no equivalent — it does not track which agent wrote which commit or monitor deployment pipelines.</li>
+    </ul>
 
     <h2>What's new in amux — August 2026</h2>
 
