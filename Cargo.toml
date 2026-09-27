@@ -113,3 +113,16 @@ license = "MIT"
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+# LOCAL DEPLOYS (scripts/rust-auto-build.sh). Release-grade optimisation
+# without the two costs that only pay off for a distributed binary: thin LTO's
+# whole-program link pass, and a non-incremental compile. Measured 2026-09-27
+# on this host, same tree, stable build directory: a release deploy took
+# 5m45s to 9m40s; this profile builds cold in 2m11s, rebuilds a dashboard edit
+# in 14s and a real code change in the 46k-line session_verbs.rs in 63s.
+# opt-level stays 3: opt-level 1 saved only 5s on the same edit.
+[profile.deploy]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 256
