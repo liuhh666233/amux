@@ -45,7 +45,7 @@
     "description": "Startup founders use amux to run a 5–10 person AI engineering team without headcount. Launch parallel coding agents, manage from your phone, and ship overnight.",
     "url": "https://amux.io/for/startup-founders/",
     "datePublished": "2026-07-04",
-    "dateModified": "2026-08-19",
+    "dateModified": "2026-09-27",
     "author": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "publisher": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "image": "https://amux.io/og-image.png",
@@ -113,6 +113,14 @@
           "@type": "Answer",
           "text": "Yes. As of August 2026, amux's email integration supports file attachments on both /send and /reply. Agents can attach PDFs, spreadsheets, images, or any file to outgoing emails via the Gmail API — your domain, your signature, real threading. Attachments are sent as multipart/mixed MIME and are available via a download endpoint for later retrieval. This means an agent can generate a report, compile a CSV, or export a document and email it to a customer or investor without any manual step."
         }
+      },
+      {
+        "@type": "Question",
+        "name": "How do I stop agents from pausing overnight for approval prompts?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Use amux's Standing Approvals feature (shipped September 2026, Settings > Approvals). Define approval rules for specific request classes — running tests, creating branches, reading config files, calling safe external APIs. When an overnight agent hits a covered request, amux answers it automatically with your pre-set answer. Requests outside your rules still surface to you. This lets you run unattended sessions through the night without granting unlimited authority: you control exactly which categories of action are pre-approved."
+        }
       }
     ]
   }
@@ -140,7 +148,7 @@
     </div>
 
     <h1>Run an AI Engineering Team Without Hiring</h1>
-    <p class="subtitle">Startup founders use amux to coordinate a fleet of Claude Code, Codex, or Gemini CLI agents that build features, fix bugs, write tests, and draft docs in parallel — managed from one dashboard or their phone. Updated August 2026.</p>
+    <p class="subtitle">Startup founders use amux to coordinate a fleet of Claude Code, Codex, or Gemini CLI agents that build features, fix bugs, write tests, and draft docs in parallel — managed from one dashboard or their phone. Updated September 2026.</p>
 
     <p>In 2026, the constraint on a startup's engineering output is no longer team size — it is the quality of your task definitions and the discipline of your review process. <strong>amux is an open-source control plane for AI agent teams</strong>: it runs, monitors, and self-heals dozens of parallel coding sessions so a founder can ship what previously required a 5–10 person engineering team.</p>
 
@@ -325,8 +333,18 @@ amux serve  # → https://localhost:8824</code></pre>
       </div>
     </div>
 
+    <h2>What's New in September 2026</h2>
+    <p>amux ships updates continuously. Here are the biggest additions relevant to founders since the August 2026 update:</p>
+    <ul>
+      <li><strong>Standing approvals</strong> — instead of manually approving each agent action during overnight runs, you can now define a set of approval rules once in the dashboard. When an agent hits a covered request (running tests, creating a branch, reading a config file), amux answers it automatically with your pre-set answer. Uncovered requests still surface to you. This dramatically reduces the number of overnight hangs on permission prompts without giving agents unlimited authority. Configure in <strong>Settings &rsaquo; Approvals</strong>.</li>
+      <li><strong>Goal keeper</strong> — set a goal for a worker session (for example, "all tests pass" or "the PR is open") and the harness automatically continues the session until that goal is met. If the agent stops early or marks itself done prematurely, the harness re-prompts it with the original goal. Useful for long-running tasks that should not exit until a verifiable outcome is reached.</li>
+      <li><strong>Chat workers</strong> — a new worker type alongside coding workers. Chat workers handle conversational tasks (customer support drafts, meeting prep, research summaries) and can work offline, stream live turn-by-turn, and retry an interrupted turn without retyping. They run in the same dashboard as your coding agents — one place for the full team.</li>
+      <li><strong>Deploy-wake notifications</strong> — when your CI/CD pipeline deploys a commit from a specific agent, the dashboard now surfaces a deploy notification to that agent's session, prompting it to run a smoke check against the live environment. No more agents shipping code and moving on before verifying it landed correctly.</li>
+    </ul>
+    <p>See the full <a href="/changelog/">amux changelog</a> for the complete release history.</p>
+
     <h2>What's New in August 2026</h2>
-    <p>amux ships updates continuously. Here are the three biggest additions relevant to founders since the July 2026 update:</p>
+    <p>Key additions from August 2026 relevant to founders:</p>
     <ul>
       <li><strong>Email with file attachments</strong> — agents can now send and reply to email with attached files via the Gmail API. Generate a report, export a CSV, create a PDF, and email it to a customer or investor — no manual step required. Available on both <code>/api/email/send</code> and <code>/api/email/reply</code>. Inline attachments and a download endpoint are included.</li>
       <li><strong>Connectors tab</strong> — paste API credentials once into the amux dashboard and scope them to a group or individual worker. Agents receive the credentials as environment variables at launch — no more per-session credential wrangling, no secrets in prompts. Works with any API key-based service: Stripe, SendGrid, Twilio, your own internal APIs.</li>
@@ -356,6 +374,9 @@ amux serve  # → https://localhost:8824</code></pre>
 
     <h3>Can my AI agents send emails with file attachments?</h3>
     <p>Yes. As of August 2026, amux's email integration supports file attachments on both send and reply endpoints. Agents can attach PDFs, spreadsheets, images, or any file to outgoing emails via the Gmail API — your domain, your signature, full threading. Attachments are sent as multipart/mixed and available via a download endpoint for retrieval. A typical use case: an agent generates a weekly metrics report, exports it as a PDF, and emails it to your investors automatically via a scheduled job.</p>
+
+    <h3>How do I stop agents from pausing overnight for approval prompts?</h3>
+    <p>Use amux's Standing Approvals feature (shipped September 2026). Go to <strong>Settings &rsaquo; Approvals</strong> and define rules for specific request classes: running tests, creating branches, reading config files, calling safe external APIs. When an overnight agent hits a covered request, amux answers it automatically. Requests outside your rules still surface to you. This lets overnight sessions run through to completion without granting unlimited authority — you control exactly which categories of action are pre-approved.</p>
 
     <h2>Related Resources</h2>
     <ul>
