@@ -2709,6 +2709,15 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/needs-input/log",
         methods: &["POST"],
     },
+    // AMUX-5301 automatic approval of needs-input items.
+    RouteEntry {
+        path: "/api/needs-input/auto",
+        methods: &["GET", "PUT"],
+    },
+    RouteEntry {
+        path: "/api/needs-input/auto/sweep",
+        methods: &["POST"],
+    },
     RouteEntry {
         path: "/api/connectors",
         methods: &["GET", "POST"],

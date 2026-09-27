@@ -5321,7 +5321,7 @@ async function openNeedsInput() {
     ov.id = 'ni-overlay';
     ov.className = 'modal-overlay active ni-overlay';
     ov.innerHTML = '<section class="modal ni-modal" role="dialog" aria-modal="true" aria-labelledby="ni-title">'
-      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span><button type="button" id="ni-older-toggle" class="ni-older-toggle" hidden onclick="_niToggleOlder()"></button><button type="button" id="ni-approve-all" class="ni-approve-all" hidden onclick="_niApproveAllArm()"></button></div>'
+      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span><button type="button" id="ni-older-toggle" class="ni-older-toggle" hidden onclick="_niToggleOlder()"></button><button type="button" id="ni-approve-all" class="ni-approve-all" hidden onclick="_niApproveAllArm()"></button><button type="button" id="ni-auto-btn" class="ni-auto-btn" aria-pressed="false" onclick="_niAutoToggle()">Auto</button></div>'
       + '<div class="ni-nav"><button class="btn ni-prev" aria-label="Previous" onclick="_niStep(-1)">&#8249;</button>'
       + '<button class="btn ni-next" aria-label="Next" onclick="_niStep(1)">&#8250;</button>'
       + '<button class="modal-close ni-close" aria-label="Close triage" onclick="closeNeedsInput()">&times;</button></div></header>'
@@ -5395,12 +5395,19 @@ function _niRenderCounter() {
   const all = document.getElementById('ni-approve-all');
   if (all) {
     const k = _niApprovable().length;
-    all.hidden = !k || _niBusy;
+    all.hidden = !k || _niBusy || _niAutoView;
     all.textContent = 'Approve all (' + k + ')';
+  }
+  const ab = document.getElementById('ni-auto-btn');
+  if (ab) {
+    const on = !!(_niAuto && _niAuto.resolved && _niAuto.resolved.enabled.value);
+    ab.textContent = _niAutoView ? 'Back to queue' : ('Auto: ' + (_niAuto ? (on ? 'on' : 'off') : '…'));
+    ab.classList.toggle('on', on && !_niAutoView);
+    ab.setAttribute('aria-pressed', String(_niAutoView));
   }
   const tog = document.getElementById('ni-older-toggle');
   if (tog) {
-    tog.hidden = !_niOlderCount;
+    tog.hidden = !_niOlderCount || _niAutoView;
     tog.textContent = _niShowOlder ? 'Hide the rest' : 'Show ' + _niOlderCount + ' more';
   }
 }
@@ -5414,6 +5421,12 @@ function _niRender() {
   // Never repaint under a half-typed reply: the 60s refresh would eat it.
   const ta = document.getElementById('ni-reply');
   if (ta && document.activeElement === ta && ta.value) { _niRenderCounter(); return; }
+  if (_niAutoView) {
+    _niRenderCounter();
+    body.innerHTML = '<div class="ni-auto" data-ni-auto-scope="global">' + (_niAuto ? _niAutoHtml(_niAuto, 'global', '') : 'Loading…') + '</div>';
+    foot.innerHTML = '<button class="btn primary ni-wide" onclick="_niAutoToggle()">Back to queue</button>';
+    return;
+  }
   const { item: it, n } = _niCurrent();
   _niRenderCounter();
   if (!it) {
@@ -5707,6 +5720,145 @@ function _niOpenTarget() {
   if (it.worker && sessions.some(s => s.name === it.worker)) openPeek(it.worker);
   else if (it.card) openBoardDetail(it.card);
 }
+// AUTO-APPROVE (AMUX-5301). Ethan, 2026-09-27: "there should also be some
+// kind of mechanism to automatically approve all needs input as they come in",
+// then "approve all should be a configuration on the worker level". The server
+// job does the approving (GET/PUT /api/needs-input/auto); this is the switch
+// board for it: the fleet default in the triage sheet header and Settings, and
+// the per-worker override in each worker's Configurations tab. Each value shows
+// which layer supplies it (worker, group, global or default).
+let _niAuto = null;          // GET /api/needs-input/auto (fleet default view)
+let _niAutoView = false;
+const _NI_AUTO_ROWS = [
+  { f: 'enabled', label: 'Auto-approve new asks', note: 'Approves asks that arrive from now on, exactly as tapping Approve would: the worker is told "Approved. Proceed." and the card leaves your queue. Asks already waiting stay for you.' },
+  { f: 'other', label: 'Judgment asks', note: 'Which option to take, whether to go ahead, design calls.' },
+  { f: 'money', label: 'Spend', note: 'Only asks that name a dollar figure at or under the cap below. No figure, or over the cap, waits for you.' },
+  { f: 'money_cap_usd', label: 'Spend cap per ask (USD)', note: 'The most one auto-approved ask may name, monthly prices included.' },
+  { f: 'prod_data', label: 'Production data', note: 'Deleting, overwriting or migrating customer or production data.' },
+  { f: 'outbound', label: 'Outbound sends', note: 'Real emails, posts and messages to people outside the company go out without you seeing them. A send cannot be undone.', warn: true },
+];
+async function _niAutoFetch(worker) {
+  try {
+    const r = await fetch(API + '/api/needs-input/auto' + (worker ? '?worker=' + encodeURIComponent(worker) : ''), { headers: _authHeaders() });
+    const d = await r.json();
+    return r.ok ? d : null;
+  } catch (_) { return null; }
+}
+function _niAutoSrc(src, level) {
+  const here = src === level || (level === 'global' && src === 'global');
+  const txt = { default: 'default', global: 'set for all workers', worker: 'set on this worker', 'server.env': 'server.env kill switch' }[src]
+    || (String(src).startsWith('group:') ? 'from group ' + String(src).slice(6) : src);
+  return '<span class="ni-auto-src' + (here ? ' here' : '') + '">' + esc(txt) + '</span>';
+}
+// One policy editor. level 'global' writes amux.env; 'worker' writes that
+// worker's own layer and offers Inherit where the worker overrides.
+function _niAutoHtml(d, level, name) {
+  const r = d.resolved || {};
+  const q = escJs(level), n = escJs(name || '');
+  const rows = _NI_AUTO_ROWS.map(row => {
+    const cur = r[row.f] || {};
+    const own = level === 'worker' ? cur.source === 'worker' : cur.source === 'global';
+    let ctl;
+    if (row.f === 'money_cap_usd') {
+      ctl = '<input type="number" inputmode="decimal" min="0" step="1" aria-label="Spend cap in dollars" value="' + esc(String(cur.value ?? 50)) + '"'
+        + ' onchange="_niAutoSet(\'' + q + '\',\'' + n + '\',\'money_cap_usd\',Number(this.value))">';
+    } else {
+      const on = !!cur.value;
+      ctl = '<button class="btn' + (on ? ' primary' : '') + '" role="switch" aria-checked="' + on + '" aria-label="' + esc(row.label) + '"'
+        + ' onclick="_niAutoSet(\'' + q + '\',\'' + n + '\',\'' + row.f + '\',' + (!on) + ')">' + (on ? 'On' : 'Off') + '</button>';
+    }
+    if (own && (level === 'worker' || cur.source === 'global')) {
+      ctl += '<button class="btn" title="Remove this override and use the ' + (level === 'worker' ? 'group or fleet' : 'built-in') + ' value"'
+        + ' onclick="_niAutoSet(\'' + q + '\',\'' + n + '\',\'' + row.f + '\',null)">' + (level === 'worker' ? 'Inherit' : 'Reset') + '</button>';
+    }
+    return '<div class="ni-auto-row" data-ni-auto-field="' + row.f + '"><div class="ni-auto-copy"><div class="ni-auto-label">' + esc(row.label)
+      + _niAutoSrc(cur.source || 'default', level) + '</div><div class="ni-auto-note' + (row.warn ? ' warn' : '') + '">' + esc(row.note) + '</div></div>'
+      + '<div class="ni-auto-ctl">' + ctl + '</div></div>';
+  }).join('');
+  const waiting = d.already_waiting_unapproved || 0;
+  const sweep = level === 'global' && waiting && r.enabled && r.enabled.value
+    ? '<button class="btn ni-wide ni-auto-sweep" onclick="_niAutoSweep(this)">Also apply to the ' + waiting + ' already waiting</button>' : '';
+  return '<p class="ni-auto-summary" role="status">' + esc(d.summary || '') + '</p>'
+    + (level === 'worker' ? '<div class="ni-auto-note">This worker’s values override its groups and the fleet default. Inherit returns a value to the layer above.</div>' : '')
+    + rows
+    + '<div class="ni-auto-note">Never automatic: keys, sign-ins and access grants. Only you can do those. Stop it everywhere with AMUX_NEEDS_INPUT_AUTO=0 in server.env.</div>'
+    + sweep
+    + (level === 'global' ? _niAutoListHtml(d) : '');
+}
+function _niAutoListHtml(d) {
+  const rec = d.recent || [];
+  const label = { approved: 'Approved', refused: 'Refused, still waiting for you', pending: 'In flight' };
+  return '<div class="ni-auto-h">Auto-approved, last 7 days (' + rec.length + ')</div>'
+    + (rec.length ? '<div class="ni-auto-list">' + rec.map(e => '<div class="ni-auto-item">'
+        + '<span class="ni-auto-out ' + esc(e.outcome) + '">' + esc(label[e.outcome] || e.outcome) + '</span> · '
+        + esc(e.card || e.key) + (e.worker ? ' · ' + esc(e.worker) : '') + ' · ' + esc(e.category) + ' · ' + _notifTimeAgo(e.at * 1000)
+        + '<div>' + esc(e.question || '') + '</div>'
+        + (e.detail ? '<div class="ni-auto-note">' + esc(e.detail) + '</div>' : '') + '</div>').join('') + '</div>'
+      : '<div class="ni-auto-note">Nothing auto-approved yet.</div>');
+}
+async function _niAutoToggle() {
+  _niAutoView = !_niAutoView;
+  _niAllArmed = false; _niPanel = '';
+  _niRender();
+  if (_niAutoView) { _niAuto = await _niAutoFetch('') || _niAuto; _niRender(); }
+}
+async function _niAutoSet(level, name, field, value) {
+  if (field === 'money_cap_usd' && value !== null && !(value >= 0 && value <= 100000)) { showToast('Cap must be 0 to 100000 dollars'); return; }
+  if (field === 'outbound' && value === true
+      && !confirm('Outbound on: real emails and posts to outside people will go out without you seeing them first. Sends cannot be undone. Turn it on?')) return;
+  try {
+    // _skipOutbox: a policy change must land or say it did not; a queued
+    // write would show the old policy as saved.
+    const r = await fetch(API + '/api/needs-input/auto', { method: 'PUT', _skipOutbox: true, headers: _authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ level, name: name || undefined, values: { [field]: value } }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.ok === false) { showToast('Not saved: ' + (d.error || ('HTTP ' + r.status))); return; }
+    showToast(d.summary || 'Saved');
+    if (level === 'worker') { _niAutoWorkerRender(name, d); _niAuto = await _niAutoFetch('') || _niAuto; }
+    else _niAuto = d;
+  } catch (e) { showToast('Not saved: ' + e); }
+  _niAutoPaintAll();
+}
+async function _niAutoSweep(btn) {
+  const n = (_niAuto && _niAuto.already_waiting_unapproved) || 0;
+  if (!confirm('Apply the current policy to the ' + n + ' asks already waiting? Each is approved only if its worker’s policy covers it.')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(API + '/api/needs-input/auto/sweep', { method: 'POST', _skipOutbox: true, headers: _authHeaders({ 'Content-Type': 'application/json' }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showToast('Refused: ' + (d.error || r.status)); }
+    else {
+      const rep = d.report || {};
+      showToast('Approved ' + (rep.approved || []).length + ((rep.refused || []).length ? '; ' + rep.refused.length + ' refused and left for you' : ''));
+    }
+  } catch (e) { showToast('Refused: ' + e); }
+  _niAuto = await _niAutoFetch('') || _niAuto;
+  _niFetch();
+  _niAutoPaintAll();
+}
+// Repaint every fleet-level editor on screen (triage sheet and Settings).
+function _niAutoPaintAll() {
+  if (_niOpen) _niRender();
+  const el = document.getElementById('ni-auto-settings');
+  if (el && _niAuto) el.innerHTML = '<div class="ni-auto" data-ni-auto-scope="global">' + _niAutoHtml(_niAuto, 'global', '') + '</div>';
+}
+async function _niAutoSettingsLoad() {
+  const el = document.getElementById('ni-auto-settings');
+  if (!el) return;
+  const d = await _niAutoFetch('');
+  if (!d) { el.textContent = 'Could not load the auto-approve policy'; return; }
+  _niAuto = d;
+  _niAutoPaintAll();
+}
+function _niAutoWorkerRender(name, d) {
+  document.querySelectorAll('[data-ni-auto-worker]').forEach(el => {
+    if (el.getAttribute('data-ni-auto-worker') !== name) return;
+    el.innerHTML = d ? '<div class="ni-auto">' + _niAutoHtml(d, 'worker', name) + '</div>' : 'Could not load the auto-approve policy';
+  });
+}
+async function _niAutoWorkerLoad(name) { _niAutoWorkerRender(name, await _niAutoFetch(name)); }
+setTimeout(() => { _niAutoFetch('').then(d => { if (d) { _niAuto = d; if (_niOpen) _niRenderCounter(); } }); }, 0);
+
 // Tooltip for a waiting badge: the stuck composer text, when that is the reason.
 function _waitingTitle(s) {
   if (s.waiting_reason === 'project_execution' && (s.project_waiting_reason || s.state_detail)) {
@@ -10755,10 +10907,12 @@ function _workerPrimaryConfigurationsHTML(name) {
     _workerConfigurationRow('pinned', 'Pinned in worker list', s.pinned ? 'Pinned' : 'Not pinned', 'Presentation preference; does not change execution priority.', sw(!!s.pinned, 'togglePin', 'Toggle pinned state')),
     _workerConfigurationRow('advanced_environment', 'Advanced environment', 'backend: ' + (s.backend || 'tmux') + (s.creator ? ' · creator: ' + s.creator : ''), 'Edit arbitrary worker-level keys. Startup-only values apply on restart.', '<button class="btn" style="font-size:0.68rem;min-height:32px;padding:4px 8px;" onclick="event.stopPropagation();_scopeEditOpen(\'worker\',\'' + q + '\',\'env\')">Edit environment</button>'),
   ];
+  setTimeout(() => _niAutoWorkerLoad(name), 0);
   return '<div class="worker-config-intro">Every durable worker setting, grouped by what it changes. Lifecycle commands remain in the worker menu.</div>'
     + '<div class="worker-config-grid">'
     + _workerConfigurationSection('identity', 'Identity & organization', 'How this worker is named, described, and grouped.', identity)
     + _workerConfigurationSection('runtime', 'Runtime & model', 'Where it runs and which model/tooling it uses.', runtime)
+    + _workerConfigurationSection('needs-input-auto', 'Automatic approval', 'Which of this worker\u2019s asks are approved for you as they arrive.', ['<div data-ni-auto-worker="' + esc(name) + '">Loading\u2026</div>'])
     + _workerConfigurationSection('permissions', 'Permissions & communication', s.isolated ? 'Native CLI tool permissions and isolation.' : 'Standing authority for tools, peers, and external email.', permissions)
     + _workerConfigurationSection('advanced', 'Display & advanced', 'Presentation and lower-level environment controls.', advanced)
     + '</div>';
@@ -38972,6 +39126,7 @@ function toggleSettings() {
     loadTaskGuard();
     loadAlertConfig();
     _standingApprovalsLoad();
+    _niAutoSettingsLoad();
     loadUsage();
   }
 }

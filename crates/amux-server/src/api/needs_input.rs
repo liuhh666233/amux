@@ -384,7 +384,7 @@ async fn get_queue(State(state): State<AppState>) -> Response {
 
 /// A worker hiding the owner's asks from the owner is the one thing this
 /// store must not allow: owner-only, the rule standing approvals use.
-fn refuse_worker(headers: &HeaderMap, action: &str) -> Option<Response> {
+pub(crate) fn refuse_worker(headers: &HeaderMap, action: &str) -> Option<Response> {
     let lane = super::alerts::hdr_worker(headers);
     if lane.is_empty() {
         return None;

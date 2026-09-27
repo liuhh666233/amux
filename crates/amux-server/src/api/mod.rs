@@ -59,6 +59,7 @@ pub mod mcp;
 pub mod mdai;
 pub mod measured;
 pub mod needs_input;
+pub mod needs_input_auto;
 pub mod memories;
 pub mod messages;
 pub(crate) mod native_status;
@@ -309,6 +310,7 @@ pub fn router(state: AppState) -> Router {
         .merge(standing_approvals::routes())
         // AMUX-5286: the owner's one-at-a-time triage queue.
         .merge(needs_input::routes())
+        .merge(needs_input_auto::routes())
         .merge(vault::routes())
         .merge(self_update::routes())
         .nest("/api/proxies", proxies::routes())

@@ -7612,3 +7612,29 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
   font-size: 0.75rem; font-weight: 600; padding: 4px 12px; min-height: 32px; cursor: pointer; }
 @media (max-width: 600px) { .ni-approve-all { min-height: 44px; } }
 .ni-confirm-all p { margin: 0 0 10px; line-height: 1.45; }
+
+/* Needs-input auto-approve (AMUX-5301): header toggle, policy rows, list. */
+.ni-head { flex-wrap: wrap; row-gap: 4px; }
+.ni-auto-btn { margin-left: 8px; background: none; border: 1px solid var(--border); border-radius: 999px;
+  color: var(--dim); font-size: 0.75rem; padding: 4px 10px; min-height: 32px; cursor: pointer; }
+.ni-auto-btn.on { color: var(--green, #2ea043); border-color: var(--green, #2ea043); }
+@media (max-width: 600px) { .ni-auto-btn { min-height: 44px; } }
+.ni-auto { display: flex; flex-direction: column; gap: 10px; font-size: 0.85rem; }
+.ni-auto-summary { font-weight: 600; font-size: 0.95rem; line-height: 1.4; color: var(--text); margin: 0; }
+.ni-auto-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.ni-auto-copy { flex: 1; min-width: 0; }
+.ni-auto-label { font-weight: 600; color: var(--text); }
+.ni-auto-note { color: var(--dim); font-size: 0.75rem; line-height: 1.4; margin-top: 2px; }
+.ni-auto-note.warn { color: #f0883e; }
+.ni-auto-src { font-size: 0.65rem; color: var(--dim); margin-left: 4px; font-weight: 400; }
+.ni-auto-src.here { color: var(--accent); }
+.ni-auto-ctl { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.ni-auto-ctl .btn { min-height: 44px; min-width: 56px; font-size: 0.78rem; padding: 0 10px; }
+.ni-auto-ctl input { width: 76px; min-height: 44px; font-size: 16px; padding: 0 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--card); color: var(--text); box-sizing: border-box; }
+.ni-auto-list { display: flex; flex-direction: column; }
+.ni-auto-item { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.78rem; line-height: 1.4; overflow-wrap: anywhere; }
+.ni-auto-item .ni-auto-out { font-weight: 600; }
+.ni-auto-item .ni-auto-out.approved { color: var(--green, #2ea043); }
+.ni-auto-item .ni-auto-out.refused { color: #f85149; }
+.ni-auto-h { font-weight: 600; font-size: 0.8rem; margin: 6px 0 0; color: var(--text); }

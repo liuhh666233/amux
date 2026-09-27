@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2295,
+  "n_considered": 2306,
   "command_handlers": {
     "_applyEmbedView": {
       "kind": "command._applyEmbedView",
@@ -1582,6 +1582,18 @@
     },
     "_niApproveAllRun": {
       "kind": "command._niApproveAllRun",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niAutoSet": {
+      "kind": "command._niAutoSet",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niAutoSweep": {
+      "kind": "command._niAutoSweep",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

@@ -131,6 +131,7 @@ pub mod ids {
     pub const MODEL_CATALOG_REFRESH: &str = "model-catalog-refresh";
     pub const CAPTURE_RECONCILE: &str = "capture-reconcile";
     pub const EMAIL_APPROVAL_DIGEST: &str = "email-approval-digest";
+    pub const NEEDS_INPUT_AUTO: &str = "needs-input-auto";
 }
 
 /// Every id above, enumerated. `mod ids` is a set of constants and Rust cannot
@@ -180,6 +181,7 @@ pub const ALL_IDS: &[&str] = &[
     ids::MODEL_CATALOG_REFRESH,
     ids::CAPTURE_RECONCILE,
     ids::EMAIL_APPROVAL_DIGEST,
+    ids::NEEDS_INPUT_AUTO,
 ];
 
 /// An env var this job reads at startup. It is a READOUT, never a switch: a
@@ -807,6 +809,34 @@ pub const CATALOG: &[Doc] = &[
         ],
         pref: None,
         detail: Some("/api/email/approvals"),
+    },
+    Doc {
+        id: ids::NEEDS_INPUT_AUTO,
+        name: "Needs-input auto-approve",
+        purpose: "Every minute, approves each NEW needs-input item that its worker's policy \
+                  covers (judgment asks and spend up to $50 by default; production data and \
+                  outbound sends off), exactly as the triage sheet's Approve does, once per \
+                  item. Credential and access asks are never approved. AMUX-5301.",
+        env: &[
+            EnvControl {
+                var: "AMUX_NEEDS_INPUT_AUTO",
+                effect: "0 in server.env stops it fleet-wide; scoped per worker/group it turns \
+                         one worker or group off (re-read every tick)",
+                off: None,
+            },
+            EnvControl {
+                var: "AMUX_NEEDS_INPUT_AUTO_TICK_S",
+                effect: "seconds between passes (default 60, floor 30)",
+                off: None,
+            },
+            EnvControl {
+                var: "AMUX_NEEDS_INPUT_AUTO_SECS",
+                effect: "0 disables the job",
+                off: Some("0"),
+            },
+        ],
+        pref: None,
+        detail: Some("/api/needs-input/auto"),
     },
 ];
 
