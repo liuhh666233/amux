@@ -616,23 +616,36 @@ pub async fn card_via_board(state: &AppState, card: &str, note: &str, marker: &s
     if patch.is_empty() {
         return Ok(format!("{card} already recorded"));
     }
-    let resp = crate::api::board::patch_item(
-        State(state.clone()),
-        axum::extract::Path(card.to_string()),
-        HeaderMap::new(),
-        Json(Value::Object(patch)),
-    )
-    .await;
-    let code = resp.status();
-    if !code.is_success() {
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
-            .await
-            .unwrap_or_default();
+    let send = |patch: serde_json::Map<String, Value>| async move {
+        let resp = crate::api::board::patch_item(
+            State(state.clone()),
+            axum::extract::Path(card.to_string()),
+            HeaderMap::new(),
+            Json(Value::Object(patch)),
+        )
+        .await;
+        let code = resp.status();
+        if code.is_success() {
+            return Ok(());
+        }
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap_or_default();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        return Err(format!(
-            "{card}: board refused {code}: {}",
-            v["error"].as_str().unwrap_or("")
-        ));
+        Err((code, v))
+    };
+    // A full todo queue is not a refusal of the answer: the worker already has
+    // it. Retry into backlog so the card stops flagging the worker (2026-09-27:
+    // mvs-infra 20/20 and amux 78/20 turned approved cards away).
+    let mut landed = "todo";
+    if let Err((code, v)) = send(patch.clone()).await {
+        if moving && v["code"].as_str() == Some("todo_wip_limit_reached") {
+            patch.insert("status".into(), json!("backlog"));
+            landed = "backlog";
+            if let Err((code2, v2)) = send(patch).await {
+                return Err(format!("{card}: board refused {code2}: {}", v2["error"].as_str().unwrap_or("")));
+            }
+        } else {
+            return Err(format!("{card}: board refused {code}: {}", v["error"].as_str().unwrap_or("")));
+        }
     }
     let Some(back) = read(card) else {
         return Err(format!("{card}: could not read it back"));
@@ -643,7 +656,7 @@ pub async fn card_via_board(state: &AppState, card: &str, note: &str, marker: &s
     if !already && !back.desc.contains(marker) {
         return Err(format!("{card}: the note did not land on the card"));
     }
-    Ok(format!("{card} {}", if moving { "moved to todo" } else { "noted" }))
+    Ok(format!("{card} {}", if moving { format!("moved to {landed}") } else { "noted".to_string() }))
 }
 
 #[async_trait::async_trait]

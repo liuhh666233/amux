@@ -459,7 +459,17 @@ pub(crate) fn owner_block_projection(
     if !matches!(status, "idle" | "") {
         return None;
     }
-    if let Some(id) = named.iter().find(|id| needsyou.contains_key(id.as_str())) {
+    // Only the lane's OWN card, and only one that clears the needs-input bar.
+    // Measured 2026-09-27 18:28 (Ethan: "i dont think the needs input status
+    // is correct"): amux-meta-helper read "Needs input · SP-1067" because its
+    // status report MENTIONED studio-plg's card, and mixpeek-finances and
+    // mvs-infra read it for judgment asks ("go after the Gemini source now?",
+    // "keep 24h of restore points?") that the higher bar (69e7e227) had
+    // already taken off the pill. `needsyou` here holds only high-bar cards.
+    if let Some(id) = named
+        .iter()
+        .find(|id| needsyou.get(id.as_str()).is_some_and(|(sess, _, _)| sess == name))
+    {
         return Some(OwnerBlock { card: id.clone(), ask: ask_of(id), since: 0, source: "named" });
     }
     // The most recently updated card the lane owns.
@@ -5795,11 +5805,16 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
     {
         let mut needsyou: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(session,''), COALESCE(NULLIF(ask_question,''), title), COALESCE(updated,0) FROM issues
+            "SELECT id, COALESCE(session,''), COALESCE(NULLIF(ask_question,''), title), COALESCE(updated,0),
+                    COALESCE(ask_type,''), title FROM issues
              WHERE status = 'needsyou' AND deleted IS NULL AND COALESCE(archived,0) = 0",
         )?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))? {
-            let (id, sess, ask, updated) = row?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)))? {
+            let (id, sess, ask, updated, ask_type, title) = row?;
+            // The same bar the pill and the triage queue use (needs_input).
+            if !crate::api::needs_input::clears_owner_bar(&ask_type, &format!("{ask} {title}")) {
+                continue;
+            }
             needsyou.insert(id, (sess, ask, updated));
         }
         for v in out.iter_mut() {
@@ -6036,9 +6051,12 @@ pub(crate) mod tests {
         assert!(b.ask.contains("sign in once"));
         // A working lane with its own needsyou card, no stamp: stays working.
         assert_eq!(owner_block_projection("active", true, &none, "tubescience-parity", &["TP-37".into()], &needsyou), None);
-        // Idle and the latest turn named the card: flips, even if another lane owns it.
-        let b = owner_block_projection("idle", true, &none, "helper", &["GS-9".into()], &needsyou).unwrap();
-        assert_eq!((b.card.as_str(), b.source), ("GS-9", "named"));
+        // Idle and the latest turn MENTIONS another lane's card: does not flip
+        // (2026-09-27: amux-meta-helper read "Needs input · SP-1067", studio-plg's card).
+        assert_eq!(owner_block_projection("idle", true, &none, "helper", &["GS-9".into()], &needsyou), None);
+        // Idle and the latest turn names its OWN card: flips as named.
+        let b = owner_block_projection("idle", true, &none, "tubescience-parity", &["TP-12".into()], &needsyou).unwrap();
+        assert_eq!((b.card.as_str(), b.source), ("TP-12", "named"));
         // Idle with its own card: the most recently updated one.
         let b = owner_block_projection("idle", true, &none, "tubescience-parity", &[], &needsyou).unwrap();
         assert_eq!((b.card.as_str(), b.source, b.ask.as_str()), ("TP-37", "linked", "Sign in once at the semantic-search URL?"));

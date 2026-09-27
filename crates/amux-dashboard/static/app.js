@@ -5539,8 +5539,18 @@ async function _niCard(card, note, marker, unblock) {
   if (!Object.keys(patch).length) return { ok: true, already: true, status: before.status };
   // _skipOutbox: this PATCH is read back and any refusal is shown on the spot,
   // so it must not also linger in the outbox as a blocked change to review.
-  const r = await fetch(url, { method: 'PATCH', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(patch), _skipOutbox: true });
-  const d = await _niJson(r);
+  let r = await fetch(url, { method: 'PATCH', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(patch), _skipOutbox: true });
+  let d = await _niJson(r);
+  // A FULL todo QUEUE IS NOT A REFUSAL OF THE ANSWER (2026-09-27: Approve all
+  // reported "5 refused" when every approval message had been delivered and
+  // only mvs-infra's 20/20 and amux's 78/20 todo queues turned the card away,
+  // so the answered cards kept flagging their workers). Retry into backlog:
+  // the worker already has the answer.
+  if (!r.ok && moving && d && d.code === 'todo_wip_limit_reached') {
+    patch.status = 'backlog';
+    r = await fetch(url, { method: 'PATCH', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(patch), _skipOutbox: true });
+    d = await _niJson(r);
+  }
   if (!r.ok) return { ok: false, error: card + ': ' + _niErr(d, r) };
   const back = await fetch(url, { headers: _authHeaders() }).then(_niJson).catch(() => ({}));
   if (moving && back.status === 'needsyou') return { ok: false, error: card + ' is still needsyou after the PATCH (board kept it)' };
@@ -5610,7 +5620,7 @@ async function _niAct(action) {
         const note = '[' + stamp + '] ' + verb + ' by owner in needs-input triage' + (action === 'reply' || (action === 'decline' && typed) ? ': ' + typed : '.');
         const marker = '#triage-' + _niHash(it.key + '|' + action + '|' + typed);
         const c = await _niCard(it.card, note, marker, true);
-        if (c.ok) done.push(c.already ? it.card + ' already recorded' : it.card + ' ' + (c.status === 'todo' ? 'moved to todo' : 'noted'));
+        if (c.ok) done.push(c.already ? it.card + ' already recorded' : it.card + ' ' + (c.status === 'todo' ? 'moved to todo' : c.status === 'backlog' ? 'moved to backlog (todo full)' : 'noted'));
         else errs.push(c.error);
       }
     }

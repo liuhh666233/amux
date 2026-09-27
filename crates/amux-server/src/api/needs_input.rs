@@ -102,11 +102,26 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
         "linkedin",
         "reply to",
         "app store",
+        "tweet",
+        "post the",
+        "post on",
+        "posts for",
+        "natively",
+        "press release",
     ]) || t.contains('@') && has(&["email", "send", "reply"])
     {
         return ("outbound", 0);
     }
     ("other", 1)
+}
+
+/// Does this ask clear the owner bar: a real spend, outbound to outside
+/// people, production data, or a credential/access only the owner holds?
+/// One definition for the pill, the triage queue's default view and the
+/// per-worker "Needs input" status, so the three cannot disagree.
+pub fn clears_owner_bar(ask_type: &str, text: &str) -> bool {
+    matches!(ask_type, "credential" | "access")
+        || matches!(classify(ask_type, text).0, "money" | "outbound" | "prod_data")
 }
 
 /// Standing-approval category for an ask (the closed vocabulary in
@@ -534,6 +549,18 @@ async fn log_action(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_owner_bar_is_one_rule_for_pill_queue_and_status() {
+        // Live 2026-09-27 18:28: these read "Needs input" and should not.
+        assert!(!clears_owner_bar("decision", "Want me to go after the Gemini source now, or wait for gs-4 to say whether it's theirs?"));
+        assert!(!clears_owner_bar("budget", "May mvs-infra keep 24 hours of MVS restore points (retained snapshot generations)?"));
+        // These should.
+        assert!(clears_owner_bar("credential", "Can you mint a new Ethan Personal org API key in Studio?"));
+        assert!(clears_owner_bar("access", "May amux-ops get roles/artifactregistry.admin on the us-east1 repo?"));
+        assert!(clears_owner_bar("budget", "Do you approve a TS indexer node (about $90-130/mo spot)?"));
+        assert!(clears_owner_bar("external", "Post the 526-character launch tweet natively from X yourself (file gtm/launch-videos/amux-launch.mp4)?"));
+    }
 
     #[test]
     fn classify_puts_money_outbound_and_prod_first() {
