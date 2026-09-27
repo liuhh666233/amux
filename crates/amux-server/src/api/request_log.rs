@@ -2321,6 +2321,54 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/browser/import",
         methods: &["POST"],
     },
+    RouteEntry {
+        path: "/api/computer/start",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/status",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/computer/context",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/computer/screenshot",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/click",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/double_click",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/move",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/type",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/key",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/scroll",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/open",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/stop",
+        methods: &["POST"],
+    },
     // -- file viewer / files / fs
     RouteEntry {
         path: "/api/file",

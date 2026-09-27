@@ -1016,6 +1016,10 @@ async fn async_main() {
     // browser sat 18.1h with zero tabs and blocked him.
     runtime_jobs::browser_reaper::spawn(reaper_store);
 
+    // STOP IDLE COMPUTER-USE SANDBOXES (AMUX-5300). Each is a 4 GB Docker
+    // desktop; idle, exited, duplicate and unowned ones are removed by label.
+    runtime_jobs::computer_reaper::spawn();
+
     // MAC PROCESS HEALTH (2026-08-30). Reaps orphaned Ray workers and logs
     // when the claude-process count exceeds the ceiling. Neither the browser
     // reaper nor disk_watch covers these.

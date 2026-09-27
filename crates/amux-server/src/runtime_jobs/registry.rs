@@ -106,6 +106,7 @@ pub mod ids {
     pub const SELF_ADOPT: &str = "self-adoption";
     pub const TUNNEL: &str = "tunnel-relay";
     pub const BROWSER_REAPER: &str = "browser-idle-reaper";
+    pub const COMPUTER_REAPER: &str = "computer-sandbox-reaper";
     // The PeriodicTask ids below are NOT referenced by any spawn site — they
     // register themselves through `spawn_periodic_every` under the name their
     // own module passes. They are listed here only so CATALOG rows and tests
@@ -156,6 +157,7 @@ pub const ALL_IDS: &[&str] = &[
     ids::SELF_ADOPT,
     ids::TUNNEL,
     ids::BROWSER_REAPER,
+    ids::COMPUTER_REAPER,
     ids::AUTOFIX,
     ids::BOARD_DRIVE,
     ids::CDC_POLLER,
@@ -438,6 +440,25 @@ pub const CATALOG: &[Doc] = &[
         env: &[EnvControl { var: "AMUX_RS_BOOTSTRAP_SECS", effect: "pass seconds (default 2)", off: None }],
         pref: None,
         detail: None,
+    },
+    Doc {
+        id: ids::COMPUTER_REAPER,
+        name: "Computer sandbox reaper",
+        purpose: "Removes amux-labelled CUA computer-use containers that are idle, exited, duplicated for one lane, or unowned. Never starts Docker; finds containers by the amux-computer label only.",
+        env: &[
+            EnvControl {
+                var: "AMUX_COMPUTER_IDLE_S",
+                effect: "seconds without an action before a sandbox is stopped (default 900 = 15 min); 0 disables this arm",
+                off: None, // disables one arm, not the running job
+            },
+            EnvControl {
+                var: "AMUX_COMPUTER_REAP_TICK_S",
+                effect: "sweep interval in seconds (default 60)",
+                off: None,
+            },
+        ],
+        pref: None,
+        detail: Some("/api/computer/status"),
     },
     Doc {
         id: ids::BROWSER_REAPER,

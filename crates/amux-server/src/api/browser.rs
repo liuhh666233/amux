@@ -2214,7 +2214,7 @@ struct ProfilesQuery {
 ///
 /// Read-only and copy-first: the live DB is never opened in place, because a
 /// listing must not be able to disturb a login.
-fn profile_contents(dir: &std::path::Path) -> (Option<i64>, Vec<String>) {
+pub(crate) fn profile_contents(dir: &std::path::Path) -> (Option<i64>, Vec<String>) {
     let Some(db) = profile_cookie_db(dir) else {
         return (Some(0), Vec::new());
     };

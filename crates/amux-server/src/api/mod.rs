@@ -21,6 +21,7 @@ pub mod channels;
 pub mod chat_stream;
 pub mod chat_worker;
 pub mod commit_mentions;
+pub mod computer;
 pub mod config_iac;
 pub mod connection;
 pub mod connectors;
@@ -250,6 +251,9 @@ pub fn router(state: AppState) -> Router {
         // standing proof of the cutover. Matrix:
         // docs/rust-migration/server-boundary.md.
         .nest("/api/browser", browser::routes())
+        // Rung 3 of the access ladder (AMUX-5300): CUA computer-use sandboxes,
+        // one Docker desktop per lane. api/computer.rs.
+        .nest("/api/computer", computer::routes())
         // Server-machine screen capture (AMUX-4661): a real macOS Screen
         // Recording permission grant needs the OS's own native prompt, not a
         // manually-added System Settings entry — see screen.rs header for why.

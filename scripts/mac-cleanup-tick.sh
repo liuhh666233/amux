@@ -691,6 +691,25 @@ echo "mac-cleanup: measured=$measured pressure=$level free=${free_gb}G inactive=
 # Right after the reading, because the schedule keeps only the head of this output:
 # the disk consumer is the line a reader needs during an emergency.
 lima_disks_report "$LIMA_ROOT" "$LIMA_SHOW_KB"
+# amux computer-use sandboxes (AMUX-5300): 4 GB Docker desktops, one per lane.
+# The server's computer-sandbox-reaper stops idle ones; this line only NAMES
+# them, so a reader of this tick sees them beside the VM that hosts them.
+computer_sandboxes_report() {
+  local out
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "mac-cleanup: computer sandboxes: unmeasured (no docker CLI)"; return 0
+  fi
+  # A test seam, eval'd; the default is a plain call so its --format keeps its quotes.
+  if [ -n "${AMUX_CLEANUP_COMPUTER_CMD:-}" ]; then out=$(eval "$AMUX_CLEANUP_COMPUTER_CMD" 2>/dev/null)
+  else out=$(docker ps --filter label=amux-computer --format '{{.Label "amux-computer"}} {{.Status}}' 2>/dev/null); fi
+  if [ $? -ne 0 ]; then
+    echo "mac-cleanup: computer sandboxes: unmeasured (docker not answering)"; return 0
+  fi
+  local n; n=$(printf '%s' "$out" | grep -c . || true)
+  if [ "$n" = 0 ]; then echo "mac-cleanup: computer sandboxes: 0 running"; return 0; fi
+  echo "mac-cleanup: computer sandboxes: ${n} running ($(printf '%s' "$out" | awk '{print $1}' | paste -sd, -)); idle ones are stopped by amux's computer-sandbox-reaper, GET /api/computer/status"
+}
+computer_sandboxes_report
 
 # ── report: running VMs with no fleet session referencing them ───────────────
 # A VM eating 20+GB RAM with no session using it is the single most common
