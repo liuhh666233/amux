@@ -95,7 +95,8 @@ FREE_FLOOR_GB=${AMUX_CLEANUP_FREE_FLOOR_GB:-4}
 AGENT_LEAK_GB=${AMUX_CLEANUP_AGENT_LEAK_GB:-2}
 AGENTS=${AMUX_CLEANUP_AGENTS:-com.procwarden.menubar}
 REPORT_GB=${AMUX_CLEANUP_REPORT_GB:-10}
-FSEVENTSD_REBOOT_GB=${AMUX_CLEANUP_FSEVENTSD_REBOOT_GB:-20}
+FSEVENTSD_REBOOT_GB=${AMUX_CLEANUP_FSEVENTSD_REBOOT_GB:-5}
+FSEVENTSD_CPU_PCT=${AMUX_CLEANUP_FSEVENTSD_CPU_PCT:-80}
 # APFS local snapshots pin deleted blocks, so a reaper can delete 50 GB and free
 # nothing until they expire (DESKT-26 measured exactly that: a thin returned
 # 68.7 GB). Thinning is BOUNDED and disk-triggered because these snapshots are
@@ -688,6 +689,39 @@ echo "mac-cleanup: measured=$measured pressure=$level free=${free_gb}G inactive=
 # the disk consumer is the line a reader needs during an emergency.
 lima_disks_report "$LIMA_ROOT" "$LIMA_SHOW_KB"
 
+# ── report: running VMs with no fleet session referencing them ───────────────
+# A VM eating 20+GB RAM with no session using it is the single most common
+# resource leak on this box (measured: gs7-e ran 5 days at 96% CPU / 22GB RAM
+# with zero fleet references, 2026-09-27). The tick cannot stop it (ethos rule 8)
+# but it CAN name it loudly rather than burying it in the disk report.
+_running_vms=$(lima_running_names)
+if [ -n "$_running_vms" ]; then
+  _fleet_sessions=""
+  if [ -n "${AMUX_URL:-}" ]; then
+    _fleet_sessions=$(curl -sk --max-time 5 "$AMUX_URL/api/sessions" 2>/dev/null \
+      | python3 -c "import json,sys;[print(s.get('name',''),s.get('desc','')) for s in json.load(sys.stdin)]" 2>/dev/null || true)
+  fi
+  while IFS= read -r _vm; do
+    [ -z "$_vm" ] && continue
+    _vm_short=$(echo "$_vm" | sed 's/^colima-//')
+    _referenced=0
+    if [ -n "$_fleet_sessions" ] && echo "$_fleet_sessions" | grep -qi "$_vm_short"; then
+      _referenced=1
+    fi
+    if [ "$_referenced" = 0 ]; then
+      _vm_pid=$(ps -Ao pid=,command= 2>/dev/null | grep "hostagent.*$_vm/ha.pid" | grep -v grep | awk '{print $1}')
+      _vm_rss=""
+      if [ -n "$_vm_pid" ]; then
+        _vm_rss=$(ps -o rss= -p "$_vm_pid" 2>/dev/null | tr -d ' ')
+      fi
+      # Also check the Virtualization.framework VM process RSS
+      _vz_rss=$(ps -eo rss=,command= 2>/dev/null | grep 'Virtualization.VirtualMachine' | grep -v grep | awk '{sum+=$1}END{print sum+0}')
+      _vz_gb=$(awk -v k="${_vz_rss:-0}" 'BEGIN{printf "%.1f", k/1048576}')
+      echo "mac-cleanup: UNREFERENCED VM '$_vm' running with ${_vz_gb}G resident, no fleet session mentions '$_vm_short' — stop with: limactl stop $_vm (or kill the hostagent)"
+    fi
+  done <<< "$_running_vms"
+fi
+
 # ── act: purge ───────────────────────────────────────────────────────────────
 purged=no
 if [ "$measured" = true ] && should_purge "$level" "$free_gb" "$PRESSURE_PURGE" "$FREE_FLOOR_GB"; then
@@ -843,10 +877,15 @@ fi
 fse_pid=$(pgrep -x fseventsd 2>/dev/null | head -1)
 if [ -n "$fse_pid" ]; then
   fse_gb=$(to_gb "$(top -l 1 -pid "$fse_pid" -stats mem 2>/dev/null | tail -1 | tr -d ' ')")
-  if needs_reboot "$fse_gb" "$FSEVENTSD_REBOOT_GB"; then
-    echo "mac-cleanup: fseventsd holds ${fse_gb}G and is SIP-protected — a reboot is the only remedy (owner runs: sudo fdesetup authrestart)"
+  fse_cpu=$(ps -o pcpu= -p "$fse_pid" 2>/dev/null | tr -d ' ')
+  fse_cpu_int=${fse_cpu%%.*}
+  fse_hot=0
+  if needs_reboot "$fse_gb" "$FSEVENTSD_REBOOT_GB"; then fse_hot=1; fi
+  if [ "${fse_cpu_int:-0}" -ge "$FSEVENTSD_CPU_PCT" ] 2>/dev/null; then fse_hot=1; fi
+  if [ "$fse_hot" = 1 ]; then
+    echo "mac-cleanup: fseventsd holds ${fse_gb}G at ${fse_cpu:-?}% CPU and is SIP-protected — a reboot is the only remedy (owner runs: sudo fdesetup authrestart)"
   else
-    echo "mac-cleanup: fseventsd ${fse_gb}G, under the ${FSEVENTSD_REBOOT_GB}G reboot threshold"
+    echo "mac-cleanup: fseventsd ${fse_gb}G ${fse_cpu:-?}% CPU, under the ${FSEVENTSD_REBOOT_GB}G/${FSEVENTSD_CPU_PCT}% thresholds"
   fi
 fi
 
