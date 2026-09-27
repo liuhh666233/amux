@@ -5843,6 +5843,8 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
             }
             needsyou.insert(id, (sess, ask, updated));
         }
+        let previews: BTreeMap<String, String> =
+            preview_cache().lock().map(|c| c.1.clone()).unwrap_or_default();
         for v in out.iter_mut() {
             let Some(name) = v["name"].as_str().map(str::to_string) else { continue };
             let meta = load_meta(&name);
@@ -5861,7 +5863,10 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
                 &name,
                 &named,
                 &needsyou,
-                signals.panes.get(&name).is_some_and(|raw| footer_background_watch(raw)),
+                // `signals.panes` holds only lanes that painted recently, so an
+                // idle lane is never in it; the preview capture covers every
+                // running lane (same 30 lines, same TTL).
+                signals.panes.get(&name).or(previews.get(&name)).is_some_and(|raw| footer_background_watch(raw)),
             );
             if let Some(b) = block {
                 v["status"] = json!("waiting");
