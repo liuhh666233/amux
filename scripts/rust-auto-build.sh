@@ -589,6 +589,23 @@ fi
   # cost it was built to avoid. The fallback is LOGGED, never silent — see
   # AMUX-48's frustrations.md entry for why a silent wrong-path here would
   # cost exactly what it already cost once.
+  # THE DEPLOY PROFILE ONLY PAYS OFF WITH ITS OWN SETTINGS (2026-09-27).
+  # safe-cargo defaults CARGO_INCREMENTAL=0 and CARGO_BUILD_JOBS=2 for routine
+  # fleet checks. The env var overrides `incremental = true` in
+  # [profile.deploy], and a 2-slot jobserver runs its 256 codegen units two at
+  # a time, so a one-crate rebuild measured 14-63s by hand took 7m50s-8m31s
+  # here. On a Mac the builder takes every core; elsewhere it keeps
+  # safe-cargo's default unless AMUX_DEPLOY_JOBS says otherwise, because the
+  # small Linux box is memory-bound. safe-cargo's RSS budget still applies.
+  if [ -n "${AMUX_DEPLOY_JOBS:-}" ]; then
+    DEPLOY_JOBS="$AMUX_DEPLOY_JOBS"
+  elif [ "$(uname -s)" = Darwin ]; then
+    DEPLOY_JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+  else
+    DEPLOY_JOBS="${CARGO_BUILD_JOBS:-2}"
+  fi
+  DEPLOY_T0=$(date +%s)
+  echo "== deploy build settings incremental=1 jobs=$DEPLOY_JOBS"
   BUILD_OK=0
   if [ -n "${AMUX_REMOTE_BUILD_HOST:-}" ]; then
     if "$REPO/scripts/rust-remote-build.sh" "$WORK" \
@@ -603,12 +620,12 @@ fi
       # this script's — this unit already gets one via systemd (defense in
       # depth for the case where rust-auto-build.sh is invoked directly
       # from an interactive pane instead of via the timer).
-      if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) >> "$BUILD_OUT" 2>&1; then
+      if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" CARGO_INCREMENTAL=1 CARGO_BUILD_JOBS="$DEPLOY_JOBS" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) >> "$BUILD_OUT" 2>&1; then
         BUILD_OK=1
       fi
     fi
   else
-    if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) > "$BUILD_OUT" 2>&1; then
+    if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" CARGO_INCREMENTAL=1 CARGO_BUILD_JOBS="$DEPLOY_JOBS" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) > "$BUILD_OUT" 2>&1; then
       BUILD_OK=1
     fi
   fi
@@ -617,6 +634,13 @@ fi
   # make `[ -x ... ]` true even after a genuine failure, silently
   # re-installing old code and reporting success — the exact "wrong answer,
   # not wrong-looking" shape ethos rule 4 exists to catch.
+  DEPLOY_ELAPSED=$(( $(date +%s) - DEPLOY_T0 ))
+  echo "== deploy build elapsed_s=$DEPLOY_ELAPSED ok=$BUILD_OK jobs=$DEPLOY_JOBS"
+  # A slow build is the regression this block exists to prevent, and nothing
+  # else would say so: the deploy still lands, just minutes late.
+  if [ "$BUILD_OK" = 1 ] && [ "$DEPLOY_ELAPSED" -gt "${AMUX_DEPLOY_SLOW_S:-180}" ]; then
+    echo "== WARN deploy_build_slow elapsed_s=$DEPLOY_ELAPSED threshold_s=${AMUX_DEPLOY_SLOW_S:-180} jobs=$DEPLOY_JOBS incremental=1 (a cold cache or a dependency bump is expected to be slow once)"
+  fi
   if [ "$BUILD_OK" = 1 ]; then
     tail -3 "$BUILD_OUT"
     # Build the complete replacement beside the live executable, including its
