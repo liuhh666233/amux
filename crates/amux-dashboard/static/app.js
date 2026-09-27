@@ -6927,8 +6927,12 @@ function render() {
           const llmTask = s.task_override || '';
           const hasBoard = !!displayTaskBoardId;
           const showLlm = llmTask && llmTask !== displayTaskName;
-          const doingCard = hasBoard ? _cardDoingItem(s.name) : null;
-          const cardDesc = doingCard && doingCard.desc ? doingCard.desc.split('\n')[0].slice(0, 120) : '';
+          // The card this line already names (displayTaskBoardId, from the
+          // server's runtime link), found by id. Board rows arrive slimmed, so
+          // `desc` is absent and `desc_head` is the field that carries the line;
+          // reading `.desc` rendered nothing for every worker.
+          const shownCard = hasBoard ? (boardItems || []).find(c => c.id === displayTaskBoardId) : null;
+          const cardDesc = shownCard ? String(shownCard.desc || shownCard.desc_head || '').split('\n')[0].slice(0, 120) : '';
           return (showLlm
             ? `<div class="card-task-name" style="font-weight:600;">${esc(llmTask)}</div>`
             : '')
@@ -12896,7 +12900,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1151';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1152';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.

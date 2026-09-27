@@ -1269,9 +1269,22 @@ fn worker_configurations_are_editable_from_backlog_through_terminal_states() {
     );
 
     let app = asset("app.js");
+    // a4371f28 ("Hide unused harness configuration for raw workers"): an
+    // ISOLATED worker takes no harness automation, so its Configurations show
+    // only env and skin. Every other worker still sees every capability the
+    // server returns.
     assert!(
-        app.contains("const _visCaps = (lvl === 'worker') ? d.capabilities"),
-        "worker Configurations must show every capability returned by the server"
+        app.contains("const _visCaps = _visibleScopeCapabilities(lvl, sessions.find(s => s.name === w)?.isolated, d.capabilities);"),
+        "worker Configurations must filter capabilities through the one shared predicate"
+    );
+    let vis = app
+        .find("function _visibleScopeCapabilities(level, isolated, capabilities)")
+        .map(|i| &app[i..i + 300.min(app.len() - i)])
+        .expect("capability visibility predicate exists");
+    assert!(
+        vis.contains("level === 'worker' ? (isolated ? ['env', 'skin'] : null)")
+            && vis.contains("keys ? capabilities.filter(c => keys.includes(c.key)) : capabilities"),
+        "a non-isolated worker must see every capability; an isolated one only env and skin"
     );
     assert!(
         !app.contains("Edited where it lives"),
