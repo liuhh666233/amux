@@ -57,13 +57,24 @@ pub fn routes() -> Router<AppState> {
 /// declared signal; the text fallback catches the asks filed before AF-318 or
 /// typed `decision` while plainly being about spend.
 pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
-    match ask_type {
-        "budget" => return ("money", 0),
-        "customer_outbound" => return ("outbound", 0),
-        _ => {}
-    }
     let t = text.to_ascii_lowercase();
     let has = |w: &[&str]| w.iter().any(|x| t.contains(x));
+    // A REAL SPEND, not a money-adjacent word (Ethan, 2026-09-27 14:42: "the
+    // bar for needs input just needs to be much higher"). "Should billing
+    // /estimate be reachable without an API key", "what are the per-million
+    // rates" and "six dead lanes" were all counted as money on the word
+    // "billing", "rates" or a lane's loose ask_type. Money now needs a dollar
+    // figure, a monthly price, or a verb that commits spend, even when the
+    // lane declared ask_type=budget.
+    let dollar = t
+        .char_indices()
+        .any(|(i, c)| c == '$' && t[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
+    let spends = dollar
+        || has(&[
+            "/mo", "per month", "a month", "spend ", "spending", " pay ", "purchase", " buy ",
+            "top up", "top-up", "fund ", "provision", "raise the spend", "spend limit", "gpu spend",
+            "on-demand", "credits",
+        ]);
     if has(&[
         "prod data",
         "production data",
@@ -75,29 +86,24 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
     ]) {
         return ("prod_data", 0);
     }
-    let money = has(&[
-        "budget",
-        "spend",
-        " cost",
-        "invoice",
-        "paid ",
-        "billing",
-        "quota that bills",
-    ]) || t
-        .char_indices()
-        .any(|(i, c)| c == '$' && t[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
-    if money {
+    if ask_type == "customer_outbound" {
+        return ("outbound", 0);
+    }
+    if spends {
         return ("money", 0);
     }
     if has(&[
         "send email",
+        "send the draft",
+        "welcome email",
         "outbound",
         "publish",
         "post to",
-        "customer",
         "linkedin",
         "reply to",
-    ]) {
+        "app store",
+    ]) || t.contains('@') && has(&["email", "send", "reply"])
+    {
         return ("outbound", 0);
     }
     ("other", 1)
@@ -139,13 +145,31 @@ pub fn actor_is_owner(actor: &str) -> bool {
             .any(|w| a.contains(w))
 }
 
-/// Sort in place: rank, then oldest first, then key (deterministic).
+/// Older than this, an ask sorts behind every fresh one (it stays listed).
+pub const STALE_AFTER_S: f64 = 14.0 * 86_400.0;
+
+fn secs(t: f64) -> f64 {
+    if t > 1e12 { t / 1000.0 } else { t }
+}
+
+/// Sort in place: fresh before stale (older than 14 days), then rank, then
+/// NEWEST first, then key. Oldest-first put a 27-day-old ask from a stopped
+/// lane at "1 of 99" on 2026-09-27; what can move now comes first. The
+/// dashboard adds the live-worker tier on top, from its session list.
 pub fn order(items: &mut [Value]) {
+    order_at(items, now_f64())
+}
+
+/// `order` against a caller-supplied clock, so a queue built for `now` is
+/// staled against the same `now`.
+pub fn order_at(items: &mut [Value], now: f64) {
     items.sort_by(|a, b| {
         let r = |v: &Value| v["rank"].as_u64().unwrap_or(1);
-        let s = |v: &Value| v["since"].as_f64().unwrap_or(f64::MAX);
-        r(a).cmp(&r(b))
-            .then_with(|| s(a).partial_cmp(&s(b)).unwrap_or(std::cmp::Ordering::Equal))
+        let s = |v: &Value| secs(v["since"].as_f64().unwrap_or(0.0));
+        let stale = |v: &Value| (s(v) > 0.0 && now - s(v) > STALE_AFTER_S) as u8;
+        stale(a).cmp(&stale(b))
+            .then_with(|| r(a).cmp(&r(b)))
+            .then_with(|| s(b).partial_cmp(&s(a)).unwrap_or(std::cmp::Ordering::Equal))
             .then_with(|| {
                 a["key"]
                     .as_str()
@@ -319,8 +343,8 @@ pub fn build(conn: &Connection, home: &Path, now: f64) -> rusqlite::Result<Queue
             items.push(v);
         }
     }
-    order(&mut items);
-    order(&mut snoozed);
+    order_at(&mut items, now);
+    order_at(&mut snoozed, now);
     Ok(Queue {
         items,
         snoozed,
@@ -513,7 +537,17 @@ mod tests {
 
     #[test]
     fn classify_puts_money_outbound_and_prod_first() {
-        assert_eq!(classify("budget", "anything"), ("money", 0));
+        // A declared budget ask with no spend in it is not money.
+        assert_eq!(classify("budget", "anything"), ("other", 1));
+        // Live 2026-09-27 specimens: real spend stays money...
+        assert_eq!(classify("budget", "Do you approve a TS indexer node (about $90-130/mo spot or $390-425/mo on-demand), or hold?"), ("money", 0));
+        assert_eq!(classify("budget", "Do you approve GPU spend to re-extract the two broken TubeScience indexes?"), ("money", 0));
+        // ...money-adjacent words do not.
+        assert_eq!(classify("decision", "Should POST /v1/organizations/billing/estimate be reachable without an API key?"), ("other", 1));
+        assert_eq!(classify("budget", "What are the per-million rates for the codex and gemini model families?"), ("other", 1));
+        assert_eq!(classify("budget", "Six registered goal-spec lanes (gs-2, gs-3, gs-5) are dead; archive them?"), ("other", 1));
+        // Outbound to a person outside stays outbound.
+        assert_eq!(classify("external", "Approve the welcome email to partners@thefasttrackgirl.com?"), ("outbound", 0));
         assert_eq!(classify("customer_outbound", "x"), ("outbound", 0));
         assert_eq!(
             classify("decision", "Approve about $1,000 of API spend?"),
@@ -536,19 +570,22 @@ mod tests {
     }
 
     #[test]
-    fn order_is_rank_then_oldest_then_key() {
+    fn order_is_fresh_then_rank_then_newest() {
+        let now = now_f64();
         let mut v = vec![
-            json!({"key":"card:B","rank":1,"since":100}),
-            json!({"key":"card:A","rank":1,"since":100}),
-            json!({"key":"card:OLD","rank":1,"since":10}),
-            json!({"key":"email:apr_1","rank":0,"since":500}),
-            json!({"key":"card:MONEY","rank":0,"since":400}),
+            json!({"key":"card:B","rank":1,"since":now - 100.0}),
+            json!({"key":"card:A","rank":1,"since":now - 100.0}),
+            json!({"key":"card:OLDER","rank":1,"since":now - 5000.0}),
+            json!({"key":"email:apr_1","rank":0,"since":now - 50.0}),
+            json!({"key":"card:MONEY","rank":0,"since":now - 400.0}),
+            // 27 days old, money: the live 2026-09-27 head of the queue.
+            json!({"key":"card:STALE_MONEY","rank":0,"since":now - 27.0 * 86_400.0}),
         ];
         order(&mut v);
         let keys: Vec<_> = v.iter().map(|x| x["key"].as_str().unwrap()).collect();
         assert_eq!(
             keys,
-            ["card:MONEY", "email:apr_1", "card:OLD", "card:A", "card:B"]
+            ["email:apr_1", "card:MONEY", "card:A", "card:B", "card:OLDER", "card:STALE_MONEY"]
         );
     }
 
@@ -721,19 +758,21 @@ mod tests {
             .iter()
             .map(|x| x["key"].as_str().unwrap().to_string())
             .collect();
+        // Rank 0 (money/outbound) first, newest first within a rank; all
+        // seeds are fresh against this build's clock.
         assert_eq!(
             keys,
             [
-                "card:T-2",
                 "email:apr_00000000000000aa",
-                "card:T-3",
+                "card:T-2",
+                "card:T-1",
                 "card:T-7",
-                "card:T-1"
+                "card:T-3",
             ]
         );
         assert_eq!(q.excluded_peer_actor, 1);
-        assert_eq!(q.items[1]["kind"], "email");
-        assert_eq!(q.items[0]["category"], "money");
+        assert_eq!(q.items[0]["kind"], "email");
+        assert_eq!(q.items[1]["category"], "money");
         conn.execute(
             "INSERT INTO prefs (key,value) VALUES (?1,?2)",
             rusqlite::params![
@@ -751,12 +790,7 @@ mod tests {
         // T-3 is snoozed into the future; T-1's snooze expired and it is back.
         assert_eq!(
             keys,
-            [
-                "card:T-2",
-                "email:apr_00000000000000aa",
-                "card:T-7",
-                "card:T-1"
-            ]
+            ["email:apr_00000000000000aa", "card:T-2", "card:T-1", "card:T-7"]
         );
         assert_eq!(q.snoozed.len(), 1);
     }

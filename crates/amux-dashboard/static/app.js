@@ -5206,7 +5206,7 @@ function updateNeedsInputPill() {
   const pill = document.getElementById('needs-input-pill');
   const txt = document.getElementById('needs-input-pill-text');
   if (!pill || !txt) return;
-  const list = _niItems();
+  const list = _niItems(false);
   const n = list.length;
   try { if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {}); } catch (_) {}
   if (_niOpen) _niRenderCounter();
@@ -5260,7 +5260,13 @@ else document.addEventListener('DOMContentLoaded', _niBoot);
 
 // The merged, ordered queue. Before the first fetch it degrades to exactly the
 // AMUX-5277 behaviour: the workers blocked on the owner.
-function _niItems() {
+// "99 need input" (Ethan, 2026-09-27 14:39: "this is unacceptable"): 63 of the
+// 99 were older than 14 days or belonged to workers that are not running. The
+// count and the default queue are what can move NOW; the rest stays one tap
+// away behind "Show older", never gone.
+let _niShowOlder = false;
+let _niOlderCount = 0;
+function _niItems(includeOlder) {
   const items = (_niQueue || []).map(i => Object.assign({}, i));
   const byCard = new Map(items.filter(i => i.card).map(i => [i.card, i]));
   const now = Date.now() / 1000;
@@ -5278,10 +5284,33 @@ function _niItems() {
       since: b.since || now, chips: [], standing_category: 'decision', category: 'other', blocked_worker: s.name });
     if (b.card) byCard.set(b.card, items[items.length - 1]);
   }
+  // WHAT CAN MOVE NOW COMES FIRST (Ethan, 2026-09-27: "optimized for auto
+  // pushing"; the live queue opened on a 27-day-old ask from a STOPPED lane,
+  // 1 of 99). Tier: a worker blocked right now on this card, then any running
+  // worker's ask, then a stopped worker's recent ask, then anything older than
+  // 14 days. Within a tier: money/outbound/prod first, then NEWEST first.
+  const running = new Set((typeof sessions !== 'undefined' ? sessions : []).filter(x => x.running).map(x => x.name));
+  const staleAt = t0 => (Date.now() / 1000) - (t0 > 1e12 ? t0 / 1000 : t0) > 14 * 86400;
+  const tier = i => i.blocked_worker ? 0 : staleAt(i.since || 0) ? 3 : running.has(i.worker) ? 1 : 2;
+  for (const i of items) i.stale = tier(i) === 3;
   const t = Date.now();
-  return items.filter(i => !((_niHandled.get(i.key) || 0) > t))
-    .sort((a, b) => (a.rank - b.rank) || ((a.since || 0) - (b.since || 0)) || String(a.key).localeCompare(String(b.key)));
+  const all = items.filter(i => !((_niHandled.get(i.key) || 0) > t))
+    .sort((a, b) => (tier(a) - tier(b)) || (a.rank - b.rank) || ((b.since || 0) - (a.since || 0)) || String(a.key).localeCompare(String(b.key)));
+  // THE BAR (Ethan, 2026-09-27 14:42: "the bar for needs input just needs to
+  // be much higher, the goal of amux is to make everything set and forget").
+  // Only what a worker cannot do without him: spend, outbound to outside
+  // people, production data, or a credential/access only he holds. Design
+  // questions, "should I", judgment calls: the worker decides on its own
+  // recommendation; they stay one tap away under "Show more".
+  const high = i => i.kind === 'email'
+    || ['money', 'outbound', 'prod_data'].includes(i.category)
+    || ['credential', 'access'].includes(i.ask_type);
+  const actionable = i => high(i) && (tier(i) <= 1 || (i.kind === 'email' && tier(i) !== 3));
+  const now_ = all.filter(actionable);
+  _niOlderCount = all.length - now_.length;
+  return includeOlder ? now_.concat(all.filter(i => !actionable(i))) : now_;
 }
+function _niToggleOlder() { _niShowOlder = !_niShowOlder; _niIdx = 0; _niPanel = ''; _niRender(); }
 
 async function openNeedsInput() {
   if (_niOpen) return;
@@ -5292,7 +5321,7 @@ async function openNeedsInput() {
     ov.id = 'ni-overlay';
     ov.className = 'modal-overlay active ni-overlay';
     ov.innerHTML = '<section class="modal ni-modal" role="dialog" aria-modal="true" aria-labelledby="ni-title">'
-      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span></div>'
+      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span><button type="button" id="ni-older-toggle" class="ni-older-toggle" hidden onclick="_niToggleOlder()"></button></div>'
       + '<div class="ni-nav"><button class="btn ni-prev" aria-label="Previous" onclick="_niStep(-1)">&#8249;</button>'
       + '<button class="btn ni-next" aria-label="Next" onclick="_niStep(1)">&#8250;</button>'
       + '<button class="modal-close ni-close" aria-label="Close triage" onclick="closeNeedsInput()">&times;</button></div></header>'
@@ -5347,14 +5376,14 @@ function _niKey(e) {
   f();
 }
 function _niStep(d) {
-  const n = _niItems().length;
+  const n = _niItems(_niShowOlder).length;
   if (!n) return;
   _niIdx = (_niIdx + d + n) % n;
   _niPanel = '';
   _niRender();
 }
 function _niCurrent() {
-  const items = _niItems();
+  const items = _niItems(_niShowOlder);
   if (_niIdx >= items.length) _niIdx = Math.max(0, items.length - 1);
   return { item: items[_niIdx], n: items.length };
 }
@@ -5363,6 +5392,11 @@ function _niRenderCounter() {
   if (!el) return;
   const { n } = _niCurrent();
   el.textContent = n ? (_niIdx + 1) + ' of ' + n : '';
+  const tog = document.getElementById('ni-older-toggle');
+  if (tog) {
+    tog.hidden = !_niOlderCount;
+    tog.textContent = _niShowOlder ? 'Hide the rest' : 'Show ' + _niOlderCount + ' more';
+  }
 }
 function _niCatLabel(c) {
   return { money: 'Money', outbound: 'Outbound', prod_data: 'Prod data' }[c] || '';
@@ -5377,7 +5411,8 @@ function _niRender() {
   const { item: it, n } = _niCurrent();
   _niRenderCounter();
   if (!it) {
-    body.innerHTML = '<div class="ni-empty" role="status"><div class="ni-empty-mark" aria-hidden="true">&#10003;</div><p>Nothing needs you.</p></div>';
+    body.innerHTML = '<div class="ni-empty" role="status"><div class="ni-empty-mark" aria-hidden="true">&#10003;</div><p>Nothing needs you.</p>'
+      + (_niOlderCount && !_niShowOlder ? '<button class="btn ni-wide" onclick="_niToggleOlder()">Show ' + _niOlderCount + ' more (decisions workers can make, stale, or stopped)</button>' : '') + '</div>';
     foot.innerHTML = '<button class="btn primary ni-wide" onclick="closeNeedsInput()">Close</button>';
     return;
   }

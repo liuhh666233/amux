@@ -7601,3 +7601,8 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
   .ni-secondary { flex-wrap:wrap; }
   .ni-secondary .btn { flex:1 1 calc(50% - 4px); }
 }
+
+/* "Show N older" (stale or stopped workers) beside the triage counter. */
+.ni-older-toggle { margin-left: 8px; background: none; border: 1px solid var(--border); border-radius: 999px;
+  color: var(--dim); font-size: 0.75rem; padding: 4px 10px; min-height: 32px; cursor: pointer; }
+@media (max-width: 600px) { .ni-older-toggle { min-height: 44px; } }
