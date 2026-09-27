@@ -133,6 +133,50 @@ if (_authToken) {
   };
 }
 
+// ── Client identity on every same-origin request ──
+//
+// The UA names a browser family and nothing more. On 2026-09-27 Safari showed
+// "1 pending" while Chrome on the same Mac showed Live, and telling one Safari
+// tab from another, or from the installed PWA, meant guessing from beacon
+// payloads. Every same-origin request now carries X-Amux-Client with a stable
+// per-browser id (localStorage, so each browser profile and the PWA get their
+// own), APP_VER, engine and standalone. The server keeps it in the request
+// log's `client` column and on every client-debug beacon line.
+function _amuxClientIdentity() {
+  let id = '';
+  try {
+    id = localStorage.getItem('amux_client_id') || '';
+    if (!id) {
+      id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).slice(0, 36);
+      localStorage.setItem('amux_client_id', id);
+    }
+  } catch (_) { id = id || 'no-storage'; }
+  const ua = navigator.userAgent || '';
+  const engine = /Firefox\//.test(ua) ? 'gecko'
+    : /(Chrome|Chromium|Edg)\//.test(ua) ? 'blink'
+    : /AppleWebKit/.test(ua) ? 'webkit' : 'other';
+  let standalone = 0;
+  try { standalone = (navigator.standalone || matchMedia('(display-mode: standalone)').matches) ? 1 : 0; } catch (_) {}
+  let ver = '';
+  try { ver = APP_VER; } catch (_) { /* APP_VER is declared later in this file */ }
+  return 'id=' + id + '; ver=' + ver + '; engine=' + engine + '; standalone=' + standalone;
+}
+(function installClientIdentityHeader() {
+  const _origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    try {
+      const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input || ''));
+      if (url.startsWith('/') || url.startsWith(location.origin)) {
+        init = {...(init || {})};
+        const h = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+        if (!h.has('X-Amux-Client')) h.set('X-Amux-Client', _amuxClientIdentity());
+        init.headers = h;
+      }
+    } catch (_) { /* identity must never block a request */ }
+    return _origFetch.call(this, input, init);
+  };
+})();
+
 // ── A 200 is not proof the edit was applied (AMUX-2673, after AC-323) ──
 //
 // The API names unapplied request fields in `ignored_fields` (AC-263). Nothing
@@ -3495,6 +3539,18 @@ async function _runSyncBanner(quiet = false) {
       await _mutateQueue(current => { const at = current.findIndex(entry => entry.id === q.id); if (at >= 0) current.splice(at, 1); });
       item.status = 'done';
     } catch(e) {
+      if (e.outboxExpired) {
+        await _mutateQueue(current => { const at = current.findIndex(entry => entry.id === q.id); if (at >= 0) current.splice(at, 1); });
+        const worker = decodeURIComponent((q.url.match(/\/api\/sessions\/([^/]+)\//) || [])[1] || 'a worker');
+        const when = q.timestamp ? new Date(q.timestamp).toLocaleString() : 'earlier';
+        _interactionSet(interaction.id, {phase:'unknown', measured:false,
+          why_unmeasured:'Server expired the reservation without evidence of delivery', feedback:{message:e.message}});
+        try { showToast('A message to ' + worker + ' from ' + when + ' was never confirmed and was not re-sent'); } catch (_) {}
+        item.status = 'skipped';
+        item.label += ' — ' + e.message;
+        skipped++;
+        return;
+      }
       if (e.outboxUncertain || _outboxUncertainMessage(q)) {
         q.delivery_uncertain = true;
         // A receipt read is safe after reload, even for a legacy blocked entry.
@@ -3682,6 +3738,16 @@ async function _outboxConfirmMessage(q, opts) {
     Object.assign(q, {delivery_uncertain:false, state:'pending', error:'', checking_since:0});
     _outboxDiagnostic('acceptance_released', {id:q.id, measured:true, n_considered:1});
     return _boundedMutationFetch(q.url, opts);
+  }
+  // The server gave up: no evidence can ever settle this reservation (older than
+  // any transcript tail, or reserved before text hashes existed). Stop
+  // rechecking and drop the entry; the identity stays reserved server-side, so
+  // nothing is ever resent. Before this a 13-day-old entry kept one browser on
+  // "1 pending" while every other browser read Live.
+  if (receipt?.expired === true && receipt.msg_id === msgId) {
+    _outboxDiagnostic('acceptance_expired', {id:q.id, measured:true, n_considered:1,
+      age_ms: Date.now() - (q.timestamp || Date.now())});
+    throw Object.assign(new Error('Delivery was never confirmed; not re-sent'), {outboxExpired:true});
   }
   // A missing transcript can become available after a worker/server restart.
   // Keep receipt reconciliation alive at the normal capped backoff. Neither an

@@ -8545,6 +8545,21 @@ async fn send_dedup_note_text(state: &AppState, name: &str, msg_id: &str, text: 
 /// deliver twice.
 const STRANDED_TEXT_MAX: usize = 800;
 
+/// Age after which a reservation no evidence can settle stops being "pending".
+/// A lane transcript tail cannot reach back this far, and a reservation from
+/// before `text_sha` existed can never be judged, so without an end the sender's
+/// outbox rechecked it forever: Safari showed "1 pending" for 13 days over a
+/// 2026-09-14 "continue" that Chrome never held (323 rechecks, all unknown).
+/// Expired is terminal and says delivery is unknown; it never authorizes a
+/// resend. `AMUX_SEND_RESERVATION_EXPIRE_S` overrides the default of one day.
+fn stranded_expire_secs() -> i64 {
+    std::env::var("AMUX_SEND_RESERVATION_EXPIRE_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 120)
+        .unwrap_or(86_400)
+}
+
 /// Whether a Claude transcript holds a user prompt that is exactly `text` (or
 /// `text` after an amux origin stamp), dated at or after `since` (unix seconds,
 /// the requested clock skew). `None` when the answer cannot be trusted: the file is
@@ -8757,6 +8772,17 @@ async fn send_receipt_resolving(
             }))
         }
         _ if !aged => base,
+        _ if now_i64().saturating_sub(ts) > stranded_expire_secs() => {
+            tracing::warn!(
+                target: "amux::message_acceptance", session = name, verdict = "stranded_reservation_expired",
+                measured = false, n_considered = 1, judgeable, age_s = now_i64().saturating_sub(ts),
+                "a stranded reservation outlived every source of evidence; answered expired so the sender stops rechecking (never resent)"
+            );
+            stranded_answer(json!({
+                "ok": true, "accepted": false, "expired": true, "delivered": "unknown", "msg_id": msg_id,
+                "next": "stop rechecking; delivery was never confirmed and this identity must not be resent",
+            }))
+        }
         _ => {
             tracing::warn!(
                 target: "amux::message_acceptance", session = name, verdict = "stranded_reservation_unknown",
@@ -38953,6 +38979,31 @@ Enter to select \u{00b7} \u{2191}/\u{2193} to navigate \u{00b7} Esc to cancel\n\
         );
         let (_, v) = read(send_receipt_resolving(&state, name, "unchecked-id", "").await).await;
         assert_eq!(v["delivered"], "unknown", "no text, no verdict: {v}");
+        assert!(v.get("expired").is_none(), "an hour is not expired: {v}");
+        // A reservation older than any evidence ends: expired, never released.
+        assert!(send_dedup_gate(&state, name, "ancient-id").await.is_none());
+        let ancient = now_i64() - 2 * 86_400;
+        state
+            .store
+            .write_async(move |conn| {
+                conn.execute("UPDATE send_dedup SET ts=?1 WHERE msg_id='ancient-id'", [ancient])?;
+                Ok(crate::db::WriteOutcome {
+                    applied: true,
+                    events: vec![],
+                })
+            })
+            .await
+            .unwrap();
+        let (_, v) = read(send_receipt_resolving(&state, name, "ancient-id", "").await).await;
+        assert_eq!(
+            (v["expired"].clone(), v["delivered"].clone(), v.get("released").is_none()),
+            (json!(true), json!("unknown"), true),
+            "{v}"
+        );
+        assert!(
+            send_dedup_gate(&state, name, "ancient-id").await.is_some(),
+            "expired must keep the identity reserved so it is never resent"
+        );
         let (_, v) =
             read(send_receipt_resolving(&state, name, "hashed-id", "[03:17 PM] never typed").await)
                 .await;

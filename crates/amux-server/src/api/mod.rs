@@ -933,14 +933,22 @@ async fn client_debug_post(
     // The WHOLE body, at INFO. The payload is the entire point of the beacon;
     // logging just `kind` is how 299 of these arrived carrying real device
     // geometry and told us nothing.
-    tracing::info!(kind = %kind, ua = %ua, payload = %body, "client-debug beacon");
+    // Which browser INSTANCE, not just which family: the dashboard's stable
+    // per-browser id, APP_VER, engine and PWA-standalone (see request_log's
+    // `client` column). Empty when a caller predates the header.
+    let client = headers
+        .get("x-amux-client")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.chars().take(160).collect::<String>())
+        .unwrap_or_default();
+    tracing::info!(kind = %kind, ua = %ua, client = %client, payload = %body, "client-debug beacon");
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if let Ok(mut ring) = CLIENT_DEBUG_RING.lock() {
-        ring.push(serde_json::json!({ "ts": ts, "kind": kind, "ua": ua, "body": body }));
+        ring.push(serde_json::json!({ "ts": ts, "kind": kind, "ua": ua, "client": client, "body": body }));
         let n = ring.len();
         if n > CLIENT_DEBUG_RING_MAX {
             ring.drain(0..n - CLIENT_DEBUG_RING_MAX);
