@@ -7671,3 +7671,10 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
 .ni-auto-item .ni-auto-out.approved { color: var(--green, #2ea043); }
 .ni-auto-item .ni-auto-out.refused { color: #f85149; }
 .ni-auto-h { font-weight: 600; font-size: 0.8rem; margin: 6px 0 0; color: var(--text); }
+
+/* Video inside the file viewer: the header (name + folder path) stays above it. */
+.file-overlay-body.file-video { display: flex; align-items: center; justify-content: center; padding: 12px; }
+.file-video-wrap { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 1100px; }
+.file-video { width: 100%; max-height: calc(100dvh - 220px); background: #000; border-radius: 8px; }
+.file-video-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--dim); font-size: 0.8rem; }
+.file-video-meta .btn { min-height: 44px; }

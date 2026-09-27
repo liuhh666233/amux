@@ -13257,7 +13257,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1157';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1158';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -23002,11 +23002,31 @@ function _renderFileBody(data, mode) {
     return;
   }
   if (data.is_video) {
-    // Close the file overlay and open in the full custom video player (with resume)
-    closeFilePreview();
+    // PLAY IT IN THE FILE VIEWER (Ethan, 2026-09-27: "make sure the links like
+    // videos when opened open a file viewer with the video player so i can see
+    // where it sits in the filesystem"). This used to close the viewer and hand
+    // off to the full-screen player, which drops the header: no file name, no
+    // clickable folder path. The header now stays, the video plays inline with
+    // the same saved position, and the full-screen player is one tap away.
     const rawUrl = API + '/api/file/raw?path=' + encodeURIComponent(data.path);
     const fname = data.path.split('/').pop();
-    _playVideoUrl(rawUrl, fname);
+    body.className = 'file-overlay-body file-video';
+    const size = data.size ? _fmtBytes(data.size) : '';
+    body.innerHTML = '<div class="file-video-wrap">'
+      + '<video class="file-video" controls playsinline preload="metadata">'
+      + '<source src="' + esc(rawUrl) + '" type="' + esc(_vpMimeFromUrl(rawUrl)) + '"></video>'
+      + '<div class="file-video-meta"><span>' + esc(size) + '</span>'
+      + '<button class="btn" onclick="_fileVideoFullscreen()">Full-screen player</button></div></div>';
+    const v = body.querySelector('video');
+    v._vpUrl = rawUrl;
+    const saved = parseFloat(localStorage.getItem(_vpPosKey(rawUrl)));
+    if (saved > 0) v.addEventListener('loadedmetadata', () => { v.currentTime = saved; }, { once: true });
+    v.onpause = () => _vpSavePos(v);
+    v.onseeked = () => _vpSavePos(v);
+    v.onerror = () => {
+      const meta = body.querySelector('.file-video-meta span');
+      if (meta) meta.textContent = 'This browser cannot play this video; use Download.';
+    };
     return;
   }
   if (data.is_audio) {
@@ -23520,6 +23540,16 @@ async function openFilePreview(path, options = {}) {
     }
     document.getElementById('file-body').textContent = 'Failed to load file.';
   }
+}
+
+// The inline video's "Full-screen player" button: the custom player, from
+// the same position, with the viewer left open underneath.
+function _fileVideoFullscreen() {
+  const v = document.querySelector('#file-body video.file-video');
+  if (!v) return;
+  _vpSavePos(v);
+  v.pause();
+  _playVideoUrl(v._vpUrl, (_fileData && _fileData.path || '').split('/').pop());
 }
 
 function closeFilePreview() {
