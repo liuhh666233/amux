@@ -138,6 +138,33 @@ TARGET_SCAN_S=${AMUX_CLEANUP_TARGET_SCAN_S:-90}
 TARGET_WALK_S=${AMUX_CLEANUP_TARGET_WALK_S:-60}
 TARGET_BUDGET_S=${AMUX_CLEANUP_TARGET_BUDGET_S:-200}
 LSOF_CMD=${AMUX_CLEANUP_LSOF_CMD:-lsof -nP}
+# Idle detached-worktree scratch checkouts (MO-3631/MO-3633, recurred 3 times in
+# one day at up to 24GB per incident: gs-10-zero-base-cicd alone, an isolated
+# worker that cannot be messaged, created a fresh ~4GB detached mixpeek checkout
+# under the shared per-user temp dir every 10-90 minutes and never removed the
+# previous one). The cargo-target arm above is structurally blind to this class:
+# it prunes `.git` on purpose, since a target dir's OWN safety never depended on
+# git history. A worktree's does, so this arm is deliberately narrower and does
+# NOT reuse TARGET_ROOTS: it never scans /private/tmp/claude-* (live session
+# scratchpads, DESKT-58 -- MO-3627 already cost a real mistake sweeping one) or
+# ~/Dev or Documents/Codex (a real clone or a Codex checkout can legitimately
+# hold a worktree that IS the point of the directory, not scratch beside it).
+# Roots are exactly the shared, generic scratch locations observed to actually
+# accumulate this: the per-user temp dir, and the two committed worktree stores.
+WORKTREE_ROOTS=${AMUX_CLEANUP_WORKTREE_ROOTS:-${USER_TMP%/}@2:$HOME/Dev/amux-worktrees@1:$HOME/.amux/worktrees@1:$HOME/.ao/data/worktrees@1}
+# Short idle floor on purpose: the tick runs every 30 minutes and this class
+# accumulates on a 10-90 minute cadence, so a 24h floor (right for a cargo
+# target, rebuilt in minutes) would let dozens pile up before the first one
+# qualifies. 2h is long enough that the generator's OWN current round is
+# essentially never mistaken for a superseded one (MO-3631/3633 measured
+# 10-90 min between rounds by hand). A whole number on purpose: dir_idle's
+# hours*60 is integer bash arithmetic, and a fractional hour there is a
+# syntax error, not a rounding one.
+WORKTREE_IDLE_H=${AMUX_CLEANUP_WORKTREE_IDLE_H:-2}
+WORKTREE_SCAN_S=${AMUX_CLEANUP_WORKTREE_SCAN_S:-60}
+WORKTREE_WALK_S=${AMUX_CLEANUP_WORKTREE_WALK_S:-30}
+WORKTREE_BUDGET_S=${AMUX_CLEANUP_WORKTREE_BUDGET_S:-120}
+WORKTREE_DEPTH=${AMUX_CLEANUP_WORKTREE_DEPTH:-2}
 # Assessment (DESKT-57). A disk is constrained under DISK_FLOOR_GB, or when the
 # burn since the previous tick would fill it within HOURS_TO_FULL. Memory is
 # constrained when the kernel still reports pressure after the purge arm ran,
@@ -527,6 +554,138 @@ reap_idle_cargo_targets() { # <roots> <idle_hours> <dry:0|1>
   rm -f -- "${cands:?}" "${eligible:?}" "${lsofsnap:?}"
 }
 
+# Find candidate detached worktree scratch checkouts (MO-3631/3633): a directory
+# whose top level IS `.git`-as-a-FILE (not a directory). `git worktree add`
+# writes a one-line `gitdir: <path>` file there; a real clone's `.git` is a
+# directory. That distinction is the whole safety boundary: this function can
+# never select a real repository, only something `git worktree` itself created,
+# because nothing else on this box writes a `.git` file at a directory's root.
+find_detached_worktrees() { # <colon-roots> <maxdepth> <budget_s>
+  local roots=$1 depth=$2 budget=$3 deadline left rc tag d r rdepth
+  local -a rootarr
+  WORKTREE_SCAN_COMPLETE=yes
+  WORKTREE_ROOTS_SCANNED=0
+  deadline=$(( $(date +%s) + budget ))
+  IFS=':' read -r -a rootarr <<< "$roots"
+  for r in ${rootarr[@]+"${rootarr[@]}"}; do
+    rdepth=$depth
+    case "$r" in *@[0-9]*) rdepth=${r##*@}; r=${r%@*} ;; esac
+    [ -n "$r" ] && [ -d "$r" ] || continue
+    # Never a claude-<uid> session scratchpad, however a caller's root list is
+    # built or wherever TMPDIR actually resolves to: those are live Claude
+    # session directories (DESKT-58) and no config knob may widen this arm onto
+    # them. Matched as a path COMPONENT, not a literal /private/tmp/ prefix, so
+    # a symlinked or remapped temp dir cannot slip past a prefix check that
+    # assumed one specific mount.
+    case "/$r/" in */claude-[0-9]*/*) continue ;; esac
+    left=$(( deadline - $(date +%s) ))
+    if [ "$left" -le 0 ]; then WORKTREE_SCAN_COMPLETE=no; continue; fi
+    WORKTREE_ROOTS_SCANNED=$((WORKTREE_ROOTS_SCANNED+1))
+    rc=0
+    { perl -e 'alarm shift; exec @ARGV' "$left" find "$r" -maxdepth "$rdepth" \
+      -name .git -type f -print 2>/dev/null; } 2>/dev/null | while IFS= read -r tag; do
+        dirname "$tag"
+      done || rc=$?
+    if [ "$rc" = 142 ]; then WORKTREE_SCAN_COMPLETE=no; fi
+  done
+}
+
+# Reap idle detached worktree scratch checkouts. Sets WORKTREES_FOUND / _ELIGIBLE
+# / _REAPED. Fails closed the same way reap_idle_cargo_targets does: lsof
+# unavailable, a merge-base check that cannot run, or a dirty tree each KEEP the
+# worktree, because "could not tell" must never look like "nothing to reap".
+#
+# Safety, in the order actually checked (any failure keeps it):
+#  1. still a worktree git recognizes (`git worktree list` on its own admin
+#     file), so a half-removed one from a race is left for its own owner.
+#  2. fully clean (`git status --porcelain --untracked-files=all` empty) --
+#     no partial-credit for "only trivial-looking diffs": that judgment call is
+#     exactly what a human did by hand three times today, and it does not
+#     belong in unattended code. A worktree with ANY uncommitted content is
+#     kept, full stop.
+#  3. HEAD reachable from some remote-tracking ref of the SAME repo it belongs
+#     to (`git for-each-ref refs/remotes --contains`) -- not just origin/main,
+#     because a worktree can point at a fork remote or a differently-named
+#     default branch. No unique commit is ever at risk: removing a worktree
+#     never deletes the branch or the commit, only the checked-out copy, but
+#     this still refuses to guess about a commit that exists NOWHERE else.
+#  4. idle >= WORKTREE_IDLE_H (dir_idle, the same helper and the same
+#     "unknown means keep" contract the cargo-target arm already relies on).
+#  5. no open file handle (same lsof snapshot convention).
+# Removal is `git worktree remove`, never `rm -rf`: git itself re-checks
+# cleanliness at removal time and refuses on anything this scan raced past.
+reap_idle_worktrees() { # <roots> <idle_hours> <dry:0|1>
+  local roots=$1 idle_h=$2 dry=${3:-0}
+  local cands eligible lsofsnap t0 d rc n_notreal=0 n_dirty=0 n_unmerged=0 n_active=0 n_open=0 n_unk=0 n_over=0 n_fail=0 handles=measured
+  local gitdir toplevel head remote_hit real_d wt_line wt_path real_wt found_self
+  WORKTREES_FOUND=0; WORKTREES_ELIGIBLE=0; WORKTREES_REAPED=0
+  t0=$(date +%s)
+  cands=$(mktemp "${TMPDIR:-/tmp}/wt-cands.XXXXXX"); eligible=$(mktemp "${TMPDIR:-/tmp}/wt-elig.XXXXXX"); lsofsnap=$(mktemp "${TMPDIR:-/tmp}/wt-lsof.XXXXXX")
+  find_detached_worktrees "$roots" "$WORKTREE_DEPTH" "$WORKTREE_SCAN_S" > "$cands"
+  sort -u "$cands" -o "$cands"
+  WORKTREES_FOUND=$(grep -c . "$cands" || true)
+  if $LSOF_CMD > "$lsofsnap" 2>/dev/null && [ -s "$lsofsnap" ]; then :; else handles=UNMEASURED; fi
+  if [ "$handles" = UNMEASURED ]; then
+    echo "mac-cleanup: scratch worktrees: found ${WORKTREES_FOUND} under ${WORKTREE_ROOTS_SCANNED} root(s), scan complete=${WORKTREE_SCAN_COMPLETE}, open handles UNMEASURED (lsof produced nothing): reaped 0, nothing is deleted without it"
+    rm -f -- "${cands:?}" "${eligible:?}" "${lsofsnap:?}"; return 0
+  fi
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    if [ $(( $(date +%s) - t0 )) -ge "$WORKTREE_BUDGET_S" ]; then n_over=$((n_over+1)); continue; fi
+    gitdir=$(sed -n 's/^gitdir: //p' "$d/.git" 2>/dev/null)
+    [ -n "$gitdir" ] && [ -d "$gitdir" ] || { n_notreal=$((n_notreal+1)); continue; }
+    # The worktree's own admin dir names the real repo toplevel two levels up
+    # (.../.git/worktrees/<name>). Resolving it there, not by trusting $d, means
+    # a worktree pointed at by a stale or hand-edited .git file cannot walk this
+    # into removing something it does not actually belong to.
+    toplevel=$(git -C "$gitdir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    [ -n "$toplevel" ] || { n_notreal=$((n_notreal+1)); continue; }
+    toplevel=$(dirname "$toplevel")
+    # NOT a literal string match against `git worktree list`'s own path: macOS
+    # resolves /tmp to /private/tmp (and /var/folders/... has similar aliasing),
+    # so `find`'s root-as-given and git's OWN recorded, already-resolved path
+    # can name the identical directory in two different spellings. Canonicalize
+    # both sides with `cd && pwd -P` before comparing, or a perfectly valid
+    # worktree is kept forever as "not-a-real-worktree" on every single tick.
+    real_d=$(cd "$d" 2>/dev/null && pwd -P) || { n_notreal=$((n_notreal+1)); continue; }
+    found_self=no
+    while IFS= read -r wt_line; do
+      case "$wt_line" in worktree\ *) wt_path=${wt_line#worktree } ;; *) continue ;; esac
+      real_wt=$(cd "$wt_path" 2>/dev/null && pwd -P) || continue
+      if [ "$real_wt" = "$real_d" ]; then found_self=yes; break; fi
+    done < <(git -C "$toplevel" worktree list --porcelain 2>/dev/null)
+    [ "$found_self" = yes ] || { n_notreal=$((n_notreal+1)); continue; }
+    if [ -n "$(git -C "$d" status --porcelain --untracked-files=all 2>/dev/null)" ]; then n_dirty=$((n_dirty+1)); continue; fi
+    head=$(git -C "$d" rev-parse HEAD 2>/dev/null)
+    [ -n "$head" ] || { n_dirty=$((n_dirty+1)); continue; }
+    remote_hit=$(git -C "$toplevel" for-each-ref refs/remotes --contains "$head" 2>/dev/null)
+    [ -n "$remote_hit" ] || { n_unmerged=$((n_unmerged+1)); continue; }
+    rc=0; dir_idle "$d" "$idle_h" "$WORKTREE_WALK_S" || rc=$?
+    if [ "$rc" = 1 ]; then n_active=$((n_active+1)); continue; fi
+    if [ "$rc" = 2 ]; then n_unk=$((n_unk+1)); continue; fi
+    if has_open_handle "$d" "$lsofsnap"; then n_open=$((n_open+1)); continue; fi
+    printf '%s\t%s\n' "$toplevel" "$d" >> "$eligible"
+    WORKTREES_ELIGIBLE=$((WORKTREES_ELIGIBLE+1))
+  done < "$cands"
+  while IFS=$'\t' read -r toplevel d; do
+    if [ $(( $(date +%s) - t0 )) -ge "$WORKTREE_BUDGET_S" ]; then n_over=$((n_over+1)); continue; fi
+    if [ "$dry" = 1 ]; then
+      echo "mac-cleanup:   would reap worktree $d (idle >= ${idle_h}h, merged, clean, dry run)"
+      continue
+    fi
+    $LSOF_CMD > "$lsofsnap" 2>/dev/null || true
+    if [ ! -s "$lsofsnap" ] || has_open_handle "$d" "$lsofsnap"; then n_open=$((n_open+1)); continue; fi
+    if git -C "$toplevel" worktree remove "$d" >/dev/null 2>&1; then
+      WORKTREES_REAPED=$((WORKTREES_REAPED+1))
+      echo "mac-cleanup:   reaped worktree $d (idle >= ${idle_h}h, merged, clean)"
+    else
+      n_fail=$((n_fail+1)); echo "mac-cleanup:   FAILED to remove worktree $d (git worktree remove refused -- left in place)"
+    fi
+  done < "$eligible"
+  echo "mac-cleanup: scratch worktrees: found ${WORKTREES_FOUND} under ${WORKTREE_ROOTS_SCANNED} root(s), scan complete=${WORKTREE_SCAN_COMPLETE}, eligible ${WORKTREES_ELIGIBLE}, reaped ${WORKTREES_REAPED}, kept: not-a-real-worktree ${n_notreal}, dirty ${n_dirty}, unmerged ${n_unmerged}, active ${n_active}, open ${n_open}, unmeasured ${n_unk}, over budget ${n_over}, failed ${n_fail}"
+  rm -f -- "${cands:?}" "${eligible:?}" "${lsofsnap:?}"
+}
+
 # ── assessment (DESKT-57) ────────────────────────────────────────────────────
 # Burn rate and hours to full from two readings. Prints "<burn_gbh> <hours|->".
 # A disk that is not losing space (or lost less than BURN_MIN_GBH) has no ETA,
@@ -849,6 +1008,7 @@ EOF
 # Before the snapshot arm on purpose: freed blocks stay pinned by a local snapshot
 # until it is thinned, so the reap comes first and the thin below sees the result.
 reap_idle_cargo_targets "$TARGET_ROOTS" "$TARGET_IDLE_H" "$DRY"
+reap_idle_worktrees "$WORKTREE_ROOTS" "$WORKTREE_IDLE_H" "$DRY"
 
 # ── act: thin APFS local snapshots when the disk is tight ────────────────────
 disk_free_gb=$(df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2{ printf "%.1f", $4/1048576 }')

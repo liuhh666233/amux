@@ -370,6 +370,10 @@ jobs:
         run: |
           set -uo pipefail
           ./scripts/test-mac-cleanup-targets.sh
+      - name: the idle worktree reaper only takes a merged, clean, unheld detached checkout (MO-3631/3633)
+        run: |
+          set -uo pipefail
+          ./scripts/test-mac-cleanup-worktrees.sh
       - name: the assess stage names what is still constrained and escalates it once per cooldown (DESKT-57)
         run: |
           set -uo pipefail
