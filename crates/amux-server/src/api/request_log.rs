@@ -49,6 +49,7 @@ use std::path::Path;
 /// Caps, all applied BEFORE a row enters the channel. Everything stored is
 /// bounded; nothing about a request can make its row large.
 const USER_AGENT_CHARS: usize = 300;
+const CLIENT_CHARS: usize = 160;
 const QUERY_CHARS: usize = 500;
 const CONTENT_TYPE_CHARS: usize = 120;
 // AMUX-3132: 500 cut the gate-not-acknowledged 409 body mid-object. That body
@@ -94,6 +95,11 @@ pub struct LogRow {
     pub answered_by: String,
     pub error_body: Option<String>,
     pub req_meta: Option<String>,
+    /// The dashboard's `X-Amux-Client` header: stable per-browser id, APP_VER,
+    /// engine and PWA-standalone. The UA alone cannot tell two Safari tabs on
+    /// one Mac from Safari and the installed PWA, which is the question when
+    /// one browser shows "1 pending" and another shows Live. None = not sent.
+    pub client: Option<String>,
 }
 
 /// Resolve the CALLER of a request, in the same order every handler uses.
@@ -191,8 +197,8 @@ impl RequestLogger {
                                 "INSERT INTO _amux_request_log \
                                  (ts, method, path, family, status, latency_ms, client_ip, \
                                   user_agent, amux_session, worker, req_bytes, resp_bytes, \
-                                  answered_by, error_body, req_meta, boot_at, load1) \
-                                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                                  answered_by, error_body, req_meta, boot_at, load1, client) \
+                                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                             )?;
                             for r in &batch {
                                 stmt.execute(rusqlite::params![
@@ -223,6 +229,7 @@ impl RequestLogger {
                                     // worth apologising for: a batch forms in
                                     // milliseconds and load1 averages a minute.
                                     load1,
+                                    r.client,
 ])?;
                             }
                         }
@@ -357,7 +364,7 @@ pub async fn middleware(State(logger): State<RequestLogger>, req: Request, next:
     // Scoped block: a closure borrowing `req` may not outlive the borrow
     // into `next.run(req)` — and `&Request` is !Send (Body is !Sync), so the
     // closure must also drop before the await or the whole future loses Send.
-    let (user_agent, amux_session, content_type) = {
+    let (user_agent, amux_session, content_type, client) = {
         let hdr = |name: &str| {
             req.headers()
                 .get(name)
@@ -394,6 +401,7 @@ pub async fn middleware(State(logger): State<RequestLogger>, req: Request, next:
             truncate_chars(&hdr("user-agent"), USER_AGENT_CHARS),
             caller,
             truncate_chars(&hdr("content-type"), CONTENT_TYPE_CHARS),
+            Some(truncate_chars(&hdr("x-amux-client"), CLIENT_CHARS)).filter(|c| !c.is_empty()),
         )
     };
     // Content-Length ONLY — the logger never reads a request body (a
@@ -527,6 +535,7 @@ pub async fn middleware(State(logger): State<RequestLogger>, req: Request, next:
         answered_by,
         error_body,
         req_meta,
+        client,
     });
     res
 }
@@ -972,7 +981,7 @@ async fn get_logs(
     };
     let sql = format!(
         "SELECT ts, method, path, family, status, latency_ms, client_ip, user_agent, \
-                amux_session, worker, req_bytes, resp_bytes, answered_by, error_body, req_meta \
+                amux_session, worker, req_bytes, resp_bytes, answered_by, error_body, req_meta, client \
          FROM _amux_request_log{where_sql} ORDER BY ts DESC LIMIT {limit}"
     );
     let events: Vec<Value> = match (|| -> rusqlite::Result<Vec<Value>> {
@@ -1066,6 +1075,7 @@ fn row_to_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let answered_by: String = r.get(12)?;
     let error_body: Option<String> = r.get(13)?;
     let req_meta: Option<String> = r.get(14)?;
+    let client: Option<String> = r.get(15)?;
     let session = worker
         .clone()
         .or_else(|| amux_session.clone())
@@ -1110,6 +1120,7 @@ fn row_to_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "req_bytes": req_bytes,
         "resp_bytes": resp_bytes,
         "user_agent": user_agent,
+        "client": client,
         "source": "request_log",
     }))
 }

@@ -1,0 +1,9 @@
+-- Which browser made this request. The user_agent column names a browser
+-- family, and on 2026-09-27 that was not enough: Safari showed "1 pending"
+-- while Chrome on the same Mac showed Live, and deciding whether Safari was one
+-- tab, several tabs or the installed PWA meant correlating beacon payloads by
+-- hand. The dashboard now sends `X-Amux-Client: id=<stable per-browser id>;
+-- ver=<APP_VER>; engine=<webkit|blink|gecko>; standalone=<0|1>` and the request
+-- log keeps it verbatim (capped). NULL means the caller did not send it (a CLI,
+-- a hook, or a dashboard older than 0.9.1146), never "same client as before".
+-- ADDCOL: _amux_request_log client TEXT

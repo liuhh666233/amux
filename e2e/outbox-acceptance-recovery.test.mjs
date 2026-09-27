@@ -105,6 +105,14 @@ test('a released reservation is sent once with the same identity (AMUX-4594)',as
  assert.equal(JSON.parse(h.requests[1].opts.body).msg_id,'same-identity');
  assert(h.signals.some(s=>s.kind==='acceptance_released'&&s.measured===true));
 });
+test('an expired reservation drains the entry without ever resending it',async()=>{
+ const h=harness([pending({delivery_uncertain:true,timestamp:Date.now()-13*86400000})],[{status:200,body:{accepted:false,expired:true,delivered:'unknown',msg_id:'same-identity'}}]);
+ await h.drain();
+ assert.equal(h.queue.length,0,'the stuck entry must leave the outbox so the pill clears');
+ assert.deepEqual(h.requests.map(r=>r.opts.method),['GET'],'expired never authorizes a POST');
+ assert(h.signals.some(s=>s.kind==='acceptance_expired'&&s.measured===true));
+ assert(h.patches.some(p=>p.phase==='unknown'&&p.measured===false));
+});
 test('an unavailable transcript remains recoverable without a second paste',async()=>{
  const h=harness([pending({state:'blocked',error:'409: previous message acceptance is uncertain'})],[{status:200,body:{accepted:false,stranded:true,delivered:'unknown',msg_id:'same-identity'}},accepted]);
  await h.drain();
