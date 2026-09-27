@@ -476,7 +476,9 @@ class BuildRetryTests(unittest.TestCase):
             self.assertEqual(trace.read_text().count('attempt'), 2)
             # Changed actual build inputs retry immediately, then reset failure.
             source.write_text('fixed')
-            stub.write_text('#!/bin/sh\necho attempt >> "$ATTEMPTS"\nmkdir -p "$CARGO_TARGET_DIR/release"\nprintf "#!/bin/sh\\nexit 0\\n" > "$CARGO_TARGET_DIR/release/amux-server"\nchmod +x "$CARGO_TARGET_DIR/release/amux-server"\n')
+            # Output dir the way cargo picks it: --profile NAME, else --release
+            # (the builder moved to --profile deploy in 217d7243).
+            stub.write_text('#!/bin/sh\necho attempt >> "$ATTEMPTS"\nout=release; prev=\nfor a in "$@"; do [ "$prev" = --profile ] && out="$a"; prev="$a"; done\nmkdir -p "$CARGO_TARGET_DIR/$out"\nprintf "#!/bin/sh\\nexit 0\\n" > "$CARGO_TARGET_DIR/$out/amux-server"\nchmod +x "$CARGO_TARGET_DIR/$out/amux-server"\n')
             commit()
             run()
             self.assertEqual(trace.read_text().count('attempt'), 3)
