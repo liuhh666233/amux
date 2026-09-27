@@ -12861,7 +12861,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1149';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1150';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -12994,19 +12994,15 @@ async function _offlineCapSet(n) {
 async function _offlineTrimToCap() {
   await _peekIndexLoad();
   const names = Object.keys(_peekIndex).sort((a, b) => (_peekIndex[b].time||0) - (_peekIndex[a].time||0));
-  for (const n of names.slice(_offlineCap)) {
-    try { _idb.del('peek_' + n); } catch(e) {}
-    try { _idb.del('chat_' + n); } catch(e) {}
-    try { _idb.del('file_' + n); } catch(e) {}
-    delete _peekIndex[n];
-  }
+  for (const n of names.slice(_offlineCap)) _offlineDropWorker(n);
   _peekIndexSave();
 }
 let _peekIndex = {};                 // name -> {etag, time, bytes}
-let _prefetchRunning = false, _prefetchAbort = false;
+let _prefetchRunning = false, _prefetchAbort = false, _peekIndexLoaded = false;
 
 async function _peekIndexLoad() {
   try { _peekIndex = (await _idb.get('peek_index')) || {}; } catch(e) { _peekIndex = {}; }
+  _peekIndexLoaded = true;
   return _peekIndex;
 }
 function _peekIndexSave() { try { _idb.set('peek_index', _peekIndex); } catch(e) {} }
@@ -13019,12 +13015,76 @@ function _linkIsCheap() {
   return !/(^|-)(2g|slow-2g|3g)$/.test(c.effectiveType || '');
 }
 
+// OFFLINE ADAPTERS: one entry per worker renderer (2026-09-27). Each says
+// where that type's offline copy lives and how to refresh it. Prefetch,
+// eviction and the cap loop over this table, so a new worker type gets
+// offline support by adding an entry, and cannot leak storage by being left
+// out of a hand-written list of key prefixes (there were three such lists).
+// The open-time paint stays with each renderer, which reads its own key.
+//
+// sync(name, prev) fetches and saves one worker and returns
+// {unchanged:true} or {bytes}. Both write the shared _peekIndex entry that
+// the cap and eviction count.
+const _PEEK_CACHE_KEY = name => 'peek_' + name;
+const _CHAT_CACHE_KEY = name => 'chat_' + name;
+const _OFFLINE_ADAPTERS = {
+  terminal: {
+    key: _PEEK_CACHE_KEY,
+    async sync(name, prev) {
+      const h = _authHeaders();
+      if (prev && prev.etag) h['If-None-Match'] = prev.etag;
+      const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name)
+                            + '/peek?lines=' + _PEEK_CACHE_LINES, { headers: h });
+      if (r.status === 304) { _peekIndex[name] = { ...prev, time: Date.now() }; return { unchanged: true }; }
+      if (!r.ok) return null;
+      const d = await r.json();
+      const out = d.output || '';
+      // "What's scrollable, not the full log": `output` alone is just the
+      // current frame (~1KB) — useless for review. The scrollback lives in
+      // `history` (~119KB/session), which IS the full log. So keep the TAIL:
+      // the most recent _PEEK_CACHE_TAIL chars, trimmed at a line boundary
+      // so the top isn't a half-line. The server already sent the whole
+      // thing, so trimming costs nothing in transfer and bounds storage.
+      let hist = d.history || '';
+      if (hist.length > _PEEK_CACHE_TAIL) {
+        hist = hist.slice(-_PEEK_CACHE_TAIL);
+        const nl = hist.indexOf('\n');
+        if (nl > 0 && nl < 2000) hist = hist.slice(nl + 1);
+      }
+      await _idb.set(_PEEK_CACHE_KEY(name), { output: out, history: hist, time: Date.now(), offline: true });
+      const sz = out.length + hist.length;
+      _peekIndex[name] = { etag: r.headers.get('ETag') || '', time: Date.now(), bytes: sz };
+      return { bytes: sz };
+    },
+  },
+  chat: {
+    key: _CHAT_CACHE_KEY,
+    async sync(name, prev) {
+      const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/chat?limit=' + _CHAT_CACHE_MSGS, { headers: _authHeaders() });
+      if (!r.ok) return null;
+      const d = await r.json();
+      const before = prev && prev.bytes;
+      await _chatCacheSave(name, d.messages || []);
+      const now = _peekIndex[name] && _peekIndex[name].bytes;
+      return now === before ? { unchanged: true } : { bytes: now || 0 };
+    },
+  },
+};
+// Keys written by removed code that eviction should still clear.
+const _OFFLINE_LEGACY_KEYS = [name => 'file_' + name];
+// Forget one worker's offline copy of every type. The caller saves the index.
+function _offlineDropWorker(name) {
+  for (const key of [...Object.values(_OFFLINE_ADAPTERS).map(a => a.key), ..._OFFLINE_LEGACY_KEYS]) {
+    try { _idb.del(key(name)); } catch(e) {}
+  }
+  delete _peekIndex[name];
+}
+
 // Priority: what you'd actually want offline, in order — sessions doing work
 // now, then ones you recently looked at, then the rest.
 function _prefetchOrder() {
-  // Terminal workers save their scrollback; chat workers save their
-  // conversation (chat_<name>). Other renderers have nothing to save.
-  const running = (sessions || []).filter(s => s.running && ['terminal', 'chat'].includes(_workerRenderer(s.name)));
+  // Only renderers with an offline adapter have anything to save.
+  const running = (sessions || []).filter(s => s.running && _OFFLINE_ADAPTERS[_workerRenderer(s.name)]);
   const recent = new Set([peekSession, _lastPeekedSession].filter(Boolean));
   const rank = s => (s.status === 'active' || s.status === 'waiting' ? 0 : recent.has(s.name) ? 1 : 2);
   return running.sort((a, b) => rank(a) - rank(b) || (b.last_activity || 0) - (a.last_activity || 0));
@@ -13040,65 +13100,40 @@ async function _offlinePrefetch(manual) {
   await _peekIndexLoad();
   const list = _prefetchOrder();
   let fetched = 0, unchanged = 0, bytes = 0, done = 0;
+  const synced = [];
   const CONC = manual ? 4 : 2;
   const report = () => { if (manual) _offlineSyncStatus(
     `Saving for offline… ${done}/${list.length} (${fetched} new, ${unchanged} unchanged)`); };
   const worker = async () => {
     while (list.length && !_prefetchAbort) {
       const s = list.shift();
-      if (_workerRenderer(s.name) === 'chat') {
-        try {
-          const r = await fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/chat?limit=' + _CHAT_CACHE_MSGS, { headers: _authHeaders() });
-          if (r.ok) {
-            const d = await r.json();
-            const before = _peekIndex[s.name] && _peekIndex[s.name].bytes;
-            await _chatCacheSave(s.name, d.messages || []);
-            const now = _peekIndex[s.name] && _peekIndex[s.name].bytes;
-            if (now === before) unchanged++; else { fetched++; bytes += now || 0; }
-          }
-        } catch (e) { /* skip; a dropped link should not kill the pass */ }
-        done++; report();
-        continue;
-      }
+      const adapter = _OFFLINE_ADAPTERS[_workerRenderer(s.name)];
       try {
-        const prev = _peekIndex[s.name];
-        const h = _authHeaders();
-        if (prev && prev.etag) h['If-None-Match'] = prev.etag;
-        const r = await fetch(API + '/api/sessions/' + encodeURIComponent(s.name)
-                              + '/peek?lines=' + _PEEK_CACHE_LINES, { headers: h });
-        if (r.status === 304) { unchanged++; _peekIndex[s.name] = { ...prev, time: Date.now() }; }
-        else if (r.ok) {
-          const d = await r.json();
-          const out = d.output || '';
-          // "What's scrollable, not the full log": `output` alone is just the
-          // current frame (~1KB) — useless for review. The scrollback lives in
-          // `history` (~119KB/session), which IS the full log. So keep the TAIL:
-          // the most recent _PEEK_CACHE_TAIL chars, trimmed at a line boundary
-          // so the top isn't a half-line. The server already sent the whole
-          // thing, so trimming costs nothing in transfer and bounds storage.
-          let hist = d.history || '';
-          if (hist.length > _PEEK_CACHE_TAIL) {
-            hist = hist.slice(-_PEEK_CACHE_TAIL);
-            const nl = hist.indexOf('\n');
-            if (nl > 0 && nl < 2000) hist = hist.slice(nl + 1);
-          }
-          await _idb.set('peek_' + s.name, { output: out, history: hist, time: Date.now(), offline: true });
-          const sz = out.length + hist.length;
-          _peekIndex[s.name] = { etag: r.headers.get('ETag') || '', time: Date.now(), bytes: sz };
-          fetched++; bytes += sz;
-        }
+        const r = adapter ? await adapter.sync(s.name, _peekIndex[s.name]) : null;
+        if (r) synced.push(s.name);
+        if (r && r.unchanged) unchanged++;
+        else if (r) { fetched++; bytes += r.bytes || 0; }
       } catch(e) { /* skip this one; a dropped link shouldn't kill the pass */ }
       done++; report();
     }
   };
   await Promise.all(Array.from({ length: CONC }, worker));
+  // Every worker that synced must be in the index, or its copy is invisible to
+  // the cap and to eviction. Say so where a sweep looks.
+  const lost = synced.filter(n => !_peekIndex[n]);
+  if (lost.length) {
+    try {
+      fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ kind: 'offline-index-lost', workers: lost.slice(0, 20), n_lost: lost.length,
+          verdict: 'offline_copy_unindexed', measured: true, n_considered: synced.length,
+          ver: (typeof APP_VER !== 'undefined' ? APP_VER : '?') }) }).catch(() => {});
+    } catch (e) {}
+  }
   // Evict stopped/vanished sessions and trim to the cap (oldest first).
   const live = new Set((sessions || []).filter(s => s.running).map(s => s.name));
-  for (const name of Object.keys(_peekIndex)) {
-    if (!live.has(name)) { try { _idb.del('peek_' + name); _idb.del('chat_' + name); } catch(e) {} delete _peekIndex[name]; }
-  }
+  for (const name of Object.keys(_peekIndex)) if (!live.has(name)) _offlineDropWorker(name);
   const names = Object.keys(_peekIndex).sort((a,b) => (_peekIndex[b].time||0) - (_peekIndex[a].time||0));
-  for (const n of names.slice(_offlineCap)) { try { _idb.del('peek_' + n); _idb.del('chat_' + n); } catch(e) {} delete _peekIndex[n]; }
+  for (const n of names.slice(_offlineCap)) _offlineDropWorker(n);
   _peekIndexSave();
   _prefetchRunning = false;
   if (manual) {
@@ -13184,14 +13219,19 @@ async function _chatCacheSave(name, messages) {
   const kept = messages.slice(-_CHAT_CACHE_MSGS);
   const rec = { messages: kept, time: Date.now(), offline: true };
   try {
-    await _idb.set('chat_' + name, rec);
-    await _peekIndexLoad();
+    await _idb.set(_CHAT_CACHE_KEY(name), rec);
+    // Load only if nothing has yet. A RELOAD here replaced the in-memory index
+    // with the stored one mid-prefetch, erasing the entry a terminal sync
+    // running in parallel had just written: that copy was then never counted
+    // against the cap or evicted when its worker stopped (2026-09-27,
+    // e2e/offline-adapters.test.mjs).
+    if (!_peekIndexLoaded) await _peekIndexLoad();
     _peekIndex[name] = { etag: '', time: rec.time, bytes: JSON.stringify(kept).length, kind: 'chat' };
     _peekIndexSave();
   } catch (e) {}
 }
 async function _chatCacheGet(name) {
-  try { return await _idb.get('chat_' + name); } catch (e) { return null; }
+  try { return await _idb.get(_CHAT_CACHE_KEY(name)); } catch (e) { return null; }
 }
 // Paint the saved conversation. `reason` becomes the note above it.
 async function _chatPaintCached(name, reason) {
@@ -13888,7 +13928,7 @@ function openPeek(name, opts) {
   // lets a local live fetch win on WiFi (no stale flash), but on cellular where
   // the fetch is 300ms+ the cached content — with pre-rendered HTML — paints
   // almost immediately instead of showing "Loading latest..." for 150ms+.
-  _idb.get('peek_' + name).then(cached => {
+  _idb.get(_PEEK_CACHE_KEY(name)).then(cached => {
     if (!_peekIdentityCurrent(openIdentity) || !cached) return;
     setTimeout(() => {
       if (!_peekIdentityCurrent(openIdentity)) return;
@@ -16042,7 +16082,7 @@ async function _refreshPeekFrame(liveOnly, request) {
     // Cache BOTH slices — since the live-split, `output` alone is just the tiny
     // live frame (sometimes ''), which painted an EMPTY black peek from cache
     // (social, 2026-07-16). Never write an entry with no content.
-    if (_peekHistoryRaw || _lastPeekRaw) _idb.set('peek_' + name, { output: _lastPeekRaw, history: _peekHistoryRaw, liveHTML: _lastLiveHTML, histHTML: _peekHistoryHTML, time: Date.now() });
+    if (_peekHistoryRaw || _lastPeekRaw) _idb.set(_PEEK_CACHE_KEY(name), { output: _lastPeekRaw, history: _peekHistoryRaw, liveHTML: _lastLiveHTML, histHTML: _peekHistoryHTML, time: Date.now() });
   } catch(e) {
     if (!_peekIdentityCurrent(identity)) return;
     console.error('peek:', e);
@@ -16054,7 +16094,7 @@ async function _refreshPeekFrame(liveOnly, request) {
     hidePeekLoading();   // fetch failed — stop the "Loading latest…" cue (we fall back to cache / retry below)
     // Offline: load cached peek
     if (!lastPeekHTML || lastPeekHTML.includes('Loading...')) {
-      const cached = await _idb.get('peek_' + name);
+      const cached = await _idb.get(_PEEK_CACHE_KEY(name));
       if (!_peekIdentityCurrent(identity)) return;
       if (!_paintCachedPeek(cached)) {
         // No usable cache and the fetch failed (typically the server mid-restart,
