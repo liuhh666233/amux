@@ -7096,8 +7096,16 @@ pub(crate) mod tests {
         // once the report is older than the window, so the control moves
         // INSIDE the window — which is what "no restart, report wins" was
         // always supposed to mean.
+        //
+        // SUPERSEDED by b7714d33 (2026-09-23): a picker visible on the pane is
+        // now NEWER evidence than any hook report, fresh or not, because
+        // CLI-owned menus (/model, approvals, trust) open without a hook
+        // firing. So even the fresh report yields to the picker here, and it
+        // is the picker rule that decides it, not the report's age.
         s.reports = json!({"x": {"state": "idle", "ts": 999_970.0, "source": "stop-hook"}});
-        assert_eq!(s.derive_status("x", true), "idle");
+        let (status, why) = s.derive_status_explain("x", true);
+        assert_eq!(status, "waiting");
+        assert_eq!(why["decided_by"], "provider_picker");
         // A STALE idle report (4h) over the same picker: the pane's waiting
         // shows through — no restart needed. This is tonight's fix.
         s.reports = json!({"x": {"state": "idle", "ts": 985_600.0, "source": "stop-hook"}});
