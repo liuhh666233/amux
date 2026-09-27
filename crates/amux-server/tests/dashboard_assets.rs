@@ -2200,3 +2200,25 @@ fn connection_history_modal_uses_the_mobile_dialog_shell() {
         );
     }
 }
+
+/// JavaScript has no `\UXXXXXXXX` escape: `'\U0001f535'` is the literal text
+/// "U0001f535". Six notification icons were written in Python's spelling when
+/// the dashboard was extracted (3976de4f, 2026-08-09) and every toast showed
+/// that text instead of its emoji until 2026-09-27. Use `\u{1f535}`.
+#[test]
+fn no_python_style_unicode_escapes_in_client_js() {
+    for name in ["app.js", "sw.js"] {
+        let src = asset(name);
+        let bad: Vec<String> = src
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.as_bytes().windows(10).any(|w| {
+                    w[0] == b'\\' && w[1] == b'U' && w[2..].iter().all(|c| c.is_ascii_hexdigit())
+                })
+            })
+            .map(|(i, l)| format!("{name}:{}: {}", i + 1, l.trim()))
+            .collect();
+        assert!(bad.is_empty(), "Python-style \\U escapes render as literal text in JS:\n{}", bad.join("\n"));
+    }
+}

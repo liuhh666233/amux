@@ -4846,7 +4846,7 @@ function _needsYouRenderPanel() {
 })();
 
 function _fireSessionNotif(name, title, body) {
-  let icon = '\U0001f535';
+  let icon = '\u{1f535}';
   if (title.includes('needs input')) icon = '⚠️';
   else if (title.includes('stopped')) icon = '⏹';
   else if (title.includes('started')) icon = '▶️';
@@ -4856,12 +4856,12 @@ function _fireSessionNotif(name, title, body) {
 
 const _ALERT_LABELS = {
   scheduler:      (a) => ({ icon: '⏰', title: 'Scheduler ran', body: a.message.replace(/^Ran schedule: /, '') + (a.session ? ' \xb7 ' + a.session : '') }),
-  auto_compact:   (a) => ({ icon: '\U0001f4e6', title: 'Context compacted', body: a.session }),
-  auto_restart:   (a) => ({ icon: '\U0001f504', title: 'Agent restarted', body: a.session + ' — ' + a.message }),
-  thinking_reset: (a) => ({ icon: '\U0001f504', title: 'Thinking reset', body: a.session }),
+  auto_compact:   (a) => ({ icon: '\u{1f4e6}', title: 'Context compacted', body: a.session }),
+  auto_restart:   (a) => ({ icon: '\u{1f504}', title: 'Agent restarted', body: a.session + ' — ' + a.message }),
+  thinking_reset: (a) => ({ icon: '\u{1f504}', title: 'Thinking reset', body: a.session }),
   auto_continue:  (a) => ({ icon: '▶️', title: 'Agent continued', body: a.session }),
-  steering_delivered: (a) => ({ icon: '\U0001f4e8', title: 'Steering delivered', body: a.session }),
-  task_pickup:      (a) => ({ icon: '\U0001f4cb', title: 'Task assigned', body: a.session + (a.message ? ' — ' + a.message : '') }),
+  steering_delivered: (a) => ({ icon: '\u{1f4e8}', title: 'Steering delivered', body: a.session }),
+  task_pickup:      (a) => ({ icon: '\u{1f4cb}', title: 'Task assigned', body: a.session + (a.message ? ' — ' + a.message : '') }),
 };
 
 function _fireAmuxAlert(a) {
@@ -13257,7 +13257,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1158';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1159';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
