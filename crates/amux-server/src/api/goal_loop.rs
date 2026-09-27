@@ -474,6 +474,17 @@ async fn generating(name: &str) -> bool {
 /// in-flight turn, which in a loop is another copy of the same ask. Verified by
 /// the transcript's own command record, never by the keystrokes landing.
 async fn park(state: &AppState, name: &str) -> Result<String, String> {
+    // Never interrupt over the owner's own typing. Escape can put text that is
+    // sitting in the composer back into play or clear it, and a draft the owner
+    // is writing is worth more than one more copy of the looping ask. The raw
+    // frame keeps SGR attributes, so a dim suggestion is not mistaken for input.
+    let raw = sv::tmux_capture(name, 25).await;
+    if let Some(draft) = sv::composer_state(&raw).typed() {
+        return Err(format!(
+            "composer holds typed input ({} chars); not interrupting over it",
+            draft.chars().count()
+        ));
+    }
     let interrupted = if generating(name).await {
         sv::send_key(name, "Escape").await;
         let mut idle = false;
