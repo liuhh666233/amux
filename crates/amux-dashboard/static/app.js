@@ -5305,6 +5305,67 @@ function _stalledChip(s) {
     + w.ready + ' ready</span>';
 }
 
+// WHY THIS STATUS, IN PLAIN WORDS (Ethan 2026-09-27: "when I click the
+// status it doesnt tell me anything useful this should be something I can
+// actually use to figure out why is it working, idle, rate limited etc").
+// Three lines: what it is doing, how amux knows, and what to do if anything.
+// Built only from the same explain payload the evidence below shows.
+function _statusWhy(s, evidence) {
+  const e = evidence.explain || {}, pr = e.projection || {}, rep = e.report || {};
+  const tel = pr.telemetry || {}, cues = e.pane_cues || {};
+  const status = evidence.running ? (evidence.status || 'unknown') : 'stopped';
+  const ago = sec => sec == null ? '' : _fmtDur(Math.max(0, Math.round(sec)) * 1000) + ' ago';
+  const evName = ev => ({ Stop: 'finished its turn', UserPromptSubmit: 'received a message', PreToolUse: 'started a tool call',
+    PostToolUse: 'finished a tool call', SessionStart: 'started', Notification: 'asked for attention',
+    PermissionRequest: 'asked for permission' })[ev] || (ev ? 'sent ' + ev : 'reported');
+  const d = e.decided_by || '';
+  let source = {
+    report: 'Claude\'s own status report' + (rep.state ? ' ("' + rep.state + '"' + (rep.age_s != null ? ', ' + ago(rep.age_s) : '') + ')' : ''),
+    native_hook: 'Claude\'s hook: it ' + evName(rep.event) + (rep.age_s != null ? ' ' + ago(rep.age_s) : ''),
+    codex_rollout: 'Codex\'s session log', codex_rollout_with_picker: 'Codex\'s session log and a question on screen',
+    claude_transcript_interrupt: 'the transcript shows the turn was interrupted',
+    structured_live_children: 'a process it started is still running',
+    contradiction_subagents_working: 'its subagents are still writing', contradiction_subagents_reported_live: 'its subagents are still running',
+    contradiction_provider_background_working: 'Claude said the turn ended, but a background shell it started is still running',
+    contradiction_pane_generating: 'the terminal looks busy although the last report said idle (a guess)',
+    contradiction_pane_redrew_since_claim: 'the terminal kept changing after the last idle report (a guess)',
+    contradiction_picker_waiting: 'the terminal shows a question waiting for a choice', provider_picker: 'the terminal shows a question waiting for a choice',
+    api_error_banner: 'the terminal shows an API error', provider_auto_resume_quota: 'the terminal shows the usage-limit banner',
+    transition: 'the last recorded state change', activity_fallback: 'recent terminal activity (a guess)',
+    codex_stale_active_refused: 'Codex\'s log with no live process behind it', codex_child_probe_unmeasured: 'Codex\'s log (child process not measured)',
+    not_running: 'the worker process is not running',
+  }[d] || '';
+  if (d === 'pane') source = pr.authority === 'corroborated'
+    ? (status === 'active' ? 'the terminal shows Claude\'s "esc to interrupt" footer (only drawn mid-turn)' : 'the terminal shows an empty prompt')
+    : 'a guess from the terminal screen';
+  const since = pr.last_progress_at ? ' Last real activity ' + timeAgo(pr.last_progress_at) + '.' : '';
+  const unhealthy = tel.health && !['healthy', 'unsupported', 'stopped'].includes(tel.health)
+    ? ' Status reports from this worker are ' + tel.health + ': ' + (tel.reason || '') + '.' : '';
+  let head, action = '';
+  if (status === 'stopped') { head = 'Stopped. Its process is not running.'; action = 'Send it a message or start it to run it again.'; }
+  else if (pr.activity === 'api_retry') { head = 'Retrying an API call' + (cues.api_retry_in ? ', next try in ' + cues.api_retry_in : '') + '.';
+    action = 'Nothing, it retries on its own. If it keeps failing, check the network or Anthropic\'s status.'; }
+  else if (status === 'rate_limited') { head = 'Rate limited' + (s.rate_limited_until ? ' until ' + new Date(s.rate_limited_until * 1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '') + '.';
+    action = 'It resumes after the reset. Switch it to another model to continue now.'; }
+  else if (status === 'api_error') { head = 'Stopped on an API error' + (s.api_error_code ? ' (' + s.api_error_code + ')' : '') + '.'; action = 'Send "continue" to retry.'; }
+  else if (status === 'blocked') { head = 'Waiting for your permission to use a tool.'; action = 'Open the worker and answer the prompt.'; }
+  else if (status === 'waiting') { head = 'Waiting for your answer to a question.'; action = 'Open the worker and answer it.'; }
+  else if (pr.agent_state === 'unknown') { head = 'amux can\'t tell what it is doing.';
+    action = 'Restart the worker to restore its status reports. Automation will not act on it meanwhile.'; }
+  else if (pr.activity === 'background_shell') { head = 'Turn finished; a background job it started is still running.'; action = 'Nothing. It picks up again when the job ends.'; }
+  else if (pr.activity === 'subagents') head = 'Working through subagents.';
+  else if (pr.activity === 'tool') head = 'Running a tool call' + (rep.age_s != null ? ' (started ' + ago(rep.age_s) + ')' : '') + '.';
+  else if (status === 'active') head = 'Working.';
+  else if (status === 'idle') { head = 'Idle: finished its turn and waiting for the next message.'; action = 'Send it a message to give it work.'; }
+  else head = 'Status: ' + status + '.';
+  return { head, because: (source ? 'How amux knows: ' + source + '.' : '') + since + unhealthy, action };
+}
+function _statusWhyHtml(s, evidence) {
+  const w = _statusWhy(s, evidence);
+  return '<div class="status-why"><p class="status-why-head">' + esc(w.head) + '</p>'
+    + (w.because ? '<p class="status-why-because">' + esc(w.because) + '</p>' : '')
+    + (w.action ? '<p class="status-why-action"><strong>What to do:</strong> ' + esc(w.action) + '</p>' : '') + '</div>';
+}
 async function _openStatusDetail(name) {
   document.getElementById('status-detail-dialog')?.close();
   document.getElementById('status-detail-dialog')?.remove();
@@ -5331,7 +5392,9 @@ async function _openStatusDetail(name) {
       fetch('/api/sessions/' + encodeURIComponent(name) + '/status-explain').then(r => { if (!r.ok) throw Error('Status unavailable'); return r.json(); }).catch(() => null),
     ]);
     if (!dialog.open) return;
-    let html = '<h3>Current status evidence</h3>';
+    let html = '';
+    if (evidence) html += _statusWhyHtml(sessions.find(x => x.name === name) || {}, evidence);
+    html += '<details class="status-evidence"><summary>Evidence</summary>';
     if (evidence) {
       const reason = evidence.explain || {}, report = reason.report || {};
       html += '<p><strong>' + esc(evidence.running ? evidence.status || 'unknown' : 'stopped')
@@ -5354,6 +5417,7 @@ async function _openStatusDetail(name) {
       }
       if (evidence.native_events?.length) html += '<details><summary>Recent native events (' + evidence.native_events.length + ')</summary><ol>' + evidence.native_events.slice(0,12).map(e => '<li>' + esc(e.event) + ' → ' + esc(e.state) + ' · ' + esc(new Date(e.event_ts * 1000).toLocaleTimeString()) + '</li>').join('') + '</ol></details>';
     } else html += '<p role="alert">Live status could not be verified. Retry when connected.</p>';
+    html += '</details>';
     const cards = Array.isArray(boardRes) ? boardRes : [];
     const blocked = cards.filter(c => c.blocked_on || (c.depends_on && c.depends_on.length));
     if (blocked.length) {
@@ -5400,6 +5464,7 @@ function _workerExecutionBadge(s, runtimeBoard, opts) {
   if (s.running && s.agent_state === 'unknown') badge = '<button type="button" class="status-badge unknown" title="'
     + esc('Agent state unknown: only a screen guess (' + (s.status || '?') + ') is available and the status channel is ' + (tele.health || 'unmeasured') + '. ' + (tele.reason || '') + ' Automation will not act on it.')
     + '" onclick="event.stopPropagation();_openStatusDetail(\'' + escJs(s.name) + '\')">unknown ▾</button>';
+  else if (s.running && s.status === 'active' && s.activity === 'api_retry') badge = '<span class="status-badge rate-limited" title="A request to the API failed; the agent is waiting to retry it on its own.">retrying</span>';
   else if (s.running && s.status === 'active' && s.activity === 'background_shell') badge = '<span class="status-badge background" title="The turn is finished; a background shell it started is still running. The agent resumes on its own when that ends.">background job</span>';
   else if (s.status === 'starting') badge = '<span class="status-badge idle">starting</span>';
   else if (s.status === 'waiting') badge = '<span class="status-badge waiting"' + _waitingTitle(s) + '>' + _waitingLabel(s) + '</span>';
@@ -12288,7 +12353,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1144';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1145';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.

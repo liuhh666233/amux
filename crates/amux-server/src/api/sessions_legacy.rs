@@ -2544,7 +2544,16 @@ impl FleetSignals {
             status = "rate_limited".into();
             decided = "provider_auto_resume_quota";
         }
-        let projection = self.status_projection(name, &status, decided, &ex);
+        let mut projection = self.status_projection(name, &status, decided, &ex);
+        // WHY, IN THE PROVIDER'S OWN WORDS (Ethan 2026-09-27: "this should be
+        // something I can actually use to figure out why is it working, idle,
+        // rate limited"). Claude's footer says when a request failed and it is
+        // waiting to retry; that worker read "working" while it was stuck.
+        let retry_in = self.pane_of(name).and_then(api_retry_in);
+        if retry_in.is_some() && status == "active" {
+            projection["activity"] = serde_json::json!("api_retry");
+        }
+        ex.insert("pane_cues".into(), serde_json::json!({ "api_retry_in": retry_in }));
         ex.insert("projection".into(), projection);
         ex.insert("decided_by".into(), json!(decided));
         (status, serde_json::Value::Object(ex))
@@ -5831,6 +5840,21 @@ pub(crate) fn telemetry_health(
     }
 }
 
+
+/// "will retry in 2m 32s" from Claude Code's footer, when a request failed
+/// and it is waiting to retry ("Waiting for API response · will retry in
+/// 2m 32s · check your network"). Current frame only: the last few lines.
+pub(crate) fn api_retry_in(raw: &str) -> Option<String> {
+    let clean = crate::backend::adapter::strip_ansi(raw);
+    let lines: Vec<&str> = clean.lines().filter(|l| !l.trim().is_empty()).collect();
+    let re = regex::Regex::new(r"will retry in ((?:\d+h ?)?(?:\d+m ?)?(?:\d+s)?)").ok()?;
+    lines[lines.len().saturating_sub(10)..]
+        .iter()
+        .filter(|l| l.contains("Waiting for API response") || l.contains("will retry in"))
+        .find_map(|l| re.captures(l).map(|c| c[1].trim().to_string()))
+        .filter(|d| !d.is_empty())
+}
+
 #[cfg(test)]
 mod status_authority_tests {
     use super::*;
@@ -5857,6 +5881,17 @@ mod status_authority_tests {
         for r in &rules {
             assert!(authority_of(r).is_some(), "status rule `{r}` has no authority class");
         }
+    }
+
+    #[test]
+    fn reads_claudes_api_retry_countdown_from_the_current_frame() {
+        let pane = "Running 1 shell command…\n* Waiting for API response · will retry in 2m 32s · check your network\n\n❯ \n  bypass permissions on";
+        assert_eq!(api_retry_in(pane).as_deref(), Some("2m 32s"));
+        assert_eq!(api_retry_in("* Waiting for API response · will retry in 45s").as_deref(), Some("45s"));
+        assert_eq!(api_retry_in("❯ \n  bypass permissions on"), None);
+        // Scrolled far out of the current frame: not current.
+        let old = format!("will retry in 9s\n{}", "line\n".repeat(30));
+        assert_eq!(api_retry_in(&old), None);
     }
 
     #[test]
