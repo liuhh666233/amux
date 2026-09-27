@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2258,
+  "n_considered": 2262,
   "command_handlers": {
     "_applyEmbedView": {
       "kind": "command._applyEmbedView",
@@ -3586,6 +3586,12 @@
     },
     "openFilePreview": {
       "kind": "command.openFilePreview",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "openFirstNeedsInput": {
+      "kind": "command.openFirstNeedsInput",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

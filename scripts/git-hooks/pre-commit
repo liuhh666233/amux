@@ -597,6 +597,43 @@ if [ -n "$JS_STAGED" ]; then
   echo "JS syntax checks passed."
 fi
 
+# ── 3b. Interaction registry matches the STAGED app.js (2026-09-27) ──────────
+#
+# state/control-registry.json and state/kernel.js are generated from app.js by
+# scripts/build-state.mjs. Only CI's e2e lint checked them, so an app.js commit
+# that skipped `npm run build:state` failed all four e2e shards on every later
+# push. It happened three times in one day (fixed by hand in 2e34c96b and
+# 528bde4b, stale again after 28ba6174/d534f9d6).
+#
+# Checked against the STAGED bytes in a scratch export, never the worktree: on
+# this shared checkout the worktree app.js can hold a peer's unsaved draft,
+# which must not decide whether YOUR commit is consistent.
+REG_STAGED=$(echo "$STAGED" | grep -E '^(crates/amux-dashboard/static/(app\.js|state/.*)|scripts/build-state\.mjs)$' || true)
+if [ -n "$REG_STAGED" ]; then
+  _nm=""
+  for _cand in "$ROOT/node_modules" "$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/node_modules"; do
+    [ -d "$_cand/espree" ] && [ -d "$_cand/esbuild" ] && { _nm="$_cand"; break; }
+  done
+  if [ -z "$_nm" ]; then
+    echo "WARN registry_check_skipped: no node_modules with espree+esbuild (run npm ci); CI's e2e lint will still check it" >&2
+  else
+    _reg_tmp=$(mktemp -d "${TMPDIR:-/tmp}/amux-reg-check.XXXXXX")
+    git ls-files -z -- crates/amux-dashboard/static/app.js crates/amux-dashboard/static/state scripts/build-state.mjs \
+      | xargs -0 git checkout-index --prefix="$_reg_tmp/" --
+    ln -s "$_nm" "$_reg_tmp/node_modules"
+    if ! _reg_out=$(cd "$_reg_tmp" && node scripts/build-state.mjs --check 2>&1); then
+      echo "$_reg_out" | grep -E 'stale|Error' | head -3 >&2
+      echo "BLOCKED registry_stale: the staged app.js no longer matches the generated interaction registry." >&2
+      echo "  Fix: node scripts/build-state.mjs && git add crates/amux-dashboard/static/state/control-registry.json crates/amux-dashboard/static/state/kernel.js" >&2
+      echo "  (It regenerates from the working-tree app.js; if a peer has unsaved edits there, regenerate in a detached worktree instead.)" >&2
+      rm -rf "${_reg_tmp:?}"
+      exit 1
+    fi
+    rm -rf "${_reg_tmp:?}"
+    echo "Interaction registry matches staged app.js."
+  fi
+fi
+
 # ── 4. frustrations.md structural audit (AF-120) ─────────────────────────────
 #
 # The audit existed, detected exactly this failure (an entry appended with no
