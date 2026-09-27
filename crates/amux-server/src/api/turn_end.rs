@@ -807,7 +807,7 @@ async fn file_ask_card_via(
         clip(context, if isolated { 6000 } else { 1500 })
     );
     let needsyou = path == AskPath::NeedsYou;
-    let mut tags = vec![tag.clone()];
+    let mut tags = vec![tag.clone(), TURN_END_ASK_TAG.to_string()];
     if isolated {
         tags.push(ISOLATED_ASK_TAG.to_string());
     }
@@ -877,7 +877,27 @@ async fn file_ask_card_via(
                     )
                     .optional()?
                     .map(|id| (id, true)),
-                None => None,
+                None => {
+                    // REPHRASED REPEATS UPDATE THE OPEN CARD ON EVERY LANE, not
+                    // only isolated ones. tubescience-parity filed TP-38..TP-48 on
+                    // 2026-09-27: "Still blocked on your OK to spend about $16 on
+                    // Gemini embedding?", "Still waiting on your go for about $16
+                    // of Gemini embedding?", and so on, each a new needsyou card
+                    // because the exact-question key differed by a few words.
+                    let mut st = conn.prepare(
+                        "SELECT i.id, COALESCE(i.ask_question, i.decision_question, i.title) FROM issues i \
+                         JOIN issue_tags t ON t.issue_id = i.id \
+                         WHERE i.session = ?1 AND t.tag = ?2 AND i.deleted IS NULL \
+                         AND i.status NOT IN ('done','verified','discarded') ORDER BY i.updated DESC",
+                    )?;
+                    let open: Vec<(String, String)> = st
+                        .query_map(rusqlite::params![lane_s, TURN_END_ASK_TAG], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .flatten()
+                        .collect();
+                    open.into_iter()
+                        .find(|(_, oq)| same_ask(oq, &q))
+                        .map(|(id, _)| (id, true))
+                }
             };
             let out = match existing {
                 Some((id, false)) => (id, false),
@@ -916,6 +936,48 @@ async fn file_ask_card_via(
     out.map(|(id, created)| (id, created, path))
         .ok_or_else(|| "card write returned no id".into())
 }
+
+/// Tag on every card the turn-end recorder files, on any lane.
+pub(crate) const TURN_END_ASK_TAG: &str = "turn-end-owner-ask";
+
+/// The ask without the "May <lane> proceed with this:" wrapper as_question
+/// adds, which every auto-filed card shares and which would make any two of
+/// them look alike.
+fn ask_core(q: &str) -> String {
+    let t = q.trim();
+    match t.find(" proceed with this:") {
+        Some(i) if t.starts_with("May ") => t[i + " proceed with this:".len()..].trim().to_string(),
+        _ => t.to_string(),
+    }
+}
+
+/// Same ask, reworded? Overlap relative to the SHORTER ask (not Jaccard):
+/// a long restatement of a short ask adds words that would sink a union-based
+/// score, measured on TP-44 ("about $16 of Gemini embedding?") against TP-45
+/// (the same plus a cost breakdown). Tokens come from goal_loop::tokens, so
+/// URLs and numbers are normalized. Asks with fewer than three content tokens never merge.
+pub(crate) fn same_ask(a: &str, b: &str) -> bool {
+    // Waiting-and-asking filler says HOW the lane asked, not WHAT it asks for.
+    const FILLER: &[&str] = &[
+        "still", "blocked", "waiting", "wait", "your", "you", "ok", "okay", "go", "goahead", "only",
+        "remaining", "step", "steps", "need", "needs", "needed", "approve", "approval", "say", "word",
+        "want", "should", "shall", "may", "can", "could", "would", "the", "and", "for", "on", "of",
+        "to", "about", "this", "that", "with", "from", "please", "i", "im", "me", "my", "it", "is",
+        "are", "be", "am", "a", "an", "in", "at", "yet",
+    ];
+    let content = |t: &str| {
+        let mut set = super::goal_loop::tokens(&ask_core(t));
+        set.retain(|w| !FILLER.contains(&w.as_str()));
+        set
+    };
+    let (x, y) = (content(a), content(b));
+    let small = x.len().min(y.len());
+    if small < 3 {
+        return false;
+    }
+    x.intersection(&y).count() as f64 / small as f64 >= ASK_MERGE_OVERLAP
+}
+const ASK_MERGE_OVERLAP: f64 = 0.6;
 
 /// Kill switch for answering an isolated lane's in-boundary asks "proceed"
 /// under owner policy (default on).
@@ -1830,6 +1892,25 @@ mod tests {
         assert_eq!(boundary("Want me to send the welcome email to partners@thefasttrackgirl.com?"), Some(Boundary::ExternalSend));
         assert_eq!(boundary("Shall I post the 15 drafts to LinkedIn?"), Some(Boundary::ExternalSend));
         assert_eq!(boundary("Want me to reply to the thread?"), Some(Boundary::ExternalSend));
+    }
+
+    #[test]
+    fn rephrased_repeats_are_one_ask_and_different_asks_are_not() {
+        let spend = [
+            "May tubescience-parity proceed with this: The only remaining step needs your OK: about $16 of Gemini embedding?",
+            "May tubescience-parity proceed with this: I'm waiting for your OK on about $16 of Gemini embedding: roughly $15 to vector the ~750 remaining scenes and under $1 for search text on the 1,116 new ones?",
+            "May tubescience-parity proceed with this: Still waiting on your go for about $16 of Gemini embedding?",
+            "May tubescience-parity proceed with this: I'm still blocked on your OK to spend about $16 on Gemini embedding?",
+            "May tubescience-parity proceed with this: Still blocked on your OK to spend about $16 on Gemini embedding?",
+        ];
+        let signin = [
+            "May tubescience-parity proceed with this: Still blocked on your sign-in (TP-37) and the gs-3 push decision?",
+            "May tubescience-parity proceed with this: Still blocked on your sign-in (TP-37) and the gs-3 decision?",
+        ];
+        for a in &spend { for b in &spend { assert!(same_ask(a, b), "should merge:\n{a}\n{b}"); } }
+        for a in &signin { for b in &signin { assert!(same_ask(a, b), "should merge:\n{a}\n{b}"); } }
+        for a in &spend { for b in &signin { assert!(!same_ask(a, b), "must stay apart:\n{a}\n{b}"); } }
+        assert!(!same_ask("Want me to start on 1 and 2?", "Approve the welcome email to partners@thefasttrackgirl.com?"));
     }
 
     #[test]
