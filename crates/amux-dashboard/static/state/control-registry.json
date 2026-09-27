@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2200,
+  "n_considered": 2257,
   "command_handlers": {
     "_applyEmbedView": {
       "kind": "command._applyEmbedView",
@@ -478,6 +478,18 @@
     },
     "_changeWorkerPaused": {
       "kind": "command._changeWorkerPaused",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_chatInterrupt": {
+      "kind": "command._chatInterrupt",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_chatRetryTurn": {
+      "kind": "command._chatRetryTurn",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
@@ -2006,6 +2018,36 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_pinnedCreate": {
+      "kind": "command._pinnedCreate",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_pinnedDelete": {
+      "kind": "command._pinnedDelete",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_pinnedLaunch": {
+      "kind": "command._pinnedLaunch",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_pinnedUpdateOpacity": {
+      "kind": "command._pinnedUpdateOpacity",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_placePeekTabCustomizer": {
+      "kind": "command._placePeekTabCustomizer",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_pmResend": {
       "kind": "command._pmResend",
       "feedback_required": true,
@@ -2642,6 +2684,12 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_standingApprovalRevoke": {
+      "kind": "command._standingApprovalRevoke",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_steeringCancel": {
       "kind": "command._steeringCancel",
       "feedback_required": true,
@@ -2896,6 +2944,12 @@
     },
     "_voiceToggle": {
       "kind": "command._voiceToggle",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_watchPeekTabAnchor": {
+      "kind": "command._watchPeekTabAnchor",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
