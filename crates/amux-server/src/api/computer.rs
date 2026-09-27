@@ -473,8 +473,10 @@ fn png_size(b: &[u8]) -> Option<(u32, u32)> {
 
 /// Where scoped profile access (AMUX-5307) plugs in: one call site, allow-all
 /// until that lands.
-fn check_profile(_lane: &str, _profile: &str) -> Result<(), String> {
-    Ok(())
+/// The same rule the amux browser enforces (AMUX-5307): worker > group >
+/// global allow/deny, default allow all, owner always allowed.
+fn check_profile(lane: &str, profile: &str) -> Result<(), Box<super::browser_scope::ProfileDenied>> {
+    super::browser_scope::profile_allowed(lane, profile)
 }
 
 async fn open(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
@@ -500,11 +502,12 @@ async fn open(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
         .map(str::trim)
         .filter(|p| !p.is_empty());
     if let Some(p) = profile {
-        if let Err(why) = check_profile(&lane, p) {
+        if let Err(denied) = check_profile(&lane, p) {
             tracing::warn!(
-                "[computer] verdict=refused lane={lane} reason=profile_denied profile={p}: {why}"
+                "[computer] verdict=refused lane={lane} reason=profile_denied profile={p}: {}",
+                denied.reason
             );
-            return err(StatusCode::FORBIDDEN, json!({ "error": why, "profile": p }));
+            return denied.response();
         }
     }
     let b = match sandbox_for(&lane).await {
