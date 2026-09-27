@@ -4544,6 +4544,39 @@
   .scope-tile-val { font-size:0.66rem; color:var(--dim);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .scope-detail { border-top:1px solid var(--border); padding-top:7px; margin-top:2px; }
+  /* Browser profile access editor (AMUX-5307). Chips wrap, so a phone shows the
+     whole profile list without a horizontal scroll; every control is 36px+. */
+  .scope-bp { border-top:1px solid var(--border); margin-top:8px; padding-top:8px; }
+  .scope-bp-head { color:var(--text); font-weight:600; font-size:0.8rem; margin-bottom:3px; }
+  .scope-bp-count { color:var(--dim); font-weight:400; font-size:0.7rem; margin-left:6px; }
+  .scope-bp-note { color:var(--dim); font-size:0.68rem; line-height:1.4; margin-bottom:6px; }
+  .scope-bp-row { display:flex; gap:8px; align-items:flex-start; margin:4px 0; }
+  .scope-bp-lbl { flex:0 0 44px; font-size:0.7rem; color:var(--dim); padding-top:6px; }
+  .scope-bp-list { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+  .scope-bp-empty { font-size:0.7rem; color:var(--dim); font-style:italic; padding-top:6px; }
+  .scope-bp-chip { display:inline-flex; align-items:center; gap:2px; font-size:0.72rem;
+    border-radius:12px; padding:2px 2px 2px 9px; border:1px solid var(--border); }
+  .scope-bp-chip.allow { background:rgba(63,185,80,0.12); color:var(--green); border-color:rgba(63,185,80,0.4); }
+  .scope-bp-chip.deny { background:rgba(248,81,73,0.12); color:#f85149; border-color:rgba(248,81,73,0.4); }
+  .scope-bp-chip button { background:none; border:0; color:inherit; font-size:0.9rem; cursor:pointer;
+    min-width:28px; min-height:28px; }
+  .scope-bp-add { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0 6px; }
+  .scope-bp-seg { display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .scope-bp-seg button { background:transparent; border:0; color:var(--dim); font-size:0.7rem;
+    padding:6px 10px; min-height:36px; cursor:pointer; }
+  .scope-bp-seg button.sel { background:rgba(88,166,255,0.14); color:var(--accent); }
+  .scope-bp-input { flex:1 1 150px; min-width:0; max-width:340px; min-height:36px; font-size:16px; padding:4px 8px;
+    border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--text); }
+  .scope-bp-add .btn, .scope-bp-foot .btn { min-height:36px; font-size:0.72rem; padding:5px 11px; }
+  .scope-bp-profs { display:flex; flex-wrap:wrap; gap:4px; max-height:220px; overflow-y:auto; padding:2px 0; }
+  .scope-bp-prof { font-size:0.7rem; border-radius:12px; padding:5px 9px; min-height:32px; cursor:pointer;
+    border:1px solid var(--border); background:var(--card); color:var(--text); }
+  .scope-bp-prof.no { color:var(--dim); text-decoration:line-through; opacity:0.75; }
+  .scope-bp-prof.in-allow { border-color:var(--green); }
+  .scope-bp-prof.in-deny { border-color:#f85149; }
+  .scope-bp-foot { display:flex; justify-content:space-between; align-items:center; gap:8px;
+    flex-wrap:wrap; margin-top:8px; }
+  .scope-bp-msg { font-size:0.68rem; color:var(--dim); }
   .worker-config-intro { color:var(--dim); font-size:0.7rem; line-height:1.45; margin:0 0 9px; }
   .worker-config-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; margin-bottom:10px; }
   .worker-config-section { border:1px solid var(--border); background:color-mix(in srgb, var(--card) 72%, transparent); border-radius:10px; overflow:hidden; min-width:0; }

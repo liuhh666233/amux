@@ -11169,12 +11169,135 @@ async function _scopeLoad(scope, targetId) {
             })()
           : '')
       + '</div>';
+    // Browser profile access (AMUX-5307): its own section with its own read,
+    // because the generic env tile masks values and these two never are secret.
+    const _bpId = 'scope-bp-' + lvl + '-' + String(w || 'global').replace(/[^A-Za-z0-9_-]/g, '_');
+    h += '<div class="scope-bp" id="' + _bpId + '" data-level="' + esc(lvl) + '" data-name="' + esc(w || '') + '"></div>';
     const dst = document.getElementById(targetId || 'peek-scope-body') || el;
     dst.innerHTML = h;
+    _scopeBpLoad(lvl, w || '', _bpId);
   } catch (e) {
     const dst = document.getElementById(targetId || 'peek-scope-body') || el;
     dst.textContent = 'Could not load configurations: ' + e.message;
   }
+}
+
+// ── Browser profile access editor (AMUX-5307) ────────────────────────────
+// Ethan: "we should have scopes for accessing certain profiles per
+// group/worker/global but by default all workers should be able to discover
+// all profiles." Discovery is untouched; this edits the two scoped keys that
+// decide USE. Reads GET /api/browser/profile-access (raw lists at this level +
+// the effective verdict per profile) and writes through PUT /api/scope env, so
+// authorization is the Scope tab's own (a worker cannot widen group/global).
+const _bpState = {};
+function _bpSplit(v) { return String(v || '').split(/[\s,]+/).map(x => x.trim()).filter(Boolean); }
+
+async function _scopeBpLoad(lvl, name, id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = '<div class="scope-bp-head">Browser profiles</div><div class="scope-bp-note">Loading\u2026</div>';
+  try {
+    const q = '?level=' + encodeURIComponent(lvl) + (lvl === 'global' ? '' : '&name=' + encodeURIComponent(name));
+    const r = await fetch(API + '/api/browser/profile-access' + q, { headers: _authHeaders() });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    _bpState[id] = {
+      lvl, name, data: d, mode: 'allow',
+      allow: _bpSplit(d.set_here && d.set_here.allow),
+      deny: _bpSplit(d.set_here && d.set_here.deny),
+      dirty: false, msg: '',
+    };
+    _scopeBpRender(id);
+  } catch (e) {
+    el.innerHTML = '<div class="scope-bp-head">Browser profiles</div><div class="scope-bp-note">Could not load: ' + esc(e.message) + '</div>';
+  }
+}
+
+function _bpGlob(p, n) {
+  const re = new RegExp('^' + String(p).toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+  return re.test(String(n).toLowerCase());
+}
+
+function _scopeBpRender(id) {
+  const st = _bpState[id], el = document.getElementById(id);
+  if (!st || !el) return;
+  const d = st.data, profiles = d.profiles || [];
+  const lvlName = st.lvl === 'global' ? 'global' : st.lvl + ' ' + st.name;
+  const listChips = (kind) => {
+    const arr = st[kind];
+    if (!arr.length) return '<span class="scope-bp-empty">' + (kind === 'allow' ? 'not set here (inherits)' : 'none') + '</span>';
+    return arr.map((p, i) => '<span class="scope-bp-chip ' + kind + '">' + esc(p)
+      + '<button aria-label="Remove ' + esc(p) + '" onclick="event.stopPropagation();_scopeBpRemove(\'' + escJs(id) + '\',\'' + kind + '\',' + i + ')">\u00d7</button></span>').join('');
+  };
+  // A chip per profile, colored by the EFFECTIVE verdict at this level as last
+  // saved; pending edits mark the chip so a reader never mistakes a draft for
+  // the live rule.
+  const pchips = profiles.map(p => {
+    const inA = st.allow.some(x => _bpGlob(x, p.name)), inD = st.deny.some(x => _bpGlob(x, p.name));
+    const cls = p.allowed ? 'ok' : 'no';
+    const rule = p.rule || {};
+    const t = (p.allowed ? 'Allowed' : 'Denied') + ' by ' + rule.key + '=' + rule.value + ' at ' + rule.scope;
+    return '<button class="scope-bp-prof ' + cls + (inD ? ' in-deny' : inA ? ' in-allow' : '') + '" title="' + esc(t)
+      + '" onclick="event.stopPropagation();_scopeBpToggle(\'' + escJs(id) + '\',\'' + escJs(p.name) + '\')">'
+      + esc(p.name) + '</button>';
+  }).join('');
+  el.innerHTML = '<div class="scope-bp-head">Browser profiles <span class="scope-bp-count">'
+    + (d.n_allowed != null ? d.n_allowed : '?') + ' of ' + profiles.length + ' usable at ' + esc(lvlName) + '</span></div>'
+    + '<div class="scope-bp-note">Every worker can list every profile. These rules decide which ones a worker may open: worker › group › global, deny beats allow at the same level, unset everywhere means all.</div>'
+    + '<div class="scope-bp-row"><span class="scope-bp-lbl">Allow</span><span class="scope-bp-list">' + listChips('allow') + '</span></div>'
+    + '<div class="scope-bp-row"><span class="scope-bp-lbl">Deny</span><span class="scope-bp-list">' + listChips('deny') + '</span></div>'
+    + '<div class="scope-bp-add">'
+    + '<span class="scope-bp-seg" role="group" aria-label="Add to">'
+    + '<button class="' + (st.mode === 'allow' ? 'sel' : '') + '" onclick="event.stopPropagation();_scopeBpMode(\'' + escJs(id) + '\',\'allow\')">Add to Allow</button>'
+    + '<button class="' + (st.mode === 'deny' ? 'sel' : '') + '" onclick="event.stopPropagation();_scopeBpMode(\'' + escJs(id) + '\',\'deny\')">Add to Deny</button></span>'
+    + '<input class="scope-bp-input" placeholder="name or glob, e.g. persona-*" onkeydown="if(event.key===\'Enter\'){event.preventDefault();_scopeBpAddInput(\'' + escJs(id) + '\',this)}">'
+    + '<button class="btn" onclick="event.stopPropagation();_scopeBpAddInput(\'' + escJs(id) + '\',this.previousElementSibling)">Add</button>'
+    + '</div>'
+    + '<div class="scope-bp-profs">' + pchips + '</div>'
+    + '<div class="scope-bp-foot"><span class="scope-bp-msg">' + esc(st.msg || (st.dirty ? 'Unsaved changes' : 'Tap a profile to add it to the selected list.')) + '</span>'
+    + '<span><button class="btn" ' + (st.dirty ? '' : 'disabled') + ' onclick="event.stopPropagation();_scopeBpLoad(\'' + escJs(st.lvl) + '\',\'' + escJs(st.name) + '\',\'' + escJs(id) + '\')">Reset</button> '
+    + '<button class="btn primary scope-bp-save" ' + (st.dirty ? '' : 'disabled') + ' onclick="event.stopPropagation();_scopeBpSave(\'' + escJs(id) + '\')">Save</button></span></div>';
+}
+
+function _scopeBpMode(id, mode) { const st = _bpState[id]; if (!st) return; st.mode = mode; _scopeBpRender(id); }
+function _scopeBpRemove(id, kind, i) {
+  const st = _bpState[id]; if (!st) return;
+  st[kind].splice(i, 1); st.dirty = true; st.msg = ''; _scopeBpRender(id);
+}
+function _scopeBpAdd(id, v) {
+  const st = _bpState[id]; if (!st) return;
+  v = String(v || '').trim();
+  if (!v || !/^[A-Za-z0-9._*?-]+$/.test(v)) { st.msg = 'Names and globs only: letters, digits, . _ - * ?'; _scopeBpRender(id); return; }
+  const other = st.mode === 'allow' ? 'deny' : 'allow';
+  st[other] = st[other].filter(x => x !== v);
+  if (!st[st.mode].includes(v)) st[st.mode].push(v);
+  st.dirty = true; st.msg = ''; _scopeBpRender(id);
+}
+function _scopeBpAddInput(id, inp) { if (inp) _scopeBpAdd(id, inp.value); }
+function _scopeBpToggle(id, name) {
+  const st = _bpState[id]; if (!st) return;
+  if (st[st.mode].includes(name)) { st[st.mode] = st[st.mode].filter(x => x !== name); st.dirty = true; st.msg = ''; _scopeBpRender(id); }
+  else _scopeBpAdd(id, name);
+}
+
+async function _scopeBpSave(id) {
+  const st = _bpState[id]; if (!st) return;
+  const keys = (st.data && st.data.keys) || { allow: 'AMUX_BROWSER_PROFILES_ALLOW', deny: 'AMUX_BROWSER_PROFILES_DENY' };
+  const value = {};
+  value[keys.allow] = st.allow.length ? st.allow.join(',') : null;
+  value[keys.deny] = st.deny.length ? st.deny.join(',') : null;
+  st.msg = 'Saving\u2026'; _scopeBpRender(id);
+  try {
+    const r = await fetch(API + '/api/scope', {
+      method: 'PUT',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, _authHeaders()),
+      body: JSON.stringify({ level: st.lvl, name: st.name, capability: 'env', value: value }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { st.msg = d.error || ('save failed (' + r.status + ')'); _scopeBpRender(id); return; }
+    showToast('Browser profile access saved at ' + (st.lvl === 'global' ? 'global' : st.lvl + ' ' + st.name));
+    await _scopeBpLoad(st.lvl, st.name, id);
+  } catch (e) { st.msg = 'Save failed: ' + e.message; _scopeBpRender(id); }
 }
 
 // ── Simple tab config (font / size / standing prompt) ──────────────────────
@@ -45314,16 +45437,28 @@ async function _bwLoadProfiles() {
       // server's own measurement; an older server omits it, and `!== false`
       // keeps those listings unchanged rather than marking everything missing.
       const missing = p.on_disk === false;
+      // WHO MAY USE IT (AMUX-5307). Every profile stays listed; a scoped one
+      // says so, and the title names the workers and groups it is denied to.
+      const acc = p.access || null;
+      const limited = acc && acc.all_workers === false;
       o.textContent = (missing ? '⚠' : icon) + ' '
                     + (lbl ? lbl + ' (' + p.name + ')' : p.name)
                     + (missing ? ' — no profile directory, starts logged out'
-                               : (doms ? ' — ' + doms : ''));
+                               : (doms ? ' — ' + doms : ''))
+                    + (limited ? ' · ' + acc.workers_allowed + '/' + acc.workers_total + ' workers' : '');
       if (missing) {
         o.title = 'Saved for ' + (doms || 'no recorded domains')
                 + ', but the directory is gone. Starting it creates an empty '
                 + 'profile and you will not be signed in.';
       } else if (doms) {
         o.title = doms;
+      }
+      if (acc) {
+        o.title = (o.title ? o.title + '\n' : '') + (limited
+          ? 'Usable by ' + acc.workers_allowed + ' of ' + acc.workers_total + ' workers. Denied to: '
+            + ((acc.denied_workers || []).join(', ') || 'none')
+            + ((acc.denied_groups || []).length ? '; groups: ' + acc.denied_groups.join(', ') : '')
+          : 'Usable by all workers');
       }
       return o;
     };

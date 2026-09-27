@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2306,
+  "n_considered": 2316,
   "command_handlers": {
     "_applyEmbedView": {
       "kind": "command._applyEmbedView",
@@ -2656,6 +2656,12 @@
     },
     "_scheduleSyncRetry": {
       "kind": "command._scheduleSyncRetry",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_scopeBpSave": {
+      "kind": "command._scopeBpSave",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

@@ -5282,8 +5282,48 @@ for b in d.get("identified", []):
 print(d.get("verdict", ""))
 PYEOF
       ;;
+    profiles|ls|list)
+      # AMUX-5307. Every worker sees every profile (discovery is open); the
+      # marker says which ones THIS worker may open under the scoped
+      # AMUX_BROWSER_PROFILES_ALLOW / _DENY policy (worker > group > global).
+      local me="${AMUX_WORKER:-${AMUX_SESSION:-}}"
+      local resp
+      resp=$(_curl -sk -m 30 -H "X-Amux-Session: ${me}" \
+        "$AMUX_API/api/browser/profiles" 2>/dev/null) || resp=""
+      [[ -z "$resp" ]] && die "amux server unreachable at ${AMUX_API}"
+      RESP="$resp" ME="$me" python3 - <<'PYEOF'
+import json, os, sys
+try:
+    d = json.loads(os.environ["RESP"])
+except Exception:
+    print(os.environ["RESP"]); sys.exit(1)
+if d.get("error"):
+    print("profiles FAILED:", d["error"]); sys.exit(1)
+me = os.environ.get("ME") or ""
+rows = d.get("profiles", [])
+n_ok = 0
+for p in rows:
+    a = p.get("access") or {}
+    ok = a.get("allowed_for_you", True)
+    n_ok += 1 if ok else 0
+    mark = "+" if ok else "x"
+    sites = ", ".join((p.get("signed_in_to") or [])[:3]) or "-"
+    desc = p.get("label") or p.get("summary") or ""
+    who = "all workers" if a.get("all_workers", True) else (
+        f"{a.get('workers_allowed', '?')}/{a.get('workers_total', '?')} workers")
+    print(f" {mark} {p['name']:<28} {who:<16} {sites}")
+    if desc:
+        print(f"     {desc}")
+    if not ok and a.get("you"):
+        r = a["you"].get("rule") or {}
+        print(f"     not for you: {r.get('key')}={r.get('value')} at {r.get('scope')}")
+whom = me or "the owner (no worker identity)"
+print(f"{len(rows)} profile(s); {n_ok} allowed for {whom}. '+' = you may use it, 'x' = out of your scope.")
+PYEOF
+      ;;
     ""|help|-h|--help)
       cat <<'EOF'
+amux browser profiles             — list every saved profile; '+' marks the ones you may use
 amux browser identify [profile]   — make the amux Chrome window say it is the amux window
 
   With no profile: every running amux browser draws a blue bar naming its
@@ -5294,7 +5334,7 @@ amux browser identify [profile]   — make the amux Chrome window say it is the 
   their own and the two are visually identical.
 EOF
       ;;
-    *) die "amux browser: unknown subcommand '$sub' (try: identify)" ;;
+    *) die "amux browser: unknown subcommand '$sub' (try: profiles, identify)" ;;
   esac
 }
 
@@ -5524,6 +5564,8 @@ ${BOLD}Board:${RESET}
   amux board status <ID> <s>     Set any status
 
 ${BOLD}Browser:${RESET}
+  amux browser profiles          List every saved profile; '+' marks the ones this
+                                 worker may use (scoped allow/deny, worker > group > global)
   amux browser identify [prof]   Make the amux Chrome window say it IS the amux
                                  window: a blue bar naming the profile, and the
                                  window raised when you name one. ${DIM}Run it before${RESET}

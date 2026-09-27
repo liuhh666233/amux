@@ -443,6 +443,9 @@ pub struct BrowserProfile {
     /// entries, 2 of them (`ethan-posthog`, `lob`) with no directory, and
     /// nothing anywhere said so (AMUX-5020).
     pub on_disk: bool,
+    /// Who the registry says owns this profile (`owner`, else `created_by`,
+    /// else `saved_by`), or None when nobody recorded one (AMUX-5307).
+    pub owner: Option<String>,
 }
 
 fn dir_mtime_unix(p: &Path) -> Option<i64> {
@@ -536,6 +539,15 @@ pub fn list_profiles(home: &Path, with_sizes: bool) -> Vec<BrowserProfile> {
                     .to_string(),
                 registered: meta.is_some(),
                 on_disk: dir.is_dir(),
+                owner: meta.and_then(|m| {
+                    ["owner", "created_by", "saved_by"].iter().find_map(|k| {
+                        m.get(*k)
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_string)
+                    })
+                }),
                 name,
             }
         })
@@ -3816,6 +3828,22 @@ pub fn port_for_session(session: &str) -> Option<u16> {
     }
     if g.len() == 1 {
         return g.values().next().map(|r| r.cdp_port);
+    }
+    None
+}
+
+/// The PROFILE of the browser `port_for_session` would pick, by the same two
+/// rules, so the profile-scope check (AMUX-5307) judges exactly the browser a
+/// driver verb is about to drive.
+pub fn profile_for_session(session: &str) -> Option<String> {
+    let g = RUNNING.lock().expect("browser registry poisoned");
+    if !session.is_empty() {
+        if let Some(r) = g.values().find(|r| r.started_by == session) {
+            return Some(r.profile.clone());
+        }
+    }
+    if g.len() == 1 {
+        return g.values().next().map(|r| r.profile.clone());
     }
     None
 }

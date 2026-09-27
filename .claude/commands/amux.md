@@ -449,8 +449,13 @@ curl -sk -X POST -H 'Content-Type: application/json' \
   -d '{"task":"Find the latest invoice","profile":"default"}' \
   $AMUX_URL/api/browser/agent
 
-# List auth profiles
-curl -sk $AMUX_URL/api/browser/profiles
+# List auth profiles (every worker sees all; `access.allowed_for_you` says
+# which you may open). Or: amux browser profiles
+curl -sk -H "X-Amux-Session: $AMUX_SESSION" $AMUX_URL/api/browser/profiles
+# Use is scoped by AMUX_BROWSER_PROFILES_ALLOW / _DENY (worker > group > global,
+# globs like persona-*). A refused start is 403 code profile_not_in_scope and
+# lists allowed_profiles. Resolution for a level:
+curl -sk "$AMUX_URL/api/browser/profile-access?level=worker&name=$AMUX_SESSION"
 
 # Stop browser
 curl -sk -X POST $AMUX_URL/api/browser/stop
