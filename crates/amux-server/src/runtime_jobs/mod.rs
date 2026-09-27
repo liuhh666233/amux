@@ -80,6 +80,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod status_history;
 pub mod storage;
+pub mod trace_archive;
 pub mod tailnet_watch;
 pub mod telegram_poll;
 pub mod telegram_relay;

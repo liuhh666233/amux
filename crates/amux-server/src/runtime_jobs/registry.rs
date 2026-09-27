@@ -93,6 +93,7 @@ pub mod ids {
     pub const INVARIANTS: &str = "invariants-monitor";
     pub const SCHEDULER: &str = "scheduler";
     pub const HOST_METRICS: &str = "host-metrics";
+    pub const TRACE_ARCHIVE: &str = "trace-archive";
     pub const HOST_GUARD: &str = "host-guard";
     pub const GOAL_KEEPER: &str = "goal-keeper";
     pub const ORCH_RUNTIME: &str = "orchestrator-runtime";
@@ -169,6 +170,7 @@ pub const ALL_IDS: &[&str] = &[
     ids::CONTEXT_HEALTH,
     ids::DISK_WATCH,
     ids::HOST_METRICS,
+    ids::TRACE_ARCHIVE,
     ids::HOST_GUARD,
     ids::GOAL_KEEPER,
     ids::STATUS_HISTORY,
@@ -629,6 +631,18 @@ pub const CATALOG: &[Doc] = &[
         ],
         pref: None,
         detail: Some("/api/reclaim/scan"),
+    },
+    Doc {
+        id: ids::TRACE_ARCHIVE,
+        name: "Trace archive",
+        purpose: "Keeps every agent trace. Sets Claude Code's cleanupPeriodDays when unset (it deletes sessions after 30 days by default) and warns when it is under a year. Gzips each Claude transcript, subagent transcript and Codex rollout that has been quiet for 2 hours into ~/.amux/traces (backed up with ~/.amux), indexed by worker with message, tool-call, error and token counts; marks traces whose original was deleted. Oldest first, bounded bytes per tick, paused while the host is critical.",
+        env: &[
+            EnvControl { var: "AMUX_TRACE_ARCHIVE_SECS", effect: "0 disables archiving and the retention guard", off: Some("0") },
+            EnvControl { var: "AMUX_TRACE_ARCHIVE_TICK_MB", effect: "source MB archived per 10-minute tick, default 400", off: None },
+            EnvControl { var: "AMUX_TRACE_ARCHIVE_QUIET_S", effect: "seconds a transcript must be unchanged before archiving, default 7200", off: None },
+        ],
+        pref: None,
+        detail: Some("/api/traces"),
     },
     Doc {
         id: ids::HOST_METRICS,

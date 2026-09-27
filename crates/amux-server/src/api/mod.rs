@@ -62,6 +62,7 @@ pub mod memories;
 pub mod messages;
 pub(crate) mod native_status;
 pub mod metrics;
+pub mod traces;
 pub mod observability;
 pub mod offline_origin;
 pub mod orchestrate;
@@ -163,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/models", axum::routing::get(workers::model_catalog))
         .nest("/api/memories", memories::routes())
+        .nest("/api/traces", traces::routes())
         .nest("/api/messages", messages::routes())
         .nest("/api/schedules", schedules::routes())
         // AMUX-5237: named clearance signals. A card waits with
