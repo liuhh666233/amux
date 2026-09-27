@@ -600,7 +600,13 @@ fi
   if [ -n "${AMUX_DEPLOY_JOBS:-}" ]; then
     DEPLOY_JOBS="$AMUX_DEPLOY_JOBS"
   elif [ "$(uname -s)" = Darwin ]; then
-    DEPLOY_JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+    # Absolute path: this script's PATH (line 17) omits /usr/sbin, and a bare
+    # `sysctl` silently fell back to 2 on the first live run (dd36d783, 355s).
+    DEPLOY_JOBS="$(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    if [ -z "$DEPLOY_JOBS" ]; then
+      DEPLOY_JOBS=2
+      echo "== WARN deploy_jobs_fallback could not read the core count; building with jobs=2"
+    fi
   else
     DEPLOY_JOBS="${CARGO_BUILD_JOBS:-2}"
   fi
