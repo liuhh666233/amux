@@ -5015,3 +5015,14 @@ CARD: MO-3622
 SYMPTOM: amux-server-rs forked about 50 processes per second, 26 of them the bootstrap loop's per-session `has-session` and `list-panes` (13.0/s of each at 28 sessions). The one sweep that calls reconcile reads only the session name.
 COST: half of the server's spawns and about 0.5 core of translated tmux clients, invisible in the logs because a process that has exited leaves nothing to grep.
 FIX: 63c2614d makes reconcile one `list-panes -a` census, and TmuxBackend spawns are now counted per 60 s window with a WARN (`tmux_spawn_rate_high`) and `tmux_spawns` in GET /api/debug/tmux. The count covers TmuxBackend::run only; peek captures and the session-verb helpers spawn tmux from their own call sites and are not counted.
+
+## GET /api/schedules says a run succeeded; GET /api/schedules/runs, checked for the same run, says it errored
+AREA: scheduler
+SEVERITY: annoys
+STATUS: open
+DATE: 2026-09-27
+SESSION: amux-meta-helper
+CARD: AMH-15
+SYMPTOM: SCHED-465 fired at 1790523007 and was killed mid-run when the server restarted to adopt a commit of mine. `/api/schedules/runs` recorded this correctly: `{"id":43517,"status":"error","exit_code":null,"delivery":"unknown","note":"server restarted before this fire recorded a delivery outcome"}`. But `GET /api/schedules` for the same schedule still showed `last_run: 1790523007` (that exact failed run's own timestamp) paired with `last_delivery: "ok"` and `last_refusal_reason: null`. A reader who checks only the schedule list — fresh `last_run`, `last_delivery: ok` — has no reason to open `/runs` and will report the tick as having succeeded when it did not.
+COST: caught only because I happened to manually re-run the same command to verify a deploy and cross-checked both endpoints out of caution; a normal glance at `/api/schedules` alone would have reported this schedule's last fire as fine.
+FIX: `last_delivery`/`last_refusal_reason` look like they are only written on the terminal-success and explicit-refusal code paths, not on the server-restart-interrupted path that `/runs` already handles correctly (this exact interruption class was previously fixed for lock-holding in a9984068, so the restart-detection logic already exists — it just isn't propagated to the parent schedule row). Either write `last_delivery`/`last_refusal_reason` from the same code path that produces the `/runs` error row, or have the schedule list derive its summary fields from the latest `/runs` row instead of maintaining a separate copy.
