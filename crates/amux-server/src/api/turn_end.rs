@@ -408,9 +408,26 @@ pub(crate) fn classify_owner_ask(text: &str) -> OwnerAsk {
         .rev()
         .find(|(_, s)| is_ask_sentence(s))
         .map(|(i, s)| (i, s.clone()));
+    // Paragraph of each sentence, so the one BEFORE the ask is read only
+    // when it belongs to the ask. amux-meta-helper, 2026-09-27 19:29: a
+    // report's last bullet ("MVS production promote, a CI merge-gate policy
+    // change, ...") sat a blank line above "Given the size, want me to keep
+    // this as a reference list, or would it help more to work through one
+    // category at a time?", and the pair read as a production-data boundary
+    // (AMH-17). `sentences` drops blank lines, so per-paragraph sentences
+    // concatenate to exactly `sents`.
+    let para_of: Vec<usize> = tail
+        .split("\n\n")
+        .enumerate()
+        .flat_map(|(p, chunk)| std::iter::repeat_n(p, sentences(chunk).len()))
+        .collect();
     let (sentence, context) = match (hit, marker) {
         (Some((i, s)), _) => {
-            let prev = if i > 0 { sents[i - 1].as_str() } else { "" };
+            // A short ask ("Want me to do it?") leans on the sentence before it
+            // wherever that sits; a full one stands alone across a paragraph.
+            let same_para = para_of.len() == sents.len() && i > 0 && para_of[i - 1] == para_of[i];
+            let leans = s.split_whitespace().count() <= 10;
+            let prev = if i > 0 && (same_para || leans) { sents[i - 1].as_str() } else { "" };
             let ctx = format!("{prev} {s}");
             (s, ctx)
         }
@@ -1877,6 +1894,18 @@ mod tests {
         // Outside the window the same question may be steered again.
         assert!(claim_within(&state, "tubescience-parity", "turn_end.owner_ask_steer", &key, -1.0,
             "owner-ask:tubescience-parity:turn-4".into(), json!({})).await);
+    }
+
+    #[test]
+    fn a_report_bullet_above_a_standalone_ask_does_not_set_its_boundary() {
+        // Live, amux-meta-helper 2026-09-27 19:29 (AMH-17).
+        let t = "Needs your call:\n- Substantive production/policy decisions (19): MVS production promote, a CI merge-gate policy change, and similar calls.\n\nGiven the size, want me to keep this as a reference list, or would it help more to work through one category at a time (starting with the urgent security ones)?";
+        assert!(matches!(classify_owner_ask(t), OwnerAsk::InBoundary { .. }));
+        // A short ask still leans on the sentence above it, even across a blank line.
+        let t = "I can truncate the prod events table now.\n\nWant me to do it?";
+        assert!(matches!(classify_owner_ask(t), OwnerAsk::Boundary { .. }));
+        let t = "I can truncate the prod events table now. Should I go ahead with that cleanup before the backfill job runs tonight?";
+        assert!(matches!(classify_owner_ask(t), OwnerAsk::Boundary { .. }));
     }
 
     #[test]
