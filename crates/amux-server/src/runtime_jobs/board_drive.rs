@@ -10762,6 +10762,7 @@ mod tests {
         // scope fixed while parallel tests install and remove fixture homes.
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         drive_card(&store, "PARKED", "backlog", "agent", "code");
         drive_card(&store, "EXTERNAL", "todo", "agent", "code");
@@ -10806,6 +10807,9 @@ mod tests {
 
     #[tokio::test]
     async fn pending_blocker_review_suppresses_more_reviews_and_generic_nudges() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         for id in ["PARKED-A", "PARKED-B"] {
             drive_card(&store, id, "backlog", "agent", "code");
@@ -11049,6 +11053,9 @@ mod tests {
 
     #[test]
     fn missing_continuation_backlog_is_prepared_instead_of_repeatedly_failing_claim() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, _state, store) = drive_state();
         drive_card(&store, "INCOMPLETE", "backlog", "agent", "code");
         store
@@ -11082,6 +11089,9 @@ mod tests {
 
     #[tokio::test]
     async fn incomplete_intake_is_recoverable_and_delivery_failure_consumes_no_attempt() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         drive_card(&store, "INCOMPLETE", "backlog", "agent", "code");
         store.write(|conn| {
@@ -11515,6 +11525,9 @@ mod tests {
 
     #[tokio::test]
     async fn reviewed_blocker_yields_to_independent_verification_and_preserves_hold() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         drive_card(&store, "HELD", "backlog", "agent", "code");
         drive_card(&store, "READY", "done", "agent", "code");
@@ -11942,6 +11955,7 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let (_dir, state, store) = drive_state();
         drive_card(&store, "READY", "backlog", "agent", "code");
@@ -12605,6 +12619,7 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let (_dir, state, store) = drive_state();
         drive_card(&store, "BACKLOG-REFUSED", "backlog", "agent", "code");
@@ -12625,6 +12640,7 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let (_dir, state, store) = drive_state();
         drive_card(&store, "DEP", "doing", "agent", "code");
@@ -14610,45 +14626,54 @@ mod tests {
     /// not convert the other two into failures that hide their own result.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// worker is expected to keep driving. Default-on is safe because the drain
-    /// query excludes every parked/human/trigger shape; an explicit 0 remains
-    /// the worker/group/global opt-out.
+    /// Backlog dispatch is OFF by default since 0d2a0757 (Ethan, 2026-09-24:
+    /// "every board toggle disabled by default except decompose onto board").
+    /// A test that exercises the drain opts its lane in at WORKER scope inside
+    /// its own temp home, which is how a real worker turns it on, rather than
+    /// relying on the old default or mutating the shared process env.
+    fn opt_in_backlog_dispatch(home: &std::path::Path, lane: &str) {
+        use std::io::Write as _;
+        let dir = home.join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(format!("{lane}.env")))
+            .unwrap();
+        writeln!(f, "{DISPATCH_BACKLOG_KEY}=1").unwrap();
+    }
+
+    /// Backlog dispatch is OFF unless the lane opts in (0d2a0757, Ethan
+    /// 2026-09-24: "all new workers should have every board toggle disabled by
+    /// default except decompose onto board"). This used to pin default-ON.
+    /// Scope files only: the process env is the operator override and is
+    /// cleared so it cannot stand in for either answer.
     #[test]
-    fn backlog_dispatch_is_on_by_default_and_supports_an_explicit_opt_out() {
+    fn backlog_dispatch_is_off_by_default_and_supports_an_explicit_opt_in() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The default must be tested against an actually empty scope chain,
         // not the developer machine's ~/.amux global configuration.
         let home = tempfile::tempdir().expect("temp home");
         let _home = crate::api::settings::test_env::set_home(home.path());
+        std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let build = || {
             let conn = board_db();
             // No todo at all: the only state where this may fire.
-            add_card(
-                &conn,
-                "B-1",
-                "lane",
-                "backlog",
-                "oldest",
-                "SCOPE: x\n- [ ] y",
-            );
-            add_card(
-                &conn,
-                "B-2",
-                "lane",
-                "backlog",
-                "newer",
-                "SCOPE: x\n- [ ] y",
-            );
-            conn.execute("UPDATE issues SET created=100 WHERE id='B-1'", [])
-                .unwrap();
-            conn.execute("UPDATE issues SET created=200 WHERE id='B-2'", [])
-                .unwrap();
+            add_card(&conn, "B-1", "lane", "backlog", "oldest", "SCOPE: x\n- [ ] y");
+            add_card(&conn, "B-2", "lane", "backlog", "newer", "SCOPE: x\n- [ ] y");
+            conn.execute("UPDATE issues SET created=100 WHERE id='B-1'", []).unwrap();
+            conn.execute("UPDATE issues SET created=200 WHERE id='B-2'", []).unwrap();
             conn
         };
 
-        // DEFAULT ON: the oldest eligible card drains without every worker
-        // needing a redundant opt-in key.
-        std::env::remove_var(DISPATCH_BACKLOG_KEY);
+        // DEFAULT OFF: an empty scope chain moves no backlog card.
+        match select_pickup_with(&build(), "lane", now_f64(), false) {
+            Pickup::None { reason, .. } => assert_eq!(reason, "no-eligible-card"),
+            other => panic!("backlog dispatch must be off by default: {other:?}"),
+        }
+
+        // EXPLICIT OPT-IN at worker scope: the oldest eligible card drains.
+        opt_in_backlog_dispatch(home.path(), "lane");
         match select_pickup_with(&build(), "lane", now_f64(), false) {
             Pickup::DrainBacklog {
                 card,
@@ -14656,26 +14681,12 @@ mod tests {
                 todo_refusals,
                 ..
             } => {
-                assert_eq!(
-                    card, "B-1",
-                    "oldest first, so a starved card is not starved further"
-                );
-                assert_eq!(
-                    backlog_left, 2,
-                    "the count reports what is drainable, before the move"
-                );
+                assert_eq!(card, "B-1", "oldest first, so a starved card is not starved further");
+                assert_eq!(backlog_left, 2, "the count reports what is drainable, before the move");
                 assert_eq!(todo_refusals, 0, "an empty todo queue has no refusals");
             }
-            other => panic!("default-on backlog dispatch did not run: {other:?}"),
+            other => panic!("an opted-in lane must drain backlog: {other:?}"),
         }
-
-        // EXPLICIT OPT-OUT: no backlog card moves.
-        std::env::set_var(DISPATCH_BACKLOG_KEY, "0");
-        match select_pickup_with(&build(), "lane", now_f64(), false) {
-            Pickup::None { reason, .. } => assert_eq!(reason, "no-eligible-card"),
-            other => panic!("an opted-out lane must not drain backlog: {other:?}"),
-        }
-        std::env::remove_var(DISPATCH_BACKLOG_KEY);
     }
 
     /// The trace must SAY why a drain declined (AMUX-4055 follow-up).
@@ -16042,6 +16053,9 @@ mod tests {
     /// otherwise stop forever after its current card completed.
     #[test]
     fn a_blocked_todo_does_not_hide_actionable_backlog_from_auto_drain() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let conn = board_db();
         let now = now_f64();
         add_card(

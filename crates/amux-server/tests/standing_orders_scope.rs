@@ -65,7 +65,9 @@ fn default_is_off_at_every_level() {
 fn worker_level_off_silences_that_lane_only() {
     let h = Home::new();
     h.worker("so-off", "CC_AUTO_PICKUP=0\n")
-        .worker("so-on", "CC_AUTO_PICKUP=1\n");
+        // Default-off (0d2a0757): an opt-in needs the master AND the class,
+        // as `the_master_switch_covers_every_class...` pins below.
+        .worker("so-on", "CC_STANDING_ORDERS=1\nCC_AUTO_PICKUP=1\n");
     assert!(!h.on("so-off", "CC_AUTO_PICKUP"));
     assert!(
         h.on("so-on", "CC_AUTO_PICKUP"),
@@ -112,7 +114,9 @@ fn global_level_off_silences_the_whole_fleet() {
 #[test]
 fn worker_overrides_group_overrides_global() {
     let h = Home::new();
-    h.global("CC_STANDING_ORDERS=1\n")
+    // Default-off (0d2a0757): the global opt-in names the class as well as
+    // the master; the precedence under test is the master's.
+    h.global("CC_STANDING_ORDERS=1\nCC_AUTO_PICKUP=1\n")
         .group("loud-crew", "CC_STANDING_ORDERS=0\n")
         .worker("so-prec-global", "CC_DIR=/tmp\n")
         .worker("so-prec-group", "CC_TAGS=loud-crew\n")
