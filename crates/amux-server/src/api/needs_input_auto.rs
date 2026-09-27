@@ -304,7 +304,13 @@ fn ask_text(item: &Value) -> String {
 /// run it.
 pub fn never_reason(item: &Value) -> Option<&'static str> {
     let at = item["ask_type"].as_str().unwrap_or("");
-    let text = ask_text(item);
+    // The QUESTION only. `unblocks` on a card the turn-end recorder filed is
+    // boilerplate ("completes the sign-in, grant or credential step named in
+    // the question"), so reading it made every such card look like a
+    // credential ask (AMH-16, 2026-09-27: "Want me to do that pass, or would
+    // you rather look at the categories yourself first?").
+    let text = item["question"].as_str().filter(|q| !q.trim().is_empty())
+        .or_else(|| item["title"].as_str()).unwrap_or("").to_string();
     let t = text.to_ascii_lowercase();
     // A declared credential/access ask that reads like one.
     if matches!(at, "credential" | "access") && crate::api::needs_input::reads_like_credential(&t) {

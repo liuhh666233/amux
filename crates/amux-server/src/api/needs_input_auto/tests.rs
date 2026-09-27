@@ -320,3 +320,11 @@ fn owner_action_and_public_surface_are_never_auto_approved_but_mentions_are() {
     assert!(!never("decision", "Want me to go after the Gemini source now, or wait for gs-4 to say whether it's theirs?"));
     assert!(!never("decision", "Should Mixpeek offer a sandbox or demo API key so a prospect can test one call?") );
 }
+
+#[test]
+fn the_recorders_unblocks_boilerplate_does_not_make_an_ask_a_credential() {
+    let all = Policy { enabled: true, other: true, money: true, money_cap_usd: 50.0, prod_data: true, outbound: true, ..Default::default() };
+    let mut it = item("card", "other", "credential", "Want me to do that pass, or would you rather look at the categories yourself first?");
+    it["unblocks"] = serde_json::json!("ethan completes the sign-in, grant or credential step named in the question and notes it on this card.");
+    assert_eq!(decide(&all, &it), Decision::Approve);
+}
