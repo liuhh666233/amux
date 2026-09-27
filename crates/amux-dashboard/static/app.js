@@ -5457,7 +5457,9 @@ function _niRender() {
   const hasTarget = !!(it.worker || it.kind === 'email' || it.card);
   if (_niAllArmed) { foot.innerHTML = _niApproveAllConfirmHtml(); return; }
   foot.innerHTML = '<div class="ni-actions">'
-    + '<button class="btn primary ni-approve" onclick="_niAct(\'approve\')"' + (hasTarget ? '' : ' disabled') + '>' + (it.kind === 'email' ? 'Send' : 'Approve') + '</button>'
+    + '<button class="btn primary ni-approve" onclick="_niAct(\'approve\')"' + (hasTarget ? '' : ' disabled')
+      + (_niOwnerMustAct(it) ? ' title="You provide this; the worker is told to verify it and continue"' : '') + '>'
+      + (it.kind === 'email' ? 'Send' : _niOwnerMustAct(it) ? 'I\'ve done it' : 'Approve') + '</button>'
     + '<button class="btn danger ni-decline" onclick="_niAct(\'decline\')"' + (hasTarget ? '' : ' disabled') + '>Decline</button>'
     + '<button class="btn ni-reply-btn" onclick="_niShowPanel(\'reply\')"' + (it.kind === 'email' || !it.worker ? ' disabled title="Nobody to reply to"' : '') + '>Reply</button>'
     + '</div><div class="ni-actions ni-secondary">'
@@ -5607,7 +5609,8 @@ async function _niAct(action) {
       if (!e.ok && e.gone) _niHandled.set(it.key, Date.now() + 5 * 60_000);
     } else {
       let text;
-      if (action === 'approve' || action === 'approve_always') text = 'Approved' + ref + ': ' + q + '. Proceed.' + (typed ? ' ' + typed : '');
+      if (action === 'approve' && _niOwnerMustAct(it)) text = 'Done' + ref + ': ' + q + ' I have provided it. Verify it works, then continue.' + (typed ? ' ' + typed : '');
+      else if (action === 'approve' || action === 'approve_always') text = 'Approved' + ref + ': ' + q + '. Proceed.' + (typed ? ' ' + typed : '');
       else if (action === 'decline') text = 'Declined' + ref + ': ' + q + '. Do not proceed' + (typed ? '; ' + typed : '') + '.';
       else text = 'Re' + ref + ': ' + typed;
       if (it.worker) {
@@ -5618,7 +5621,8 @@ async function _niAct(action) {
         else errs.push('send to ' + it.worker + ': ' + s.error);
       }
       if (it.card) {
-        const verb = { approve: 'Approved', approve_always: 'Approved (standing rule)', decline: 'Declined', reply: 'Owner reply' }[action];
+        const verb = action === 'approve' && _niOwnerMustAct(it) ? 'Provided'
+          : { approve: 'Approved', approve_always: 'Approved (standing rule)', decline: 'Declined', reply: 'Owner reply' }[action];
         const note = '[' + stamp + '] ' + verb + ' by owner in needs-input triage' + (action === 'reply' || (action === 'decline' && typed) ? ': ' + typed : '.');
         const marker = '#triage-' + _niHash(it.key + '|' + action + '|' + typed);
         const c = await _niCard(it.card, note, marker, true);
@@ -5661,9 +5665,16 @@ async function _niAct(action) {
 // only the owner can DO (mint a key, sign in, grant access) are skipped:
 // "approved" cannot complete them.
 let _niAllArmed = false;
+// An ask the OWNER has to carry out (mint a key, sign in, grant access), as
+// opposed to one asking permission. "Approved. Proceed." cannot complete it:
+// MM-84 was approved in triage on 2026-09-27 and the worker could only answer
+// that it still needs the key. Its primary action is "I've done it".
+function _niOwnerMustAct(i) {
+  return !!i && i.kind !== 'email' && ['credential', 'access'].includes(i.ask_type);
+}
 function _niApprovable() {
   return _niItems(_niShowOlder).filter(i => !!(i.worker || i.kind === 'email' || i.card)
-    && !['credential', 'access'].includes(i.ask_type));
+    && !_niOwnerMustAct(i));
 }
 function _niApproveAllArm() {
   if (_niBusy) return;
@@ -13246,7 +13257,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1156';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1157';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
