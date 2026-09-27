@@ -5199,24 +5199,421 @@ function _needsInputBadge(s) {
 function _needsInputSessions() {
   return sessions.filter(s => s.running && s.status === 'waiting' && s.waiting_reason === 'owner');
 }
-// Header chip, same pattern as updateRateLimitPill: a count, tap jumps to the
-// first worker that needs input.
+// Header chip, same pattern as updateRateLimitPill. Since AMUX-5286 the count
+// is the triage queue (cards, email approvals and blocked workers, minus
+// snoozed), and tapping it opens the one-at-a-time triage sheet.
 function updateNeedsInputPill() {
   const pill = document.getElementById('needs-input-pill');
   const txt = document.getElementById('needs-input-pill-text');
   if (!pill || !txt) return;
-  const list = _needsInputSessions();
+  const list = _niItems();
   const n = list.length;
+  try { if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {}); } catch (_) {}
+  if (_niOpen) _niRenderCounter();
   if (!n) { pill.classList.remove('show'); return; }
   txt.textContent = n + (n === 1 ? ' needs input' : ' need input');
   document.getElementById('needs-input-pill-count').textContent = n;
-  pill.setAttribute('aria-label', n + (n === 1 ? ' worker needs' : ' workers need') + ' your input. Open ' + list[0].name);
-  pill.title = list.map(s => s.name + ((s.owner_block || {}).card ? ' (' + s.owner_block.card + ')' : '')).join(', ') + ' (tap to jump)';
+  pill.setAttribute('aria-label', n + (n === 1 ? ' item needs' : ' items need') + ' your input. Open the triage queue');
+  pill.title = list.slice(0, 8).map(i => (i.worker || 'owner') + (i.card ? ' (' + i.card + ')' : i.kind === 'email' ? ' (email)' : '')).join(', ')
+    + (n > 8 ? ', +' + (n - 8) + ' more' : '') + ' (tap to triage)';
   pill.classList.add('show');
 }
-function openFirstNeedsInput() {
-  const s = _needsInputSessions()[0];
-  if (s) openPeek(s.name);
+function openFirstNeedsInput() { openNeedsInput(); }
+
+// ═══════ NEEDS INPUT TRIAGE (AMUX-5286) ═══════
+// Ethan, 2026-09-27, pointing at the orange "17" pill: "this should open a
+// modal where i can go thru one by one quickly. the entire point of amux is to
+// set this shit up to be set and forget and then very quickly or automatically
+// plow thru blockers".
+//
+// The queue is GET /api/needs-input (needsyou + decision cards, pending email
+// approvals, server-side snoozes), merged with the workers the session list
+// already reports as blocked on the owner (`owner_block`), deduped by card.
+// Every action goes through the existing write path (board PATCH, owner send,
+// email approve/reject, standing approvals), reads the card back, and reports
+// to /api/needs-input/log so a sweep sees verdict=triage_action.
+let _niQueue = null;          // server items, null until the first fetch
+let _niServerSnoozed = new Set();
+let _niIdx = 0;
+let _niOpen = false;
+let _niBusy = false;
+const _niHandled = new Map(); // key -> expiry ms: acted on here, hidden until the next fetch confirms
+let _niPanel = '';            // '', 'reply', 'always'
+
+async function _niFetch() {
+  try {
+    const r = await fetch(API + '/api/needs-input', { headers: _authHeaders() });
+    if (!r.ok) return false;
+    const d = await r.json();
+    _niQueue = Array.isArray(d.items) ? d.items : [];
+    _niServerSnoozed = new Set((d.snoozed || []).map(s => s.key));
+    const now = Date.now();
+    for (const [k, exp] of _niHandled) if (exp < now) _niHandled.delete(k);
+    updateNeedsInputPill();
+    if (_niOpen) _niRender();
+    return true;
+  } catch (_) { return false; }
+}
+function _niBoot() { _niFetch(); setInterval(() => { if (!document.hidden) _niFetch(); }, 60_000); }
+if (document.body) setTimeout(_niBoot, 0);
+else document.addEventListener('DOMContentLoaded', _niBoot);
+
+// The merged, ordered queue. Before the first fetch it degrades to exactly the
+// AMUX-5277 behaviour: the workers blocked on the owner.
+function _niItems() {
+  const items = (_niQueue || []).map(i => Object.assign({}, i));
+  const byCard = new Map(items.filter(i => i.card).map(i => [i.card, i]));
+  const now = Date.now() / 1000;
+  for (const s of _needsInputSessions()) {
+    const b = s.owner_block || {};
+    const hit = b.card && byCard.get(b.card);
+    if (hit) { hit.worker = hit.worker || s.name; hit.blocked_worker = s.name; if (!hit.question && b.ask) hit.question = b.ask; continue; }
+    const key = b.card ? 'card:' + b.card : 'worker:' + s.name;
+    if (_niServerSnoozed.has(key)) continue;
+    // Not in the server queue: a goal-loop stamp on a card that is not
+    // needsyou, or a lane with no card. No ask type to rank on, so rank 1.
+    items.push({ key, kind: b.card ? 'card' : 'worker', card: b.card || '', worker: s.name,
+      status: 'waiting', question: b.ask || s.waiting_label || 'Waiting on you', unblocks: '',
+      context: (s.preview_lines || []).slice(-6).join('\n') || s.preview || '', rank: 1,
+      since: b.since || now, chips: [], standing_category: 'decision', category: 'other', blocked_worker: s.name });
+    if (b.card) byCard.set(b.card, items[items.length - 1]);
+  }
+  const t = Date.now();
+  return items.filter(i => !((_niHandled.get(i.key) || 0) > t))
+    .sort((a, b) => (a.rank - b.rank) || ((a.since || 0) - (b.since || 0)) || String(a.key).localeCompare(String(b.key)));
+}
+
+async function openNeedsInput() {
+  if (_niOpen) return;
+  _niOpen = true; _niIdx = 0; _niPanel = '';
+  let ov = document.getElementById('ni-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'ni-overlay';
+    ov.className = 'modal-overlay active ni-overlay';
+    ov.innerHTML = '<section class="modal ni-modal" role="dialog" aria-modal="true" aria-labelledby="ni-title">'
+      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span></div>'
+      + '<div class="ni-nav"><button class="btn ni-prev" aria-label="Previous" onclick="_niStep(-1)">&#8249;</button>'
+      + '<button class="btn ni-next" aria-label="Next" onclick="_niStep(1)">&#8250;</button>'
+      + '<button class="modal-close ni-close" aria-label="Close triage" onclick="closeNeedsInput()">&times;</button></div></header>'
+      + '<div class="modal-body ni-body" id="ni-body"></div>'
+      + '<footer class="modal-footer ni-footer" id="ni-footer"></footer></section>';
+    ov.onclick = e => { if (e.target === ov) closeNeedsInput(); };
+    const body = ov.querySelector('#ni-body');
+    let sx = 0, sy = 0, st = 0;
+    body.addEventListener('touchstart', e => { const p = e.touches[0]; sx = p.clientX; sy = p.clientY; st = Date.now(); }, { passive: true });
+    body.addEventListener('touchend', e => {
+      if (e.target.closest && e.target.closest('textarea,input,select')) return;
+      const p = e.changedTouches[0]; const dx = p.clientX - sx, dy = p.clientY - sy;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5 && Date.now() - st < 800) _niStep(dx < 0 ? 1 : -1);
+    }, { passive: true });
+    document.body.appendChild(ov);
+  }
+  ov.classList.add('active');
+  document.body.classList.add('ni-open');
+  _niRender();
+  ov.querySelector('.ni-close').focus();
+  _niFetch();
+}
+function closeNeedsInput() {
+  _niOpen = false;
+  const ov = document.getElementById('ni-overlay');
+  if (ov) ov.remove();
+  document.body.classList.remove('ni-open');
+  document.getElementById('needs-input-pill')?.focus();
+}
+// Capture phase at the document: a tapped footer button is re-rendered away,
+// which drops focus to <body>, so an overlay-scoped listener would go deaf to
+// j/k exactly when the owner is plowing through the queue.
+document.addEventListener('keydown', e => { if (_niOpen) _niKey(e); }, true);
+function _niKey(e) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const typing = e.target.closest && e.target.closest('textarea,input,select');
+  if (e.key === 'Escape') {
+    e.preventDefault(); e.stopPropagation();
+    if (typing && _niPanel) { _niPanel = ''; _niRender(); } else closeNeedsInput();
+    return;
+  }
+  // Stopping propagation here (capture phase) would also stop the event
+  // reaching the textarea, so typing is left completely alone.
+  if (typing) return;
+  const acts = { j: () => _niStep(1), ArrowRight: () => _niStep(1), ArrowDown: () => _niStep(1),
+    k: () => _niStep(-1), ArrowLeft: () => _niStep(-1), ArrowUp: () => _niStep(-1),
+    r: () => _niShowPanel('reply') };
+  // No single-key approve: a stray keystroke must never release spend or mail.
+  const f = acts[e.key];
+  if (!f) return;
+  e.preventDefault(); e.stopPropagation();
+  f();
+}
+function _niStep(d) {
+  const n = _niItems().length;
+  if (!n) return;
+  _niIdx = (_niIdx + d + n) % n;
+  _niPanel = '';
+  _niRender();
+}
+function _niCurrent() {
+  const items = _niItems();
+  if (_niIdx >= items.length) _niIdx = Math.max(0, items.length - 1);
+  return { item: items[_niIdx], n: items.length };
+}
+function _niRenderCounter() {
+  const el = document.getElementById('ni-counter');
+  if (!el) return;
+  const { n } = _niCurrent();
+  el.textContent = n ? (_niIdx + 1) + ' of ' + n : '';
+}
+function _niCatLabel(c) {
+  return { money: 'Money', outbound: 'Outbound', prod_data: 'Prod data' }[c] || '';
+}
+function _niRender() {
+  const body = document.getElementById('ni-body');
+  const foot = document.getElementById('ni-footer');
+  if (!body || !foot) return;
+  // Never repaint under a half-typed reply: the 60s refresh would eat it.
+  const ta = document.getElementById('ni-reply');
+  if (ta && document.activeElement === ta && ta.value) { _niRenderCounter(); return; }
+  const { item: it, n } = _niCurrent();
+  _niRenderCounter();
+  if (!it) {
+    body.innerHTML = '<div class="ni-empty" role="status"><div class="ni-empty-mark" aria-hidden="true">&#10003;</div><p>Nothing needs you.</p></div>';
+    foot.innerHTML = '<button class="btn primary ni-wide" onclick="closeNeedsInput()">Close</button>';
+    return;
+  }
+  const s = it.worker ? sessions.find(x => x.name === it.worker) : null;
+  const st = s ? (s.running ? (s.status === 'waiting' && s.waiting_reason === 'owner' ? 'waiting on you' : (s.status || 'running')) : 'stopped') : (it.worker ? 'not in fleet' : '');
+  const cat = _niCatLabel(it.category);
+  const ref = it.kind === 'email' ? 'Email approval' : (it.card || 'No card');
+  body.innerHTML = '<div class="ni-meta">'
+    + (it.worker ? '<span class="ni-worker">' + esc(it.worker) + '</span>' : '')
+    + (st ? '<span class="ni-status">' + esc(st) + '</span>' : '')
+    + '<span class="ni-card">' + esc(ref) + '</span>'
+    + (cat ? '<span class="ni-cat ni-cat-' + esc(it.category) + '">' + esc(cat) + '</span>' : '')
+    + (it.since ? '<span class="ni-age">' + esc(timeAgo(Math.floor(it.since))) + '</span>' : '')
+    + '</div>'
+    + '<p class="ni-question" id="ni-question">' + esc(it.question || it.title || '') + '</p>'
+    + (it.unblocks ? '<div class="ni-unblocks"><span class="ni-label">Unblocks</span> ' + esc(it.unblocks) + '</div>' : '')
+    + (it.email ? '<div class="ni-email"><div><span class="ni-label">To</span> ' + esc(it.email.to || '') + (it.email.cc ? ' <span class="ni-label">cc</span> ' + esc(it.email.cc) : '') + '</div>'
+        + '<div><span class="ni-label">Subject</span> ' + esc(it.email.subject || '') + '</div></div>' : '')
+    + (it.context ? '<details class="ni-context" open><summary>Context</summary><pre>' + esc(it.context) + '</pre></details>' : '')
+    + _niPanelHtml(it);
+  const hasTarget = !!(it.worker || it.kind === 'email' || it.card);
+  foot.innerHTML = '<div class="ni-actions">'
+    + '<button class="btn primary ni-approve" onclick="_niAct(\'approve\')"' + (hasTarget ? '' : ' disabled') + '>' + (it.kind === 'email' ? 'Send' : 'Approve') + '</button>'
+    + '<button class="btn danger ni-decline" onclick="_niAct(\'decline\')"' + (hasTarget ? '' : ' disabled') + '>Decline</button>'
+    + '<button class="btn ni-reply-btn" onclick="_niShowPanel(\'reply\')"' + (it.kind === 'email' || !it.worker ? ' disabled title="Nobody to reply to"' : '') + '>Reply</button>'
+    + '</div><div class="ni-actions ni-secondary">'
+    // Email approvals are gated per message by email_approval.rs, which does not
+    // read standing approvals, so a rule saved from one would be a promise
+    // nothing keeps.
+    + '<button class="btn ni-always" onclick="_niShowPanel(\'always\')"' + (it.worker && it.kind !== 'email' ? '' : ' disabled title="Email sends are approved one at a time"') + '>Approve &amp; always</button>'
+    + '<button class="btn ni-snooze1" onclick="_niSnooze(60)">Snooze 1h</button>'
+    + '<button class="btn ni-snooze2" onclick="_niSnooze(\'tomorrow\')">Tomorrow</button>'
+    + '<button class="btn ni-open" onclick="_niOpenTarget()">Open</button>'
+    + '</div>';
+  foot.querySelectorAll('button').forEach(b => { if (_niBusy) b.disabled = true; });
+}
+function _niPanelHtml(it) {
+  if (_niPanel === 'reply') {
+    return '<div class="ni-panel ni-reply-panel">'
+      + ((it.chips || []).length ? '<div class="ni-chips">' + it.chips.map((c, i) => '<button class="btn ni-chip" onclick="_niChip(' + i + ')">' + esc(c.label) + '</button>').join('') + '</div>' : '')
+      + '<textarea id="ni-reply" class="input ni-reply" rows="3" placeholder="Your answer. Dictation works here." autocomplete="off"></textarea>'
+      + '<div class="ni-actions"><button class="btn primary ni-send" onclick="_niAct(\'reply\')">Send reply</button><button class="btn" onclick="_niShowPanel(\'\')">Cancel</button></div></div>';
+  }
+  if (_niPanel === 'always') {
+    const cats = ['budget', 'customer_outbound', 'prod_data', 'credential', 'access', 'decision'];
+    const q = String(it.question || '').replace(/\s+/g, ' ').trim();
+    const sentence = it.worker + ' may proceed without asking when: ' + (q.length > 160 ? q.slice(0, 160) + '…' : q);
+    return '<div class="ni-panel ni-always-panel"><label class="ni-label" for="ni-always-text">Standing approval for ' + esc(it.worker) + '</label>'
+      + '<textarea id="ni-always-text" class="input" rows="3">' + esc(sentence) + '</textarea>'
+      + '<select id="ni-always-cat" class="input" aria-label="Category">' + cats.map(c => '<option' + (c === it.standing_category ? ' selected' : '') + '>' + c + '</option>').join('') + '</select>'
+      + '<div class="ni-actions"><button class="btn primary ni-always-go" onclick="_niAct(\'approve_always\')">Approve and save rule</button><button class="btn" onclick="_niShowPanel(\'\')">Cancel</button></div></div>';
+  }
+  return '';
+}
+function _niShowPanel(p) {
+  const { item } = _niCurrent();
+  if (!item) return;
+  if (p === 'reply' && (item.kind === 'email' || !item.worker)) return;
+  _niPanel = _niPanel === p ? '' : p;
+  _niRender();
+  const el = document.getElementById(p === 'reply' ? 'ni-reply' : 'ni-always-text');
+  if (el) { el.focus(); el.scrollIntoView({ block: 'nearest' }); }
+}
+function _niChip(i) {
+  const { item } = _niCurrent();
+  const c = item && (item.chips || [])[i];
+  const ta = document.getElementById('ni-reply');
+  if (c && ta) { ta.value = c.text; _niAct('reply'); }
+}
+function _niClip(s, n) { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s; }
+function _niHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }
+async function _niJson(r) { return r.json().catch(() => ({})); }
+function _niErr(d, r) {
+  return [d.error || d.message || ('HTTP ' + r.status), d.why, d.how].filter(Boolean).join(' · ');
+}
+
+// Owner message to the worker. The msg_id is derived from the item, action and
+// text, so a double tap or a retry is deduped by the server (send_dedup).
+async function _niSend(worker, text, key, action) {
+  const msg_id = 'triage-' + _niHash(key + '|' + action + '|' + text);
+  const r = await fetch(API + '/api/sessions/' + encodeURIComponent(worker) + '/send', {
+    method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ text, record_history: true, msg_id }),
+    signal: AbortSignal.timeout(90000),
+  });
+  const d = await _niJson(r);
+  if (r.ok && d.ok !== false) return { ok: true, deduped: !!d.deduped, queued: _isLocallyQueued(r) };
+  return { ok: false, error: _niErr(d, r) };
+}
+
+// Record the decision on the card and move it out of needsyou, then READ IT
+// BACK: a 2xx is not proof the board stored what we asked for.
+async function _niCard(card, note, marker, unblock) {
+  const url = API + '/api/board/' + encodeURIComponent(card);
+  const g = await fetch(url, { headers: _authHeaders() });
+  if (!g.ok) return { ok: false, error: 'could not read ' + card + ': HTTP ' + g.status };
+  const before = await _niJson(g);
+  if (before.archived) return { ok: false, error: card + ' is archived; restore it first' };
+  const already = String(before.desc || '').includes(marker);
+  const patch = {};
+  if (!already) patch.desc_append = note + ' ' + marker;
+  const moving = unblock && before.status === 'needsyou';
+  if (moving) { patch.status = 'todo'; patch.authorized_by = 'owner (needs-input triage)'; }
+  if (!Object.keys(patch).length) return { ok: true, already: true, status: before.status };
+  // _skipOutbox: this PATCH is read back and any refusal is shown on the spot,
+  // so it must not also linger in the outbox as a blocked change to review.
+  const r = await fetch(url, { method: 'PATCH', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(patch), _skipOutbox: true });
+  const d = await _niJson(r);
+  if (!r.ok) return { ok: false, error: card + ': ' + _niErr(d, r) };
+  const back = await fetch(url, { headers: _authHeaders() }).then(_niJson).catch(() => ({}));
+  if (moving && back.status === 'needsyou') return { ok: false, error: card + ' is still needsyou after the PATCH (board kept it)' };
+  if (!already && back.desc !== undefined && !String(back.desc).includes(marker)) return { ok: false, error: card + ': the note did not land on the card' };
+  return { ok: true, status: back.status || patch.status || before.status };
+}
+
+async function _niEmail(it, action, reason) {
+  const path = action === 'decline' ? '/api/email/reject/' : '/api/email/approve/';
+  const r = await fetch(API + path + encodeURIComponent(it.approval_id), {
+    method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json', 'X-Amux-Approver': 'dashboard (needs-input triage)' }),
+    body: action === 'decline' ? JSON.stringify({ reason: reason || 'declined in needs-input triage' }) : undefined,
+  });
+  const d = await _niJson(r);
+  if (r.ok) return { ok: true, msg: action === 'decline' ? 'Discarded, nothing was sent' : 'Approved, sent for ' + (d.sent_for_session || it.worker || 'worker') };
+  return { ok: false, error: _niErr(d, r), gone: r.status === 404 };
+}
+
+function _niLog(action, it, outcome, detail) {
+  fetch(API + '/api/needs-input/log', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ action, key: it.key, card: it.card || it.approval_id || '', worker: it.worker || '', outcome, detail: String(detail || '').slice(0, 300) }) }).catch(() => {});
+}
+function _niDone(it) {
+  _niHandled.set(it.key, Date.now() + 5 * 60_000);
+  _niPanel = '';
+  updateNeedsInputPill();
+  _niRender();   // same index now shows the next item: auto-advance
+}
+
+async function _niAct(action) {
+  if (_niBusy) return;
+  const { item: it } = _niCurrent();
+  if (!it) return;
+  const replyEl = document.getElementById('ni-reply');
+  const typed = replyEl ? replyEl.value.trim() : '';
+  if (action === 'reply' && !typed) { showToast('Type a reply first'); replyEl && replyEl.focus(); return; }
+  let rule = null;
+  if (action === 'approve_always') {
+    rule = { allowed: ((document.getElementById('ni-always-text') || {}).value || '').trim(),
+      category: (document.getElementById('ni-always-cat') || {}).value || it.standing_category || 'decision' };
+    if (!rule.allowed) { showToast('Write the rule sentence first'); return; }
+  }
+  _niBusy = true; _niRender();
+  const q = _niClip(it.question || it.title, 300);
+  const ref = it.card ? ' (' + it.card + ')' : '';
+  const stamp = new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const done = [], errs = [];
+  try {
+    if (it.kind === 'email') {
+      const e = await _niEmail(it, action === 'decline' ? 'decline' : 'approve', typed);
+      if (e.ok) done.push(e.msg); else errs.push(e.error);
+      if (!e.ok && e.gone) _niHandled.set(it.key, Date.now() + 5 * 60_000);
+    } else {
+      let text;
+      if (action === 'approve' || action === 'approve_always') text = 'Approved' + ref + ': ' + q + '. Proceed.' + (typed ? ' ' + typed : '');
+      else if (action === 'decline') text = 'Declined' + ref + ': ' + q + '. Do not proceed' + (typed ? '; ' + typed : '') + '.';
+      else text = 'Re' + ref + ': ' + typed;
+      if (it.worker) {
+        const s = await _niSend(it.worker, text, it.key, action);
+        // A plain send returns on durable local acceptance (the outbox owns
+        // delivery and its failures), so say "queued", never "delivered".
+        if (s.ok) done.push(s.deduped ? 'already sent to ' + it.worker : (s.queued ? 'message queued for ' + it.worker : 'sent to ' + it.worker));
+        else errs.push('send to ' + it.worker + ': ' + s.error);
+      }
+      if (it.card) {
+        const verb = { approve: 'Approved', approve_always: 'Approved (standing rule)', decline: 'Declined', reply: 'Owner reply' }[action];
+        const note = '[' + stamp + '] ' + verb + ' by owner in needs-input triage' + (action === 'reply' || (action === 'decline' && typed) ? ': ' + typed : '.');
+        const marker = '#triage-' + _niHash(it.key + '|' + action + '|' + typed);
+        const c = await _niCard(it.card, note, marker, true);
+        if (c.ok) done.push(c.already ? it.card + ' already recorded' : it.card + ' ' + (c.status === 'todo' ? 'moved to todo' : 'noted'));
+        else errs.push(c.error);
+      }
+    }
+    if (rule && !errs.length) {
+      const r = await fetch(API + '/api/approvals/standing', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ title: 'Triage' + ref + ': ' + _niClip(it.question, 80), allowed: rule.allowed, category: rule.category,
+          scope: 'worker:' + it.worker, source: 'needs-input triage' + ref, granted_by: 'owner' }) });
+      const d = await _niJson(r);
+      if (r.ok) done.push('standing rule ' + (d.id || 'saved'));
+      else errs.push('standing approval: ' + _niErr(d, r));
+    }
+  } catch (e) {
+    errs.push(String(e && e.message || e));
+  } finally {
+    _niBusy = false;
+  }
+  const outcome = errs.length ? (done.length ? 'partial' : 'refused') : 'ok';
+  _niLog(action, it, outcome, (done.concat(errs)).join('; '));
+  if (errs.length) {
+    // Stay on the item: a retry is safe (the send is deduped by msg_id and the
+    // card note by its marker), and advancing would bury the refusal.
+    showToast((done.length ? done.join(', ') + '. ' : '') + 'Refused: ' + errs.join(' | '));
+    _niRender();
+    return;
+  }
+  const label = { approve: 'Approved', approve_always: 'Approved and saved rule', decline: 'Declined', reply: 'Replied' }[action];
+  showToast(label + ': ' + done.join(', '));
+  _niDone(it);
+}
+
+async function _niSnooze(minutes) {
+  if (_niBusy) return;
+  const { item: it } = _niCurrent();
+  if (!it) return;
+  let until;
+  if (minutes === 'tomorrow') { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); until = d.getTime() / 1000; }
+  else until = Date.now() / 1000 + minutes * 60;
+  _niBusy = true;
+  try {
+    const r = await fetch(API + '/api/needs-input/snooze', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ key: it.key, until }) });
+    const d = await _niJson(r);
+    _niBusy = false;
+    if (!r.ok) { showToast('Snooze refused: ' + _niErr(d, r)); _niRender(); return; }
+    _niServerSnoozed.add(it.key);
+    if (_niQueue) _niQueue = _niQueue.filter(x => x.key !== it.key);
+    showToast('Snoozed ' + (it.card || it.worker || 'item') + ' until ' + new Date(until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }));
+    _niDone(it);
+  } catch (e) { _niBusy = false; showToast('Snooze failed: ' + e); _niRender(); }
+}
+
+function _niOpenTarget() {
+  const { item: it } = _niCurrent();
+  if (!it) return;
+  _niLog('open', it, 'ok', '');
+  closeNeedsInput();
+  if (it.kind === 'email') { document.getElementById('email-approvals-banner')?.scrollIntoView({ behavior: 'smooth' }); return; }
+  if (it.worker && sessions.some(s => s.name === it.worker)) openPeek(it.worker);
+  else if (it.card) openBoardDetail(it.card);
 }
 // Tooltip for a waiting badge: the stuck composer text, when that is the reason.
 function _waitingTitle(s) {

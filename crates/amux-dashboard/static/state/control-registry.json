@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2262,
+  "n_considered": 2288,
   "command_handlers": {
     "_applyEmbedView": {
       "kind": "command._applyEmbedView",
@@ -1570,6 +1570,54 @@
     },
     "_mutateQueue": {
       "kind": "command._mutateQueue",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niAct": {
+      "kind": "command._niAct",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niCard": {
+      "kind": "command._niCard",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niChip": {
+      "kind": "command._niChip",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niEmail": {
+      "kind": "command._niEmail",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niLog": {
+      "kind": "command._niLog",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niOpenTarget": {
+      "kind": "command._niOpenTarget",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niSend": {
+      "kind": "command._niSend",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niSnooze": {
+      "kind": "command._niSnooze",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
@@ -3586,12 +3634,6 @@
     },
     "openFilePreview": {
       "kind": "command.openFilePreview",
-      "feedback_required": true,
-      "target": "control-or-request",
-      "queue_policy": "transport-declared"
-    },
-    "openFirstNeedsInput": {
-      "kind": "command.openFirstNeedsInput",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

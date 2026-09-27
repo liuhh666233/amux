@@ -7559,3 +7559,45 @@ body.light .status-badge.needs-input { color:#bc4c00; border-color:rgba(188,76,0
 .header-row .btn-needs-input { color:#f0883e; border:1px solid rgba(240,136,62,0.6); background:rgba(240,136,62,0.14); }
 .header-row .btn-needs-input:hover, .header-row .btn-needs-input:active { background:rgba(240,136,62,0.26); }
 body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,76,0,0.5); background:rgba(188,76,0,0.1); }
+
+/* ── Needs-input triage sheet (AMUX-5286) ────────────────────────────────────
+   One item at a time. Full screen on phones with the actions in the thumb
+   zone at the bottom; a centered modal on desktop. Every control is 44px. */
+.ni-overlay .ni-modal { max-width:620px; max-height:min(88dvh, 760px); }
+.ni-head { display:flex; align-items:baseline; gap:10px; min-width:0; }
+.ni-counter { color:var(--dim); font-size:0.85rem; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.ni-nav { display:flex; align-items:center; gap:6px; }
+.ni-nav .btn { min-width:44px; min-height:44px; padding:0 10px; font-size:1.3rem; line-height:1; }
+.ni-nav .modal-close { min-height:44px; }
+.ni-body { display:flex; flex-direction:column; gap:12px; flex:1; min-height:0; touch-action:pan-y; }
+.ni-meta { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:0.8rem; }
+.ni-meta > span { padding:3px 8px; border-radius:999px; border:1px solid var(--border); color:var(--dim); }
+.ni-meta .ni-worker { color:var(--text); font-weight:600; }
+.ni-meta .ni-card { font-family:var(--mono, ui-monospace, monospace); }
+.ni-meta .ni-cat { color:#f0883e; border-color:rgba(240,136,62,0.6); background:rgba(240,136,62,0.12); font-weight:600; }
+.ni-question { font-size:1.22rem; line-height:1.4; font-weight:600; color:var(--text); margin:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.ni-unblocks, .ni-email { font-size:0.9rem; line-height:1.45; color:var(--text); overflow-wrap:anywhere; }
+.ni-email { display:grid; gap:4px; }
+.ni-label { color:var(--dim); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em; margin-right:4px; }
+.ni-context summary { cursor:pointer; color:var(--dim); font-size:0.85rem; min-height:44px; display:flex; align-items:center; }
+.ni-context pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:0.8rem; line-height:1.45; max-height:30dvh; overflow:auto; margin:0; padding:8px 10px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-control); }
+.ni-panel { display:flex; flex-direction:column; gap:8px; }
+.ni-panel textarea.input { font-size:16px; min-height:88px; resize:vertical; }
+.ni-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.ni-chip { min-height:44px; }
+.ni-footer { display:flex; flex-direction:column; gap:8px; padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+.ni-actions { display:flex; gap:8px; }
+.ni-actions .btn { flex:1; min-height:44px; min-width:0; padding:0 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ni-actions:first-child .btn { min-height:52px; font-size:1rem; font-weight:600; }
+.ni-approve { background:var(--green, #2ea043) !important; border-color:var(--green, #2ea043) !important; color:#fff !important; }
+.ni-secondary .btn { font-size:0.85rem; }
+.ni-wide { width:100%; min-height:52px; }
+.ni-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; flex:1; padding:40px 0; color:var(--dim); font-size:1.1rem; }
+.ni-empty-mark { font-size:2.4rem; color:var(--green, #2ea043); }
+.ni-actions .btn:disabled { opacity:0.45; }
+@media (max-width: 600px) {
+  .ni-overlay.modal-overlay { padding:0; align-items:flex-start; background:var(--card); }
+  .ni-overlay .ni-modal { max-width:none; max-height:none; height:var(--dialog-viewport-height, 100dvh); border-radius:0; border:none; padding-top:env(safe-area-inset-top); box-sizing:border-box; }
+  .ni-secondary { flex-wrap:wrap; }
+  .ni-secondary .btn { flex:1 1 calc(50% - 4px); }
+}

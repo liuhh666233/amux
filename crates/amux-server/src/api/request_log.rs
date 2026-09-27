@@ -2647,6 +2647,19 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/approvals/standing/{id}",
         methods: &["GET", "PATCH", "DELETE"],
     },
+    // AMUX-5286 needs-input triage queue.
+    RouteEntry {
+        path: "/api/needs-input",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/needs-input/snooze",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/needs-input/log",
+        methods: &["POST"],
+    },
     RouteEntry {
         path: "/api/connectors",
         methods: &["GET", "POST"],
