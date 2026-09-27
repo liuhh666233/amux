@@ -22,6 +22,11 @@
   /* Terminal output always dark regardless of theme — ANSI colors need dark bg */
   body.light .overlay-body {
     background: #1c2128 !important; color: #cdd9e5 !important;
+    /* The terminal is dark in both themes, so it keeps the dark palette too.
+       Without this, path links resolved to light-mode #0550ae: dark blue on a
+       dark terminal (peek survey, 2026-09-27). */
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --border: #30363d;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --cyan: #39d2c0;
   }
   body.light .peek-copy-btn,
   body.light .peek-agent-nav button {
@@ -1176,9 +1181,14 @@
   .overlay-body .peek-box .pemoji { display: inline-block; width: 2ch; text-align: center; overflow: hidden; }
   /* Collapsible tool-call blocks in peek */
   .ptc { margin: 2px 0; }
-  .ptc-head { cursor: pointer; display: flex; align-items: baseline; gap: 0; user-select: none; }
+  /* A block, never flex (Ethan, 2026-09-27, screenshot of "Bash" wrapped one
+     letter per line): flex made every color span and linked path in the
+     header its own column. The caret hangs in the left gutter and wrapped
+     command text lines up under the tool name, as in the terminal. */
+  .ptc-head { cursor: pointer; display: block; position: relative; user-select: none;
+    padding-left: calc(0.84em + 2ch); text-indent: -2ch; }
   .ptc-head:hover { background: rgba(255,255,255,0.04); border-radius: 4px; }
-  .ptc-caret { display: inline-block; width: 1.2em; flex-shrink: 0; text-align: center; font-size: 0.7em; color: var(--dim); transition: transform 0.15s; }
+  .ptc-caret { position: absolute; left: 0; top: 0.35em; width: 1.2em; text-indent: 0; text-align: center; font-size: 0.7em; color: var(--dim); transition: transform 0.15s; }
   .ptc-caret::before { content: '\25BE'; }
   .ptc.collapsed .ptc-caret { transform: rotate(-90deg); }
   .ptc-body { overflow: hidden; }
