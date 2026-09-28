@@ -5573,27 +5573,37 @@ EOF
 
 cmd_order() {
   local amount="" merchant="" purpose="" session="${AMUX_SESSION:-}" item_name=""
+  local url="" quantity="1" auto_submit="" profile="default"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --amount)   amount="${2:-}"; shift 2 ;;
-      --merchant) merchant="${2:-}"; shift 2 ;;
-      --purpose)  purpose="${2:-}"; shift 2 ;;
-      --session)  session="${2:-}"; shift 2 ;;
-      --item)     item_name="${2:-}"; shift 2 ;;
+      --amount)      amount="${2:-}"; shift 2 ;;
+      --merchant)    merchant="${2:-}"; shift 2 ;;
+      --purpose)     purpose="${2:-}"; shift 2 ;;
+      --session)     session="${2:-}"; shift 2 ;;
+      --item)        item_name="${2:-}"; shift 2 ;;
+      --url)         url="${2:-}"; shift 2 ;;
+      --quantity)    quantity="${2:-}"; shift 2 ;;
+      --auto-submit) auto_submit="true"; shift ;;
+      --profile)     profile="${2:-}"; shift 2 ;;
       --help|-h)
         cat <<'HELP'
-Usage: amux order --amount <USD> --merchant <name> --purpose <why> [--item <name>]
+Usage: amux order --amount <USD> --merchant <name> --purpose <why> [--url <page>]
 
-Tell the harness to complete the order on your current browser page.
-The harness fills the form from its own store; no credential ever enters
-your session. Charges within the owner's pre-set limit proceed; larger
-ones pause for dashboard approval.
+Tell the harness to complete an order. When --url is provided the harness
+drives the entire flow: it starts a headless browser, navigates to the page,
+walks through the checkout (set quantity, add to cart, proceed to checkout),
+fills all fields from its own store, and optionally submits. No credential
+ever enters your session.
 
-  --amount    charge in USD (required)
-  --merchant  who you are paying (required)
-  --purpose   what for (required)
-  --item      vault item name filter (optional; uses the first active item)
-  --session   override session (default: $AMUX_SESSION)
+  --amount       charge in USD (required)
+  --merchant     who you are paying (required)
+  --purpose      what for (required)
+  --url          product/event page URL (harness drives full checkout)
+  --quantity     ticket/item quantity (default: 1)
+  --auto-submit  click the submit/place-order button after filling
+  --item         vault item name filter (optional; uses the first active item)
+  --profile      Chrome profile to use (default: default)
+  --session      override session (default: $AMUX_SESSION)
 HELP
         return 0
         ;;
@@ -5604,16 +5614,24 @@ HELP
   [[ -n "$merchant" ]] || die "amux order: --merchant is required"
   [[ -n "$purpose" ]]  || die "amux order: --purpose is required"
   local body result
-  body=$(A="$amount" M="$merchant" P="$purpose" S="$session" I="$item_name" python3 -c '
+  body=$(A="$amount" M="$merchant" P="$purpose" S="$session" I="$item_name" \
+    U="$url" Q="$quantity" AS="$auto_submit" PR="$profile" python3 -c '
 import json, os
-print(json.dumps({
+d = {
   "amount_usd": float(os.environ["A"]),
   "currency": "USD",
   "merchant": os.environ["M"],
   "purpose": os.environ["P"],
   "session": os.environ["S"],
   "item_name": os.environ["I"],
-}))' 2>/dev/null) || die "amux order: bad --amount (must be a number)"
+  "quantity": int(os.environ["Q"]),
+  "profile": os.environ["PR"],
+}
+if os.environ["U"]:
+  d["url"] = os.environ["U"]
+if os.environ["AS"]:
+  d["auto_submit"] = True
+print(json.dumps(d))' 2>/dev/null) || die "amux order: bad --amount (must be a number)"
   result=$(_curl -sk -X POST -H 'Content-Type: application/json' \
     -H "X-Amux-Session: ${AMUX_SESSION:-}" \
     -d "$body" "$AMUX_API/api/browser/complete-order")
@@ -5622,6 +5640,9 @@ print(json.dumps({
   if [[ "$ok" == "1" ]]; then
     filled=$(echo "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(", ".join(d.get("filled",[])))' 2>/dev/null || echo "?")
     echo "order form filled by the harness (fields: $filled)"
+    local submitted
+    submitted=$(echo "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d.get("submit",{}); print("yes" if s.get("submitted") else "no")' 2>/dev/null || echo "?")
+    [[ "$submitted" == "yes" ]] && echo "order submitted"
   else
     local emsg
     emsg=$(echo "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("error","unknown error"))' 2>/dev/null || echo "$result")
