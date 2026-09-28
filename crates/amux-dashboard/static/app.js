@@ -5754,6 +5754,7 @@ let _niAuto = null;          // GET /api/needs-input/auto (fleet default view)
 let _niAutoView = false;
 const _NI_AUTO_ROWS = [
   { f: 'enabled', label: 'Auto-approve new asks', note: 'Approves asks that arrive from now on, exactly as tapping Approve would: the worker is told "Approved. Proceed." and the card leaves your queue. Asks already waiting stay for you.' },
+  { f: 'send_back', label: 'Send key and sign-in asks back', note: 'A worker asking you to mint a key, rotate a secret, grant access or sign in is told to do it itself through amux browser, CDP into your Chrome, or CUA. It can ask you again once, saying which step failed. Spend, outbound and production data still wait for you.' },
   { f: 'other', label: 'Judgment asks', note: 'Which option to take, whether to go ahead, design calls.' },
   { f: 'money', label: 'Spend', note: 'Only asks that name a dollar figure at or under the cap below. No figure, or over the cap, waits for you.' },
   { f: 'money_cap_usd', label: 'Spend cap per ask (USD)', note: 'The most one auto-approved ask may name, monthly prices included.' },
@@ -5810,7 +5811,7 @@ function _niAutoHtml(d, level, name) {
 }
 function _niAutoListHtml(d) {
   const rec = d.recent || [];
-  const label = { approved: 'Approved', refused: 'Refused, still waiting for you', pending: 'In flight' };
+  const label = { approved: 'Approved', sent_back: 'Sent back to the worker', refused: 'Refused, still waiting for you', pending: 'In flight' };
   return '<div class="ni-auto-h">Auto-approved, last 7 days (' + rec.length + ')</div>'
     + (rec.length ? '<div class="ni-auto-list">' + rec.map(e => '<div class="ni-auto-item">'
         + '<span class="ni-auto-out ' + esc(e.outcome) + '">' + esc(label[e.outcome] || e.outcome) + '</span> · '
@@ -13257,7 +13258,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1159';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1160';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.

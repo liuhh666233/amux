@@ -59,7 +59,7 @@ fn defaults_approve_judgment_and_small_spend_only() {
     );
     assert_eq!(
         p.summary("all workers"),
-        "Auto-approve is ON for all workers: judgment asks and spend up to $50."
+        "Auto-approve is ON for all workers: judgment asks and spend up to $50. Key, sign-in and grant asks go back to the worker to do itself."
     );
 
     let all = Policy { prod_data: true, outbound: true, ..Policy::default() };
@@ -76,7 +76,7 @@ fn defaults_approve_judgment_and_small_spend_only() {
 
 #[test]
 fn credential_and_access_are_never_approved() {
-    let all = Policy { prod_data: true, outbound: true, money_cap_usd: 1e9, ..Policy::default() };
+    let all = Policy { prod_data: true, outbound: true, money_cap_usd: 1e9, send_back: false, ..Policy::default() };
     assert!(matches!(decide(&all, &item("card", "other", "credential", "Mint a key")), Decision::Never(_)));
     assert!(matches!(decide(&all, &item("card", "other", "access", "Add me to the GCP project")), Decision::Never(_)));
     // Filed without the ask type, recognised by the text.
@@ -132,7 +132,10 @@ struct Mock {
 impl Actions for Arc<Mock> {
     async fn send(&self, _: &AppState, worker: &str, text: &str, _: &str) -> Result<String, String> {
         if worker == "lane-refuse" {
-            return Err("target is paused".into());
+            return Err("send to lane-refuse: steering queue refused".into());
+        }
+        if worker == "lane-paused" {
+            return Err("send to lane-paused: target is paused: amux automation is not queued for a paused worker".into());
         }
         self.sends.lock().unwrap().push((worker.into(), text.into()));
         Ok(format!("message queued for {worker}"))
@@ -219,6 +222,7 @@ async fn job_approves_new_items_once_and_leaves_the_rest() {
     seed(&st, "NEW-SNOOZE", "lane-a", "decision", "Rename the flag?", now);
     seed(&st, "NEW-OFFLANE", "lane-off", "decision", "Proceed with the refactor?", now);
     seed(&st, "NEW-REFUSE", "lane-refuse", "decision", "Proceed with the rollout?", now);
+    seed(&st, "NEW-PAUSED", "lane-paused", "decision", "Proceed with the cleanup?", now);
     std::fs::write(home.join("sessions/lane-off.env"), "AMUX_NEEDS_INPUT_AUTO=0\n").unwrap();
     std::fs::write(
         home.join("email-approvals/apr_00000000000000bb.json"),
@@ -240,30 +244,35 @@ async fn job_approves_new_items_once_and_leaves_the_rest() {
     let rep = tick_with(&mock, &st, &home, now + 60.0).await;
     let mut approved = rep.approved.clone();
     approved.sort();
-    assert_eq!(approved, ["NEW-16", "NEW-OTHER"]);
+    // A paused lane gets the answer on its card (RH-131, 2026-09-27).
+    assert_eq!(approved, ["NEW-16", "NEW-OTHER", "NEW-PAUSED"]);
     assert_eq!(rep.refused, ["NEW-REFUSE"]);
+    // The credential ask goes back to its worker instead of waiting.
+    assert_eq!(rep.sent_back, ["NEW-CRED"]);
     let sends = mock.sends.lock().unwrap().clone();
-    assert_eq!(sends.len(), 2, "{sends:?}");
-    assert!(sends.iter().all(|(w, t)| w == "lane-a" && t.starts_with("Approved (NEW-") && t.contains(". Proceed.")));
+    assert_eq!(sends.len(), 3, "{sends:?}");
+    assert_eq!(sends.iter().filter(|(w, t)| w == "lane-a" && t.starts_with("Approved (NEW-") && t.contains(". Proceed.")).count(), 2);
+    assert!(sends.iter().any(|(w, t)| w == "lane-a" && t.starts_with("Sent back (NEW-CRED)")));
     assert!(mock.emails.lock().unwrap().is_empty(), "outbound is off by default");
     assert_eq!(mock.fyis.lock().unwrap().len(), 1, "one FYI per batch");
 
     // The approve moved the card out of needsyou and noted it, through the
     // real board PATCH.
-    for id in ["NEW-OTHER", "NEW-16"] {
+    for id in ["NEW-OTHER", "NEW-16", "NEW-PAUSED", "NEW-CRED"] {
         let c = card(&st, id);
         assert_eq!(c.status, "todo", "{id}");
-        assert!(c.desc.contains("Approved automatically by owner policy"), "{id}: {}", c.desc);
+        assert!(c.desc.contains("Approved automatically by owner policy") || c.desc.contains("Sent back to lane-a"), "{id}: {}", c.desc);
     }
     // Everything else is untouched and still waiting on the owner.
-    for id in ["OLD-1", "NEW-425", "NEW-NOFIG", "NEW-CRED", "NEW-PROD", "NEW-SNOOZE", "NEW-OFFLANE", "NEW-REFUSE"] {
+    for id in ["OLD-1", "NEW-425", "NEW-NOFIG", "NEW-PROD", "NEW-SNOOZE", "NEW-OFFLANE", "NEW-REFUSE"] {
         assert_eq!(card(&st, id).status, "needsyou", "{id}");
     }
     let o = outcomes(&st);
     assert_eq!(o["OLD-1"], "baseline");
     assert_eq!(o["NEW-425"], "skipped_cap");
     assert_eq!(o["NEW-NOFIG"], "skipped_cap");
-    assert_eq!(o["NEW-CRED"], "never");
+    assert_eq!(o["NEW-CRED"], "sent_back");
+    assert_eq!(o["NEW-PAUSED"], "approved");
     assert_eq!(o["NEW-PROD"], "skipped_category");
     assert_eq!(o["NEW-SNOOZE"], "snoozed");
     assert_eq!(o["NEW-OFFLANE"], "off");
@@ -272,15 +281,16 @@ async fn job_approves_new_items_once_and_leaves_the_rest() {
 
     // Dedupe: the next tick does nothing, including no retry of the refusal.
     let rep = tick_with(&mock, &st, &home, now + 120.0).await;
-    assert!(rep.approved.is_empty() && rep.refused.is_empty(), "{rep:?}");
-    assert_eq!(mock.sends.lock().unwrap().len(), 2);
+    assert!(rep.approved.is_empty() && rep.refused.is_empty() && rep.sent_back.is_empty(), "{rep:?}");
+    assert_eq!(mock.sends.lock().unwrap().len(), 3);
     assert_eq!(mock.fyis.lock().unwrap().len(), 1);
 
     // The GET view lists approved and refused only, newest first.
     let led = load_ledger(&st.store.read().unwrap()).unwrap();
     let v = view(&home, "", &led, &[], now + 120.0);
-    assert_eq!(v["recent_count"], 3);
-    assert_eq!(v["summary"], "Auto-approve is ON for all workers: judgment asks and spend up to $50.");
+    // Three approvals (one to a paused lane), one send-back, one refusal.
+    assert_eq!(v["recent_count"], 5);
+    assert_eq!(v["summary"], "Auto-approve is ON for all workers: judgment asks and spend up to $50. Key, sign-in and grant asks go back to the worker to do itself.");
 
     // The owner's explicit sweep, with outbound switched on globally: the
     // baseline item and the held email are re-evaluated; the credential ask,
@@ -292,7 +302,7 @@ async fn job_approves_new_items_once_and_leaves_the_rest() {
     approved.sort();
     assert_eq!(approved, ["OLD-1", "apr_00000000000000bb"]);
     assert_eq!(mock.emails.lock().unwrap().as_slice(), ["apr_00000000000000bb"]);
-    assert_eq!(card(&st, "NEW-CRED").status, "needsyou");
+    assert_eq!(card(&st, "NEW-CRED").status, "todo", "sent back, not re-evaluated");
     assert_eq!(card(&st, "NEW-SNOOZE").status, "needsyou");
     assert_eq!(card(&st, "NEW-REFUSE").status, "needsyou");
     assert_eq!(card(&st, "NEW-425").status, "needsyou");
@@ -308,7 +318,8 @@ async fn job_approves_new_items_once_and_leaves_the_rest() {
 #[test]
 fn owner_action_and_public_surface_are_never_auto_approved_but_mentions_are() {
     let all = Policy { enabled: true, other: true, money: true, money_cap_usd: 50.0, prod_data: true, outbound: true, ..Default::default() };
-    let never = |at: &str, q: &str| matches!(decide(&all, &item("card", "other", at, q)), Decision::Never(_));
+    // Not approved: left for the owner, or (send_back) returned to the worker.
+    let never = |at: &str, q: &str| matches!(decide(&all, &item("card", "other", at, q)), Decision::Never(_) | Decision::SendBack(_));
     // Live 2026-09-27: asks the OWNER must act on.
     assert!(never("decision", "Will you run `! ~/.amux/seed-standing-approvals.sh` once to record the two standing approvals?"));
     assert!(never("credential", "Can you mint a new Ethan Personal org API key in Studio?"));
@@ -327,4 +338,75 @@ fn the_recorders_unblocks_boilerplate_does_not_make_an_ask_a_credential() {
     let mut it = item("card", "other", "credential", "Want me to do that pass, or would you rather look at the categories yourself first?");
     it["unblocks"] = serde_json::json!("ethan completes the sign-in, grant or credential step named in the question and notes it on this card.");
     assert_eq!(decide(&all, &it), Decision::Approve);
+}
+
+#[test]
+fn owner_action_asks_go_back_to_the_worker_unless_the_boundary_holds_them() {
+    let p = Policy::default();
+    assert!(p.send_back, "on by default (Ethan, 2026-09-27 20:23)");
+    let d = |cat: &str, at: &str, q: &str| decide(&p, &item("card", cat, at, q));
+    // Live specimens, 2026-09-27: the worker can reach these down the ladder.
+    assert!(matches!(d("credential", "credential", "Can you mint a new Ethan Personal org API key in Studio (with admin if possible) and store it as GTM_MIXPEEK_API_KEY?"), Decision::SendBack(_)));
+    assert!(matches!(d("credential", "access", "Can you rotate NPM_TOKEN in the mixpeek org's GitHub secrets?"), Decision::SendBack(_)));
+    assert!(matches!(d("other", "access", "Can you run `! gcloud auth login info@mixpeek.com` in the gs-5-one-click session?"), Decision::SendBack(_)));
+    // The boundary keeps these with the owner: spend, outside, prod data,
+    // his own approvals, and the repo's public-surface rule.
+    assert!(matches!(d("money", "credential", "Anthropic API credit balance is exhausted; can you top it up?"), Decision::Never(_)));
+    assert!(matches!(d("other", "decision", "Will you run `! ~/.amux/seed-standing-approvals.sh` once to record the two standing approvals?"), Decision::Never(_)));
+    assert!(matches!(d("other", "decision", "Should POST /v1/organizations/billing/estimate be reachable without an API key?"), Decision::Never("public_surface")));
+    let off = Policy { send_back: false, ..Policy::default() };
+    assert!(matches!(decide(&off, &item("card", "credential", "credential", "Can you mint a key?")), Decision::Never(_)));
+    let t = send_back_text("MM-83", "Can you mint a key?");
+    assert!(t.contains("CDP") && t.contains("amux computer") && t.contains("revoke the old") && !t.contains('\u{2014}'));
+}
+
+#[tokio::test]
+async fn send_back_once_then_the_reask_is_the_owners_and_stale_pending_is_retried() {
+    let st = state();
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().to_path_buf();
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    std::fs::create_dir_all(home.join("email-approvals")).unwrap();
+    let now = now_f64();
+    let mock = Arc::new(Mock::default());
+    tick_with(&mock, &st, &home, now).await; // empty baseline
+
+    seed(&st, "KEY-1", "lane-a", "credential", "Can you mint a new org API key in Studio?", now);
+    let rep = tick_with(&mock, &st, &home, now + 60.0).await;
+    assert_eq!(rep.sent_back, ["KEY-1"]);
+    let c = card(&st, "KEY-1");
+    assert_eq!(c.status, "todo");
+    assert!(c.desc.contains("Sent back to lane-a"), "{}", c.desc);
+    let sends = mock.sends.lock().unwrap().clone();
+    assert!(sends.iter().any(|(w, t)| w == "lane-a" && t.starts_with("Sent back (KEY-1)")), "{sends:?}");
+    assert!(mock.fyis.lock().unwrap().iter().any(|f| f.contains("Sent 1 back")));
+
+    // The worker tried the ladder and re-asked: it stays with the owner.
+    st.store
+        .write(move |conn| {
+            conn.execute(
+                "UPDATE issues SET status='needsyou', ask_question='Studio sign-in failed on all three rungs (browser: no profile, CDP: Chrome closed, CUA: no Studio session). Can you mint the key?' WHERE id='KEY-1'",
+                [],
+            )?;
+            Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+        })
+        .unwrap();
+    let rep = tick_with(&mock, &st, &home, now + 120.0).await;
+    assert!(rep.sent_back.is_empty());
+    assert_eq!(card(&st, "KEY-1").status, "needsyou");
+    assert_eq!(outcomes(&st)["KEY-1"], "never");
+
+    // A pending claim from a tick that never finished is retried later.
+    seed(&st, "STUCK-1", "lane-a", "decision", "Option A or B? I recommend A.", now + 130.0);
+    let dk = {
+        let q = needs_input::build(&st.store.read().unwrap(), &home, now + 130.0).unwrap();
+        dedupe_key(q.items.iter().find(|i| i["card"] == "STUCK-1").unwrap())
+    };
+    let row = Entry { dk: dk.clone(), key: "card:STUCK-1".into(), card: "STUCK-1".into(), outcome: "pending".into(), at: now + 130.0, ..Default::default() };
+    append(&st, vec![row], HashSet::new(), now + 130.0).await;
+    let rep = tick_with(&mock, &st, &home, now + 140.0).await;
+    assert!(rep.approved.is_empty(), "a fresh claim is still in flight");
+    let rep = tick_with(&mock, &st, &home, now + 130.0 + PENDING_STALE_S + 1.0).await;
+    assert_eq!(rep.approved, ["STUCK-1"]);
+    assert_eq!(card(&st, "STUCK-1").status, "todo");
 }

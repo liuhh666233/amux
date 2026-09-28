@@ -66,10 +66,16 @@ pub const KEEP_S: f64 = 30.0 * 86_400.0;
 /// Named in the card note, the send-audit ledger and the board log.
 pub const APPROVER: &str = "owner policy (needs-input auto-approve)";
 pub const DEFAULT_CAP_USD: f64 = 50.0;
+/// A `pending` row older than this was claimed by a tick that never finished
+/// (a restart mid-batch): it is re-evaluated under the current policy.
+/// Measured 2026-09-27: ten 18:52 claims sat pending for 90 minutes after a
+/// deploy restarted the server mid-sweep, and a pending row is `seen`.
+pub const PENDING_STALE_S: f64 = 15.0 * 60.0;
 
 /// (field, scoped env key, default). The field names are the API's.
-pub const FIELDS: [(&str, &str, &str); 6] = [
+pub const FIELDS: [(&str, &str, &str); 7] = [
     ("enabled", KILL_SWITCH, "1"),
+    ("send_back", "AMUX_NEEDS_INPUT_AUTO_SEND_BACK", "1"),
     ("other", "AMUX_NEEDS_INPUT_AUTO_OTHER", "1"),
     ("money", "AMUX_NEEDS_INPUT_AUTO_MONEY", "1"),
     ("money_cap_usd", "AMUX_NEEDS_INPUT_AUTO_MONEY_CAP", "50"),
@@ -99,6 +105,9 @@ pub struct Policy {
     pub money_cap_usd: f64,
     pub prod_data: bool,
     pub outbound: bool,
+    /// Return credential and owner-action asks to their worker with the
+    /// access ladder instead of leaving them for the owner.
+    pub send_back: bool,
     /// field -> where the value came from: `worker`, `group:<name>`,
     /// `global`, `server.env`, or `default`.
     pub sources: BTreeMap<String, String>,
@@ -168,6 +177,7 @@ impl Policy {
             money_cap_usd: cap,
             prod_data: b("prod_data"),
             outbound: b("outbound"),
+            send_back: b("send_back"),
             sources,
         }
     }
@@ -181,6 +191,7 @@ impl Policy {
             "money_cap_usd": {"value": self.money_cap_usd, "source": src("money_cap_usd")},
             "prod_data": {"value": self.prod_data, "source": src("prod_data")},
             "outbound": {"value": self.outbound, "source": src("outbound")},
+            "send_back": {"value": self.send_back, "source": src("send_back")},
         })
     }
 
@@ -209,7 +220,12 @@ impl Policy {
             1 => parts[0].clone(),
             n => format!("{} and {}", parts[..n - 1].join(", "), parts[n - 1]),
         };
-        format!("Auto-approve is ON for {who}: {list}.")
+        let back = if self.send_back {
+            " Key, sign-in and grant asks go back to the worker to do itself."
+        } else {
+            ""
+        };
+        format!("Auto-approve is ON for {who}: {list}.{back}")
     }
 }
 
@@ -450,6 +466,22 @@ pub enum Decision {
     SkipCategory(String),
     /// Money: over the cap, or no figure to compare (None).
     SkipCap(Option<f64>),
+    /// Return it to the worker: the work is the worker's to do through the
+    /// access ladder (Ethan, 2026-09-27 20:23: "63 is unacceptable it needs
+    /// to push the workers to do them on their own").
+    SendBack(&'static str),
+}
+
+/// Can an owner-action ask go back to its worker? Not when it spends,
+/// reaches outside, or touches production data (those are the owner's by
+/// the standing boundary), and not when it asks the owner to record his own
+/// approval (AMUX-5276: a worker must never write an owner-only approval).
+pub fn can_send_back(item: &Value) -> bool {
+    if matches!(category_of(item).as_str(), "money" | "outbound" | "prod_data") {
+        return false;
+    }
+    let t = ask_text(item).to_ascii_lowercase();
+    !["standing approval", "standing-approval", "seed-standing"].iter().any(|w| t.contains(w))
 }
 
 /// The category an item is approved under. An email approval is outbound.
@@ -465,6 +497,9 @@ pub fn decide(policy: &Policy, item: &Value) -> Decision {
         return Decision::Off;
     }
     if let Some(why) = never_reason(item) {
+        if policy.send_back && why != "public_surface" && can_send_back(item) {
+            return Decision::SendBack(why);
+        }
         return Decision::Never(why);
     }
     let cat = category_of(item);
@@ -518,7 +553,7 @@ const REEVALUABLE: [&str; 6] = [
     "skipped_cap",
 ];
 /// Outcomes shown in the Auto-approved list.
-const SHOWN: [&str; 3] = ["approved", "refused", "pending"];
+const SHOWN: [&str; 4] = ["approved", "sent_back", "refused", "pending"];
 
 fn read_pref(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row("SELECT value FROM prefs WHERE key = ?1", [key], |r| r.get(0))
@@ -560,6 +595,7 @@ async fn append(state: &AppState, rows: Vec<Entry>, live: HashSet<String>, now: 
         .store
         .write_async(move |conn| {
             let mut led = load_ledger(conn).unwrap_or_default();
+            led.retain(|e| !stale_pending(e, now));
             let have: HashSet<String> = led.iter().map(|e| e.dk.clone()).collect();
             let mut added = HashSet::new();
             for r in rows {
@@ -577,6 +613,10 @@ async fn append(state: &AppState, rows: Vec<Entry>, live: HashSet<String>, now: 
         .await;
     let out = written.lock().unwrap().clone();
     out
+}
+
+fn stale_pending(e: &Entry, now: f64) -> bool {
+    e.outcome == "pending" && now - e.at > PENDING_STALE_S
 }
 
 async fn settle(state: &AppState, dk: String, outcome: &'static str, detail: String) {
@@ -785,8 +825,10 @@ async fn approve_item(acts: &dyn Actions, state: &AppState, item: &Value, dk: &s
             "Approved{r}: {q}. Proceed. (Approved automatically under the owner's needs-input policy.)"
         );
         // A refused send leaves the card alone: moving it with nobody told
-        // would clear the owner's queue while the worker still waits.
-        done.push(acts.send(state, worker, &text, &format!("ni-auto-{}", hash(dk))).await?);
+        // would clear the owner's queue while the worker still waits. A
+        // PAUSED lane is the exception: it is not waiting, and the answer on
+        // its card is what it reads when resumed (RH-131, BR-78, MS-1234).
+        done.push(send_or_paused(acts, state, worker, &text, &format!("ni-auto-{}", hash(dk))).await?);
     }
     if !card.is_empty() {
         let stamp = chrono::Local::now().format("%b %d %H:%M");
@@ -803,6 +845,47 @@ async fn approve_item(acts: &dyn Actions, state: &AppState, item: &Value, dk: &s
     Ok(done.join("; "))
 }
 
+async fn send_or_paused(acts: &dyn Actions, state: &AppState, worker: &str, text: &str, id: &str) -> Result<String, String> {
+    match acts.send(state, worker, text, id).await {
+        Err(e) if e.contains("target is paused") => Ok(format!("{worker} is paused; answer recorded on the card for when it resumes")),
+        other => other,
+    }
+}
+
+/// What a sent-back worker is told. The ladder is the standing rule in
+/// ~/.claude/CLAUDE.md; the rotation and data clauses keep a send-back from
+/// becoming an unreviewed production change.
+pub fn send_back_text(card: &str, q: &str) -> String {
+    let r = if card.is_empty() { String::new() } else { format!(" ({card})") };
+    format!(
+        "Sent back{r}: \"{q}\". This is yours to do; Ethan's needs-input policy returns key, sign-in, grant \
+         and rotation asks to the worker. Reach it yourself down the ladder: 1) amux browser with a saved \
+         profile, 2) CDP into Ethan's Chrome (/chrome-cdp, his sign-ins are live), 3) CUA (`amux computer`). \
+         Mint keys in the UI you reach and store them where the ask says; never print a secret. Rotate by \
+         replacement: create the new one, move every consumer, verify, then revoke the old. Stop and re-file \
+         needsyou only if all three rungs fail, or the step spends money, reaches someone outside, or \
+         re-encrypts or migrates production data; say which rung failed and why. It will not be sent back twice."
+    )
+}
+
+/// Return one ask to its worker: tell it, then move the card to its queue.
+async fn send_back_item(acts: &dyn Actions, state: &AppState, item: &Value, dk: &str) -> Result<String, String> {
+    let card = item["card"].as_str().unwrap_or("");
+    let worker = item["worker"].as_str().unwrap_or("");
+    if worker.is_empty() || card.is_empty() {
+        return Err("no worker or card to send it back to".into());
+    }
+    let q = clip(item["question"].as_str().filter(|s| !s.trim().is_empty()).or(item["title"].as_str()).unwrap_or(""), 300);
+    let mut done = vec![send_or_paused(acts, state, worker, &send_back_text(card, &q), &format!("ni-back-{}", hash(dk))).await?];
+    let stamp = chrono::Local::now().format("%b %d %H:%M");
+    let note = format!(
+        "[{stamp}] Sent back to {worker} by owner policy (needs-input send-back): do it through the access \
+         ladder (amux browser, CDP, CUA); re-file needsyou only with the rung that failed."
+    );
+    done.push(acts.card(state, card, &note, &format!("#ni-back-{}", hash(dk))).await?);
+    Ok(done.join("; "))
+}
+
 // ---------------------------------------------------------------------------
 // The tick
 // ---------------------------------------------------------------------------
@@ -813,6 +896,7 @@ pub struct TickReport {
     pub considered: usize,
     pub baseline: usize,
     pub approved: Vec<String>,
+    pub sent_back: Vec<String>,
     pub refused: Vec<String>,
     pub skipped_cap: Vec<String>,
     pub skipped_category: Vec<String>,
@@ -881,7 +965,11 @@ pub async fn tick_with(acts: &dyn Actions, state: &AppState, home: &Path, now: f
             "needs-input auto-approve: first run recorded what is already waiting; none of it is approved");
         return rep;
     };
-    let seen: HashSet<String> = ledger.iter().map(|e| e.dk.clone()).collect();
+    let seen: HashSet<String> = ledger.iter().filter(|e| !stale_pending(e, now)).map(|e| e.dk.clone()).collect();
+    // Sent back once already: a re-ask (any question) on that card is the
+    // worker saying the ladder failed, so it stays with the owner.
+    let sent_back_keys: HashSet<String> =
+        ledger.iter().filter(|e| e.outcome == "sent_back").map(|e| e.key.clone()).collect();
 
     let mut skips = Vec::new();
     // Snoozed items are never touched: first seen snoozed means never
@@ -894,6 +982,7 @@ pub async fn tick_with(acts: &dyn Actions, state: &AppState, home: &Path, now: f
     }
     let mut policies: HashMap<String, Policy> = HashMap::new();
     let mut to_approve: Vec<(&Value, String)> = Vec::new();
+    let mut to_send_back: Vec<(&Value, String)> = Vec::new();
     for item in &queue.items {
         let dk = dedupe_key(item);
         if seen.contains(&dk) {
@@ -907,8 +996,18 @@ pub async fn tick_with(acts: &dyn Actions, state: &AppState, home: &Path, now: f
             .clone();
         let label = entry_for(item, &dk, "", String::new(), now).card;
         let label = if label.is_empty() { key.clone() } else { label };
-        match decide(&policy, item) {
+        let decision = match decide(&policy, item) {
+            Decision::SendBack(why) if sent_back_keys.contains(&key) => {
+                tracing::info!(verdict = "needs_input_auto_skipped_category", key = %key, worker = %worker,
+                    reason = "sent_back_once", ask = why,
+                    "needs-input auto: already sent back once; the re-ask stays with the owner");
+                Decision::Never("sent_back_once")
+            }
+            d => d,
+        };
+        match decision {
             Decision::Approve => to_approve.push((item, dk)),
+            Decision::SendBack(_) => to_send_back.push((item, dk)),
             Decision::Off => {
                 tracing::info!(verdict = "needs_input_auto_skipped_category", key = %key, worker = %worker,
                     reason = "policy_off", source = %policy.sources.get("enabled").cloned().unwrap_or_default(),
@@ -923,6 +1022,7 @@ pub async fn tick_with(acts: &dyn Actions, state: &AppState, home: &Path, now: f
                 let label_why = match why {
                     "owner_must_act" => "only you can do this (it asks you to act)",
                     "public_surface" => "a new endpoint or public surface: yours by the repo rule",
+                    "sent_back_once" => "sent back once already; the worker re-asked, so it is yours",
                     _ => "credential or access: only you can do it",
                 };
                 skips.push(entry_for(item, &dk, "never", label_why.into(), now));
@@ -951,7 +1051,7 @@ pub async fn tick_with(acts: &dyn Actions, state: &AppState, home: &Path, now: f
     // Claim every approval BEFORE sending anything: only rows this tick wrote
     // are acted on, so two ticks (or a restart mid-batch) cannot double-send.
     let mut rows = skips;
-    rows.extend(to_approve.iter().map(|(it, dk)| entry_for(it, dk, "pending", String::new(), now)));
+    rows.extend(to_approve.iter().chain(to_send_back.iter()).map(|(it, dk)| entry_for(it, dk, "pending", String::new(), now)));
     let written = if rows.is_empty() {
         HashSet::new()
     } else {
@@ -986,16 +1086,54 @@ pub async fn tick_with(acts: &dyn Actions, state: &AppState, home: &Path, now: f
             }
         }
     }
+    for (item, dk) in to_send_back {
+        if !written.contains(&dk) {
+            continue;
+        }
+        let e = entry_for(item, &dk, "", String::new(), now);
+        match send_back_item(acts, state, item, &dk).await {
+            Ok(detail) => {
+                tracing::info!(verdict = "needs_input_auto_sent_back", key = %e.key, card = %e.card,
+                    worker = %e.worker, detail = %detail,
+                    "needs-input ask returned to its worker with the access ladder");
+                settle(state, dk, "sent_back", detail).await;
+                rep.sent_back.push(e.card.clone());
+            }
+            Err(err) => {
+                tracing::warn!(verdict = "needs_input_auto_refused", key = %e.key, card = %e.card,
+                    worker = %e.worker, error = %err,
+                    "needs-input send-back refused; the item stays in the queue for the owner");
+                settle(state, dk, "refused", err).await;
+                rep.refused.push(e.card.clone());
+            }
+        }
+    }
+    let mut parts = Vec::new();
     if !fyi_lines.is_empty() {
         let n = fyi_lines.len();
-        let mut text = format!(
+        let mut t = format!(
             "Auto-approved {n} needs-input item{}: {}",
             if n == 1 { "" } else { "s" },
             fyi_lines.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
         );
         if n > 3 {
-            text.push_str(&format!("; and {} more", n - 3));
+            t.push_str(&format!("; and {} more", n - 3));
         }
+        parts.push(t);
+    }
+    if !rep.sent_back.is_empty() {
+        let n = rep.sent_back.len();
+        let mut t = format!(
+            "Sent {n} back to their workers to do themselves: {}",
+            rep.sent_back.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+        );
+        if n > 6 {
+            t.push_str(&format!(" and {} more", n - 6));
+        }
+        parts.push(t);
+    }
+    if !parts.is_empty() {
+        let text = parts.join(". ");
         acts.fyi(state, &text).await;
     }
     rep
@@ -1050,11 +1188,11 @@ fn view(home: &Path, worker: &str, ledger: &[Entry], waiting: &[Value], now: f64
         "resolved": p.to_json(),
         "summary": p.summary(&who),
         "keys": FIELDS.iter().map(|(f, k, _)| (f.to_string(), json!(k))).collect::<serde_json::Map<_, _>>(),
-        "defaults": {"enabled": defaults.enabled, "other": defaults.other, "money": defaults.money,
+        "defaults": {"enabled": defaults.enabled, "send_back": defaults.send_back, "other": defaults.other, "money": defaults.money,
                      "money_cap_usd": defaults.money_cap_usd, "prod_data": defaults.prod_data, "outbound": defaults.outbound},
         "kill_switch": {"var": KILL_SWITCH, "server_env_off": server_kill(home)},
         "precedence": "worker > group > global (amux.env) > default; AMUX_NEEDS_INPUT_AUTO=0 in server.env stops it everywhere",
-        "never": "credential and access asks (keys, sign-ins, grants) are never approved automatically",
+        "never": "credential and access asks (keys, sign-ins, grants) are never approved automatically; with send_back on they go back to the worker once, with the access ladder",
         "waiting_now": waiting.len(),
         "already_waiting_unapproved": already_waiting,
         "recent": recent,
