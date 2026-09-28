@@ -4,13 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#1e2330">
-  <title>How One Developer Replaces a 5-Person Team — amux</title>
-    <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <meta name="description" content="The economics and workflow of using parallel AI agents to multiply individual output.">
-  <meta name="keywords" content="solo developer productivity, 10x developer AI, one person team, AI multiply output">
+  <title>How One Developer Replaces a 5-Person Team with AI Agents — amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="The economics and workflow of using parallel AI agents to multiply individual output — concrete numbers, September 2026 tooling, and the exact setup one developer uses to ship at team speed.">
+  <meta name="keywords" content="solo developer productivity, one developer five person team, AI agents multiply output, 10x developer 2026, parallel Claude Code agents, AI coding agent workflow, solo founder engineering">
   <link rel="canonical" href="https://amux.io/blog/one-developer-five-person-team/">
-  <meta property="og:title" content="How One Developer Replaces a 5-Person Team — amux">
-  <meta property="og:description" content="The economics and workflow of using parallel AI agents to multiply individual output.">
+  <meta property="og:title" content="How One Developer Replaces a 5-Person Team with AI Agents — amux">
+  <meta property="og:description" content="The economics and workflow of using parallel AI agents to multiply individual output — concrete numbers, September 2026 tooling, and the exact setup one developer uses to ship at team speed.">
   <meta property="og:url" content="https://amux.io/blog/one-developer-five-person-team/">
   <meta property="og:image" content="https://amux.io/og-image.png">
   <meta property="og:type" content="article">
@@ -22,8 +22,9 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/site.js"></script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://amux.io/blog/"},{"@type":"ListItem","position":3,"name":"How One Developer Replaces a 5-Person Team","item":"https://amux.io/blog/one-developer-five-person-team/"}]}</script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","headline":"How One Developer Replaces a 5-Person Team","description":"The economics and workflow of using parallel AI agents to multiply individual output.","url":"https://amux.io/blog/one-developer-five-person-team/","datePublished":"2026-02-26","dateModified":"2026-02-26","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://amux.io/blog/one-developer-five-person-team/"}}</script>
-  </head>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","headline":"How One Developer Replaces a 5-Person Team with AI Agents","description":"The economics and workflow of using parallel AI agents to multiply individual output — concrete numbers, September 2026 tooling, and the exact setup one developer uses to ship at team speed.","url":"https://amux.io/blog/one-developer-five-person-team/","datePublished":"2026-02-26","dateModified":"2026-09-28","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://amux.io/blog/one-developer-five-person-team/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can one developer really replace a 5-person team with AI agents?","acceptedAnswer":{"@type":"Answer","text":"For implementation-heavy work — features with clear specs, test coverage, dependency upgrades, migrations, documentation — yes. A developer running 10–12 parallel agents shifts from writing code to reviewing and directing it. Architecture, user experience, and business-logic decisions still need a human; the repetitive execution layer can run unattended."}},{"@type":"Question","name":"What does a parallel AI agent workflow actually cost per month?","acceptedAnswer":{"@type":"Answer","text":"At current Claude API pricing, running 10 agents continuously through an 8-hour workday costs roughly $15–40 per day depending on task complexity. That is a fraction of a junior engineer's fully-loaded cost. The bottleneck shifts from budget to how fast you can review and direct output."}},{"@type":"Question","name":"How do you prevent AI agents from interrupting you overnight for approvals?","acceptedAnswer":{"@type":"Answer","text":"amux standing approvals (AMUX-5270) let you pre-approve entire action categories — filesystem writes, git commits, shell commands — before you go to sleep. The auto-approve layer (AMUX-5301) handles the remaining per-ask decisions by routing sign-in, key, and grant requests back to the worker's queue rather than waking you up."}},{"@type":"Question","name":"What tasks should I give to AI agents versus keeping for myself?","acceptedAnswer":{"@type":"Answer","text":"Give agents: implementations from clear specs, test generation, refactoring, migrations, documentation, dependency upgrades, and data pipeline plumbing. Keep for yourself: system architecture decisions, user experience design, business logic with unstated requirements, final code review before merge, and anything that requires external judgment about trade-offs."}},{"@type":"Question","name":"How do I run 10+ agents in parallel without losing track of what they're doing?","acceptedAnswer":{"@type":"Answer","text":"amux gives every agent a board card (kanban lane: todo → doing → done), a live output stream you can peek from your phone, and a self-healing watchdog that restarts crashed agents and replays their last message. You review output and make architectural decisions; the harness handles the rest."}},{"@type":"Question","name":"Does this work with Claude Code, Codex, and Gemini CLI together?","acceptedAnswer":{"@type":"Answer","text":"Yes. amux is runtime-agnostic — you can mix Claude Code, Codex, and Gemini CLI agents in the same fleet. Each gets its own git worktree (no merge conflicts between agents) and cards on the shared board. Most solo developers use Claude Code for deep reasoning and Codex for faster batch tasks."}}]}</script>
+</head>
 <body>
   <header class="site-header">
     <a class="logo" href="/">amux</a>
@@ -39,35 +40,151 @@
   </header>
   <main>
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <a href="/blog/">Blog</a> <span class="sep">›</span> <span>How One Developer Replaces a 5-Person Team</span></div>
-    <h1>How One Developer Replaces a 5-Person Team</h1>
-<p class="subtitle">It's not about replacing people. It's about removing bottlenecks.</p>
-<p>A solo developer with 10 parallel agents can tackle 10 tasks simultaneously. The developer's job shifts from writing code to reviewing, directing, and making architectural decisions.</p>
-<h2>The new workflow</h2>
-<ol>
-<li><strong>Architect:</strong> Design the system and break it into tasks</li>
-<li><strong>Delegate:</strong> Post tasks to the board, start agents</li>
-<li><strong>Review:</strong> Check agent output, provide feedback</li>
-<li><strong>Merge:</strong> Integrate completed work</li>
-</ol>
-<h2>What agents handle well</h2>
-<ul>
-<li>Implementation from clear specs</li>
-<li>Test generation</li>
-<li>Refactoring and migrations</li>
-<li>Documentation</li>
-<li>Dependency updates</li>
-</ul>
-<h2>What still needs a human</h2>
-<ul>
-<li>System architecture decisions</li>
-<li>User experience design</li>
-<li>Business logic nuance</li>
-<li>Final code review</li>
-</ul>
-<div class="cta-box"><h3>Get started with amux</h3><p>Run dozens of Claude Code agents in parallel. Python 3 + tmux. Open source.</p><pre><code>git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh
-amux register myproject --dir ~/Dev/myproject --yolo
+    <article>
+    <h1>How One Developer Replaces a 5-Person Team with AI Agents</h1>
+    <p class="subtitle">Concrete economics, the September 2026 toolstack, and the exact workflow — from board card to merged PR — that one developer uses to ship at team speed. Updated September 2026.</p>
+
+    <!-- EXP-101 top-of-page CTA -->
+    <div class="cta-box cta-top" id="exp101-top">
+      <strong>Run your own AI agent team</strong> — amux launches, monitors, and self-heals parallel Claude Code, Codex, and Gemini CLI sessions from a single dashboard or your phone.
+      <a class="btn btn-primary" href="https://github.com/mixpeek/amux" onclick="window.amuxEvent&&amuxEvent('exp101_solo_team_blog_topofpage_cta_click')">View on GitHub ★ 505+</a>
+    </div>
+
+    <h2>The numbers first</h2>
+    <p>A mid-level engineer in the US costs roughly $200,000 per year fully loaded. Ten parallel Claude Code agents running 8 hours a day on complex implementation tasks cost around $8,000–15,000 per year at current API pricing. The agents do not produce work at the same quality per-task, but they run 10 tasks at once while the human architect reviews and redirects.</p>
+
+    <table>
+      <thead><tr><th>Setup</th><th>Cost/year</th><th>Parallel tasks</th><th>Hours/day</th></tr></thead>
+      <tbody>
+        <tr><td>1 mid-level engineer</td><td>~$200,000</td><td>1–2</td><td>8</td></tr>
+        <tr><td>5 engineers</td><td>~$1,000,000</td><td>5–10</td><td>8</td></tr>
+        <tr><td>10 Claude Code agents (amux)</td><td>~$8,000–15,000</td><td>10–12</td><td>24</td></tr>
+        <tr><td>Developer + 10 agents</td><td>~$208,000–215,000</td><td>10–12</td><td>24</td></tr>
+      </tbody>
+    </table>
+
+    <p>The agents run overnight. They do not need standups, vacation time, or ramp-up periods. The developer reviews in the morning, merges what is good, and requeues what is not.</p>
+
+    <h2>What the workflow actually looks like</h2>
+    <p>The shift is not from writing code to reviewing it — the shift is from sequentially writing code to parallel architecture. A developer in this setup spends their time on four things:</p>
+
+    <ol>
+      <li><strong>Decompose:</strong> Break the sprint into well-defined tasks small enough for one agent to complete in one context window. A clear spec is the most important input.</li>
+      <li><strong>Dispatch:</strong> Post cards to the amux board. Agents claim them atomically (SQLite compare-and-swap) — no two agents grab the same task.</li>
+      <li><strong>Review:</strong> Check agent output in the morning. The mobile dashboard shows every agent's status, last message, and board card from your phone. Failed agents restart automatically.</li>
+      <li><strong>Merge:</strong> Review PRs, handle the architectural decisions agents could not make, and queue the next sprint before lunch.</li>
+    </ol>
+
+    <h2>What agents handle well</h2>
+    <ul>
+      <li>Feature implementation from a clear spec with acceptance criteria</li>
+      <li>Test generation: unit tests, integration fixtures, snapshot tests</li>
+      <li>Refactoring and migrations with a defined target shape</li>
+      <li>Documentation: API docs, README sections, changelog entries</li>
+      <li>Dependency upgrades and breaking-change remediation</li>
+      <li>Data pipeline plumbing: schema changes, backfills, validation scripts</li>
+      <li>Browser automation: UI flows, scraping, form submission (via amux browser agent)</li>
+    </ul>
+
+    <h2>What still needs you</h2>
+    <ul>
+      <li>System architecture decisions with long-term trade-offs</li>
+      <li>User experience design — what the product should feel like</li>
+      <li>Business logic with unstated requirements or external context</li>
+      <li>Final code review before merge: security, correctness at the boundary</li>
+      <li>Anything requiring external judgment about priorities or direction</li>
+    </ul>
+
+    <h2>The overnight problem, solved</h2>
+    <p>The original gap in "run agents overnight" workflows: agents pause and wait for approval. An agent that asks "should I delete this file?" at 2 AM is not running overnight — it is queued until morning.</p>
+
+    <p>Two amux features removed this gap in 2026:</p>
+
+    <ul>
+      <li><strong>Standing approvals</strong> (AMUX-5270): pre-approve entire action categories before you go to sleep. Filesystem writes, git commits, shell commands, and API calls can all be pre-approved by scope — global, group, or per-worker.</li>
+      <li><strong>Auto-approve</strong> (AMUX-5301): handles the remaining per-ask decisions. Sign-in requests, key asks, and grant requests get routed back to the worker's queue with a policy-based decision, rather than surfacing to the owner at 3 AM.</li>
+    </ul>
+
+    <p>Combine these with the <a href="/guides/ai-coding-agents-overnight/">overnight agent guide</a> and agents genuinely work through the night without a human in the loop.</p>
+
+    <h2>Computer use: the third browser rung</h2>
+    <p>Browser work now has three levels in amux (as of AMUX-5300):</p>
+
+    <ol>
+      <li><strong>amux browser</strong> — headless Playwright with saved auth profiles. Good for everything a browser can drive.</li>
+      <li><strong>Chrome CDP</strong> — connects to Ethan's real Chrome session with live sign-ins. Good for sites that resist headless browsers.</li>
+      <li><strong>CUA computer-use sandbox</strong> — a full desktop agent that handles native dialogs, OS-level flows, and anything a browser cannot reach. The third rung, used when the first two fail.</li>
+    </ol>
+
+    <p>A solo developer running this stack can automate not just web tasks but entire desktop workflows — pulling data from desktop apps, filing tickets in native UIs, or running tests in local simulators — all without writing custom automation code.</p>
+
+    <h2>The multi-runtime angle</h2>
+    <p>amux is runtime-agnostic. A typical solo developer fleet in September 2026:</p>
+
+    <table>
+      <thead><tr><th>Runtime</th><th>Best for</th><th>Cost model</th></tr></thead>
+      <tbody>
+        <tr><td>Claude Code</td><td>Deep reasoning, complex specs, architecture follow-through</td><td>Per token, usage-based</td></tr>
+        <tr><td>Codex (OpenAI)</td><td>Fast batch tasks, test generation, routine refactors</td><td>Per token, cheaper for volume</td></tr>
+        <tr><td>Gemini CLI</td><td>Long-context file analysis, multi-file refactoring</td><td>Per token, large context window</td></tr>
+      </tbody>
+    </table>
+
+    <p>Each agent gets its own isolated git worktree — agents on the same repo never conflict. The shared board coordinates across runtimes.</p>
+
+    <h2>Practical setup in 10 minutes</h2>
+    <p>Install amux, start the server, and launch your first agent:</p>
+
+    <pre><code># Install (Homebrew — single Rust binary, zero dependencies)
+brew install mixpeek/amux/amux
+
+# Start the server (runs on localhost:8824)
+amux serve
+
+# Register your project and start an agent
+amux register myproject --dir ~/Dev/myproject
 amux start myproject
-amux serve  # → https://localhost:8824</code></pre><a class="btn btn-primary" href="https://github.com/mixpeek/amux">View on GitHub</a></div>
+
+# Open the dashboard (or scan the QR code for the iOS app)
+open http://localhost:8824</code></pre>
+
+    <p>The iOS app mirrors the web dashboard — you can check agent status, read output, and approve decisions from your phone. The board tab shows every active card with real-time status.</p>
+
+    <h2>The role that remains</h2>
+    <p>Running 10 agents at once does not eliminate the need for a developer. It changes what that developer does. The bottleneck becomes architectural judgment, spec quality, and review throughput — not implementation speed. The developer who can write clear specs and review code fast will get more leverage from this setup than someone who wants to write every line themselves.</p>
+
+    <p>The five-person team comparison holds at a specific layer of the stack: implementation and testing. For product strategy, hiring, external relationships, and architecture, the human role is unchanged.</p>
+
+    <h2>Frequently asked questions</h2>
+
+    <dl>
+      <dt>Can one developer really replace a 5-person team with AI agents?</dt>
+      <dd>For implementation-heavy work — features with clear specs, test coverage, dependency upgrades, migrations, documentation — yes. Architecture, user experience, and business-logic decisions still need a human; the repetitive execution layer can run unattended.</dd>
+
+      <dt>What does a parallel AI agent workflow actually cost per month?</dt>
+      <dd>At current Claude API pricing, running 10 agents continuously through an 8-hour workday costs roughly $15–40 per day depending on task complexity. That is a fraction of a junior engineer's fully-loaded cost. The bottleneck shifts from budget to how fast you can review and direct output.</dd>
+
+      <dt>How do you prevent AI agents from interrupting you overnight for approvals?</dt>
+      <dd>amux <a href="/guides/ai-agent-standing-approvals/">standing approvals</a> (AMUX-5270) let you pre-approve entire action categories before you go to sleep. The auto-approve layer (AMUX-5301) handles the remaining per-ask decisions by routing sign-in, key, and grant requests back to the worker's queue rather than waking you up.</dd>
+
+      <dt>What tasks should I give to AI agents versus keeping for myself?</dt>
+      <dd>Give agents: implementations from clear specs, test generation, refactoring, migrations, documentation, dependency upgrades, and data pipeline plumbing. Keep for yourself: system architecture decisions, user experience design, business logic with unstated requirements, final code review before merge.</dd>
+
+      <dt>How do I run 10+ agents in parallel without losing track of what they're doing?</dt>
+      <dd>amux gives every agent a board card (kanban lane: todo → doing → done), a live output stream you can peek from your phone, and a self-healing watchdog that restarts crashed agents and replays their last message. You review output and make architectural decisions; the harness handles the rest.</dd>
+
+      <dt>Does this work with Claude Code, Codex, and Gemini CLI together?</dt>
+      <dd>Yes. amux is runtime-agnostic — you can mix Claude Code, Codex, and Gemini CLI agents in the same fleet. Each gets its own git worktree and cards on the shared board. See the <a href="/guides/multi-runtime-ai-coding-agents/">multi-runtime guide</a> for fleet composition strategies.</dd>
+    </dl>
+
+    <div class="cta-box">
+      <h3>Run your own AI agent team</h3>
+      <p>amux is open source, MIT licensed, single Rust binary. Install in 30 seconds and launch your first agent team.</p>
+      <pre><code>brew install mixpeek/amux/amux
+amux serve</code></pre>
+      <a class="btn btn-primary" href="https://github.com/mixpeek/amux">View on GitHub ★ 505+</a>
+    </div>
+    </article>
   </main>
   <footer class="sub-footer">
     <div class="footer-inner">
@@ -115,6 +232,6 @@ amux serve  # → https://localhost:8824</code></pre><a class="btn btn-primary" 
     </div>
   </footer>
 
-<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='\u2605 '+d.stargazers_count}).catch(function(){})</script>
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
 </body>
 </html>
