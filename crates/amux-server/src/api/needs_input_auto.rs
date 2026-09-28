@@ -332,6 +332,17 @@ pub fn never_reason(item: &Value) -> Option<&'static str> {
     if matches!(at, "credential" | "access") && crate::api::needs_input::reads_like_credential(&t) {
         return Some("credential_or_access");
     }
+    // FIRST, so an owner-action phrasing cannot send it back to the worker
+    // (BACKE-3504 "a new POST /v1/ops/events endpoint", 2026-09-27 20:40).
+    // Repo rule (Mixpeek CLAUDE.md): new endpoints and new primitives need
+    // explicit human approval, so a public-surface decision stays with him.
+    let surface = [
+        "/v1/", "new endpoint", "new primitive", "public surface", "api design", "pricing page",
+        "new sourcetype", "new source type",
+    ];
+    if surface.iter().any(|w| t.contains(w)) {
+        return Some("public_surface");
+    }
     // The ask is for the OWNER to do something: approval cannot complete it.
     let owner_act = [
         r"(^|[.?!]\s*)(can|could|will|would) you\b",
@@ -351,15 +362,6 @@ pub fn never_reason(item: &Value) -> Option<&'static str> {
     ];
     if owner_act.iter().any(|re| regex::Regex::new(re).map(|r| r.is_match(&t)).unwrap_or(false)) {
         return Some("owner_must_act");
-    }
-    // Repo rule (Mixpeek CLAUDE.md): new endpoints and new primitives need
-    // explicit human approval, so a public-surface decision stays with him.
-    let surface = [
-        "/v1/", "new endpoint", "new primitive", "public surface", "api design", "pricing page",
-        "new sourcetype", "new source type",
-    ];
-    if surface.iter().any(|w| t.contains(w)) {
-        return Some("public_surface");
     }
     None
 }

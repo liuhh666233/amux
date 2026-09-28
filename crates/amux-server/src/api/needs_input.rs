@@ -57,7 +57,10 @@ pub fn routes() -> Router<AppState> {
 /// declared signal; the text fallback catches the asks filed before AF-318 or
 /// typed `decision` while plainly being about spend.
 pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
-    let t = text.to_ascii_lowercase();
+    // Hyphens read as spaces: BACKE-3621 wrote "a PROD customer-data
+    // mutation" and was sent back to its worker as a credential ask
+    // (2026-09-27 20:40).
+    let t = text.to_ascii_lowercase().replace('-', " ");
     let has = |w: &[&str]| w.iter().any(|x| t.contains(x));
     // A REAL SPEND, not a money-adjacent word (Ethan, 2026-09-27 14:42: "the
     // bar for needs input just needs to be much higher"). "Should billing
@@ -72,8 +75,11 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
     let spends = dollar
         || has(&[
             "/mo", "per month", "a month", "spend ", "spending", " pay ", "purchase", " buy ",
-            "top up", "top-up", "fund ", "provision", "raise the spend", "spend limit", "gpu spend",
-            "on-demand", "credits",
+            "top up", "fund ", "provision", "raise the spend", "spend limit", "gpu spend",
+            "on demand", "credits",
+            // Paid compute with no figure in the ask: GCA-54 "the logo corpus
+            // re-ingest ... 189,830 docs (5.1x)" went back to its worker.
+            "re ingest", "reingest", "re extract", "reextract", "re embed", "gpu ", "cost basis",
         ]);
     if has(&[
         "prod data",
@@ -92,12 +98,15 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
         "without standby",
         "prod primary",
         "production primary",
-        "standby-replica",
+        "standby replica",
         "failover",
         "fail over",
         "restore over",
         "truncate",
         "drop the ",
+        "collection migration",
+        "renames collections",
+        "rename collections",
     ]) {
         return ("prod_data", 0);
     }

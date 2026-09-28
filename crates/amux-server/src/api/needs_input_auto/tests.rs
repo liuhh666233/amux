@@ -410,3 +410,19 @@ async fn send_back_once_then_the_reask_is_the_owners_and_stale_pending_is_retrie
     assert_eq!(rep.approved, ["STUCK-1"]);
     assert_eq!(card(&st, "STUCK-1").status, "todo");
 }
+
+#[test]
+fn the_three_misrouted_send_backs_stay_with_the_owner() {
+    // Live 2026-09-27 20:40: all three went back to their workers.
+    use crate::api::needs_input::classify;
+    let p = Policy::default();
+    let b3504 = "Approve the shipped BACKE-3504 design (45e9ba8f0f) on its two owner points: a new POST /v1/ops/events endpoint (native ops-event front door, in-schema, API-key-authed, best-effort)?";
+    assert_eq!(decide(&p, &item("card", "other", "credential", b3504)), Decision::Never("public_surface"));
+    let b3621 = "The all-content -> universal_extractor collection migration (BACKE-3621) is ready and safe to run, but it is a PROD customer-data mutation (renames collections across namespaces) and this session has no prod MONGO_URI, so I will not run it.";
+    assert_eq!(classify("access", b3621).0, "prod_data");
+    let g54 = "The logo corpus re-ingest you approved on MI-5270 at a 37,151-doc cost basis actually measures 189,830 docs (5.1x): approve the full re-ingest at the measured size, or cap or decline it?";
+    assert_eq!(classify("budget", g54).0, "money");
+    let cat = |q: &str, at: &str| { let (c, _) = classify(at, q); let mut it = item("card", c, at, q); it["category"] = json!(c); it };
+    assert!(!matches!(decide(&p, &cat(b3621, "access")), Decision::SendBack(_)));
+    assert!(!matches!(decide(&p, &cat(g54, "budget")), Decision::SendBack(_)));
+}
