@@ -1063,25 +1063,37 @@ mod tests {
             );
             return;
         }
-        let probe = |argv: &[String]| -> bool {
+        // Some(true) = native, Some(false) = translated, None = the probe
+        // printed neither, which must fail loudly rather than read as either.
+        let probe = |argv: &[String]| -> Option<bool> {
             let out = Command::new(&argv[0])
                 .args(&argv[1..])
                 .output()
                 .expect("probe must run");
-            String::from_utf8_lossy(&out.stdout).trim() == "0"
+            match String::from_utf8_lossy(&out.stdout).trim() {
+                "0" => Some(true),
+                "1" => Some(false),
+                _ => None,
+            }
         };
         let bare = vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            "sysctl -n sysctl.proc_translated".to_string(),
+            // Absolute path: amux panes and the builder run with a PATH that
+            // omits /usr/sbin, where a bare `sysctl` printed NOTHING. That made
+            // the wrapped probe fail and the bare-probe precondition pass on
+            // empty output rather than on a real "1".
+            "/usr/sbin/sysctl -n sysctl.proc_translated".to_string(),
         ];
-        assert!(
-            !probe(&bare),
+        assert_eq!(
+            probe(&bare),
+            Some(false),
             "a bare exec from this translated test process must still read translated; \
              otherwise this test proves nothing"
         );
-        assert!(
+        assert_eq!(
             probe(&super::native_launch_argv(&bare)),
+            Some(true),
             "native_launch_argv's wrapper must make its own child report native"
         );
     }

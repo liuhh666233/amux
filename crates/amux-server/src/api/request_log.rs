@@ -1742,6 +1742,14 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/schedules/{id}/run",
         methods: &["POST"],
     },
+    RouteEntry {
+        path: "/api/schedules/shell",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/schedules/{id}/output",
+        methods: &["GET"],
+    },
     // AMUX-5237: named clearance signals.
     RouteEntry {
         path: "/api/signals",
@@ -1871,6 +1879,47 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
     RouteEntry {
         path: "/api/metrics/host/history",
         methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/metrics/host/pressure",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/metrics/telemetry",
+        methods: &["GET"],
+    },
+    // Agent trace archive (370787b2), pinned launchers and the credential vault.
+    RouteEntry {
+        path: "/api/traces",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/traces/file",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/pinned",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/pinned/{id}",
+        methods: &["PATCH", "DELETE"],
+    },
+    RouteEntry {
+        path: "/api/pinned/{id}/launch",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/vault",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/vault/{id}",
+        methods: &["PATCH", "DELETE"],
+    },
+    RouteEntry {
+        path: "/api/vault/{id}/fill",
+        methods: &["POST"],
     },
     RouteEntry {
         path: "/api/metrics/fleet",
@@ -2272,6 +2321,54 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/browser/import",
         methods: &["POST"],
     },
+    RouteEntry {
+        path: "/api/computer/start",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/status",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/computer/context",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/computer/screenshot",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/click",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/double_click",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/move",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/type",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/key",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/scroll",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/open",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/computer/stop",
+        methods: &["POST"],
+    },
     // -- file viewer / files / fs
     RouteEntry {
         path: "/api/file",
@@ -2646,6 +2743,28 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
     RouteEntry {
         path: "/api/approvals/standing/{id}",
         methods: &["GET", "PATCH", "DELETE"],
+    },
+    // AMUX-5286 needs-input triage queue.
+    RouteEntry {
+        path: "/api/needs-input",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/needs-input/snooze",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/needs-input/log",
+        methods: &["POST"],
+    },
+    // AMUX-5301 automatic approval of needs-input items.
+    RouteEntry {
+        path: "/api/needs-input/auto",
+        methods: &["GET", "PUT"],
+    },
+    RouteEntry {
+        path: "/api/needs-input/auto/sweep",
+        methods: &["POST"],
     },
     RouteEntry {
         path: "/api/connectors",

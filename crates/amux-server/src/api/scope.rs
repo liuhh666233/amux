@@ -993,6 +993,16 @@ async fn scope_write(
     };
 
     let value = value.cloned().unwrap_or(Value::Null);
+    if key == "env" && !actor.is_empty() {
+        if let Some(k) = owner_only_key_changed(&home, level, name, &value) {
+            tracing::warn!(actor = %actor, level, name, key = %k, verdict = "scope_owner_only_key_refused",
+                "a session tried to change an owner-only scope key");
+            return j(403, json!({"error": format!(
+                "'{k}' is owner-only: it widens what this worker may do without the owner \
+                 (auto-approval, auto-proceed, browser profiles, approval types, outside email). \
+                 Change it from the dashboard."), "code": "owner_only_key", "key": k}));
+        }
+    }
     let write_result: Result<(), (u16, String)> = match key {
         "memory" | "rules" => write_memory(&home, level, name, key, &value),
         "env" => write_env(&home, level, name, &value),
@@ -1079,6 +1089,62 @@ fn write_memory(
 
 /// env: whole-file replace for a string value; merge-by-key for an object
 /// (null deletes a key). 0600 — env files carry credentials.
+/// Env keys a session may never set for itself, even in its own worker layer:
+/// each widens what the worker may do WITHOUT the owner. Measured 2026-09-27:
+/// the auto-approve policy (AMUX-5301) resolved worker > group > global, and
+/// scope_write_allowed lets a session write its own worker layer, so a lane
+/// could have raised its own spend cap or switched on outbound auto-approval.
+const OWNER_ONLY_ENV_PREFIXES: &[&str] = &[
+    "AMUX_NEEDS_INPUT_AUTO",
+    "AMUX_ISOLATED_AUTO_PROCEED",
+    "AMUX_BROWSER_PROFILES_",
+    "AMUX_APPROVAL_TYPES",
+    "AMUX_EMAIL_EXTERNAL_ALLOW",
+];
+
+fn is_owner_only_env_key(k: &str) -> bool {
+    OWNER_ONLY_ENV_PREFIXES.iter().any(|p| k.starts_with(p))
+}
+
+/// The first owner-only key whose value this write would change, if any.
+/// Handles both write shapes: a full-text replace and a key/value merge.
+pub(crate) fn owner_only_key_changed(home: &Path, level: &str, name: &str, value: &Value) -> Option<String> {
+    let parse = |text: &str| -> std::collections::BTreeMap<String, String> {
+        text.lines()
+            .filter_map(|l| {
+                let l = l.trim().trim_start_matches("export ").trim();
+                if l.starts_with('#') { return None; }
+                let (k, v) = l.split_once('=')?;
+                Some((k.trim().to_string(), v.trim().trim_matches('"').trim_matches('\'').to_string()))
+            })
+            .collect()
+    };
+    let current = parse(&std::fs::read_to_string(env_file(home, level, name)).unwrap_or_default());
+    match value {
+        Value::String(text) => {
+            let next = parse(text);
+            let keys: BTreeSet<String> = current.keys().chain(next.keys()).cloned().collect();
+            keys.into_iter()
+                .find(|k| is_owner_only_env_key(k) && current.get(k) != next.get(k))
+        }
+        Value::Object(obj) => obj
+            .iter()
+            .find(|(k, v)| {
+                is_owner_only_env_key(k) && {
+                    let nv = match v {
+                        Value::Null => None,
+                        Value::String(s) => Some(s.clone()),
+                        Value::Bool(b) => Some(if *b { "True".into() } else { "False".into() }),
+                        other => Some(other.to_string()),
+                    };
+                    current.get(k.as_str()).cloned() != nv
+                }
+            })
+            .map(|(k, _)| k.clone()),
+        _ => None,
+    }
+}
+
 fn write_env(home: &Path, level: &str, name: &str, value: &Value) -> Result<(), (u16, String)> {
     let f = env_file(home, level, name);
     match value {
@@ -1452,6 +1518,22 @@ mod tests {
             let (code, _) = call(&app, "GET", uri, None, None).await;
             assert_eq!(code, StatusCode::OK, "{uri} — a valid request was refused");
         }
+    }
+
+    #[test]
+    fn a_session_cannot_widen_its_own_owner_only_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        std::fs::write(env_file(home, "worker", "lane-a"), "CC_MODEL=haiku\nAMUX_NEEDS_INPUT_AUTO_MONEY_CAP=50\n").unwrap();
+        // Raising its own spend cap, by merge or by full-text replace: refused.
+        assert_eq!(owner_only_key_changed(home, "worker", "lane-a", &json!({"AMUX_NEEDS_INPUT_AUTO_MONEY_CAP": "5000"})).as_deref(), Some("AMUX_NEEDS_INPUT_AUTO_MONEY_CAP"));
+        assert_eq!(owner_only_key_changed(home, "worker", "lane-a", &json!("CC_MODEL=haiku\nAMUX_NEEDS_INPUT_AUTO_MONEY_CAP=5000\n")).as_deref(), Some("AMUX_NEEDS_INPUT_AUTO_MONEY_CAP"));
+        assert_eq!(owner_only_key_changed(home, "worker", "lane-a", &json!({"AMUX_NEEDS_INPUT_AUTO_OUTBOUND": "1"})).as_deref(), Some("AMUX_NEEDS_INPUT_AUTO_OUTBOUND"));
+        assert_eq!(owner_only_key_changed(home, "worker", "lane-a", &json!({"AMUX_BROWSER_PROFILES_ALLOW": "*"})).as_deref(), Some("AMUX_BROWSER_PROFILES_ALLOW"));
+        // Its ordinary keys, and a rewrite that leaves the owner key as it was: allowed.
+        assert_eq!(owner_only_key_changed(home, "worker", "lane-a", &json!({"CC_MODEL": "sonnet"})), None);
+        assert_eq!(owner_only_key_changed(home, "worker", "lane-a", &json!("CC_MODEL=sonnet\nAMUX_NEEDS_INPUT_AUTO_MONEY_CAP=50\n")), None);
     }
 
     fn fleet(home: &Path, sessions: &[(&str, &str, bool)]) {

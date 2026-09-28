@@ -358,7 +358,15 @@ pub(crate) fn boundary_of(context: &str) -> Option<Boundary> {
     }
     let send = rx!(r"\b(send|sending|sent|email|emailing|e-mail|dm|reply|replying|respond|post|posting|publish|publishing|tweet|announce|submit|outreach)\b");
     let outside = rx!(r"\b(customer|customers|client|clients|prospect|prospects|lead|leads|vendor|partner|investor|contact|contacts|recipient|recipients|external|outside|public|publicly|linkedin|twitter|buffer|ghost|blog|newsletter|campaign|instantly|apollo|inbox|thread|them|him|her|upstream|mailing list)\b");
-    if (has(send) && has(outside))
+    // AN ADDRESS OR A MESSAGE CHANNEL IS OUTBOUND ON ITS OWN. With in-boundary
+    // asks now auto-answered "proceed" (owner policy), "Want me to send the
+    // welcome email to partners@thefasttrackgirl.com?" must never read as
+    // in-boundary just because no word from the `outside` list appears.
+    let address = rx!(r"[a-z0-9._%+-]+@[a-z0-9-]+\.[a-z0-9.-]+");
+    let channel = rx!(r"\b(email|e-mail|emails|dm|dms|message|messages|inmail|tweet|post|posts|reply|newsletter|campaign|sequence)\b");
+    if has(address)
+        || (has(send) && has(channel))
+        || (has(send) && has(outside))
         || has(rx!(r"\bpr comment|\bcomment on (the |their )?(pr|issue)\b|\bpublish(ed|ing)?\b|\bgo live\b|\bpress release\b"))
         || has(rx!(r"\b(launch|start|kick off|enable|activate|turn on)\b[\w/ -]{0,40}\b(sequence|campaign|outreach|drip|cadence)\b"))
     {
@@ -400,9 +408,26 @@ pub(crate) fn classify_owner_ask(text: &str) -> OwnerAsk {
         .rev()
         .find(|(_, s)| is_ask_sentence(s))
         .map(|(i, s)| (i, s.clone()));
+    // Paragraph of each sentence, so the one BEFORE the ask is read only
+    // when it belongs to the ask. amux-meta-helper, 2026-09-27 19:29: a
+    // report's last bullet ("MVS production promote, a CI merge-gate policy
+    // change, ...") sat a blank line above "Given the size, want me to keep
+    // this as a reference list, or would it help more to work through one
+    // category at a time?", and the pair read as a production-data boundary
+    // (AMH-17). `sentences` drops blank lines, so per-paragraph sentences
+    // concatenate to exactly `sents`.
+    let para_of: Vec<usize> = tail
+        .split("\n\n")
+        .enumerate()
+        .flat_map(|(p, chunk)| std::iter::repeat_n(p, sentences(chunk).len()))
+        .collect();
     let (sentence, context) = match (hit, marker) {
         (Some((i, s)), _) => {
-            let prev = if i > 0 { sents[i - 1].as_str() } else { "" };
+            // A short ask ("Want me to do it?") leans on the sentence before it
+            // wherever that sits; a full one stands alone across a paragraph.
+            let same_para = para_of.len() == sents.len() && i > 0 && para_of[i - 1] == para_of[i];
+            let leans = s.split_whitespace().count() <= 10;
+            let prev = if i > 0 && (same_para || leans) { sents[i - 1].as_str() } else { "" };
             let ctx = format!("{prev} {s}");
             (s, ctx)
         }
@@ -799,7 +824,7 @@ async fn file_ask_card_via(
         clip(context, if isolated { 6000 } else { 1500 })
     );
     let needsyou = path == AskPath::NeedsYou;
-    let mut tags = vec![tag.clone()];
+    let mut tags = vec![tag.clone(), TURN_END_ASK_TAG.to_string()];
     if isolated {
         tags.push(ISOLATED_ASK_TAG.to_string());
     }
@@ -869,7 +894,27 @@ async fn file_ask_card_via(
                     )
                     .optional()?
                     .map(|id| (id, true)),
-                None => None,
+                None => {
+                    // REPHRASED REPEATS UPDATE THE OPEN CARD ON EVERY LANE, not
+                    // only isolated ones. tubescience-parity filed TP-38..TP-48 on
+                    // 2026-09-27: "Still blocked on your OK to spend about $16 on
+                    // Gemini embedding?", "Still waiting on your go for about $16
+                    // of Gemini embedding?", and so on, each a new needsyou card
+                    // because the exact-question key differed by a few words.
+                    let mut st = conn.prepare(
+                        "SELECT i.id, COALESCE(i.ask_question, i.decision_question, i.title) FROM issues i \
+                         JOIN issue_tags t ON t.issue_id = i.id \
+                         WHERE i.session = ?1 AND t.tag = ?2 AND i.deleted IS NULL \
+                         AND i.status NOT IN ('done','verified','discarded') ORDER BY i.updated DESC",
+                    )?;
+                    let open: Vec<(String, String)> = st
+                        .query_map(rusqlite::params![lane_s, TURN_END_ASK_TAG], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .flatten()
+                        .collect();
+                    open.into_iter()
+                        .find(|(_, oq)| same_ask(oq, &q))
+                        .map(|(id, _)| (id, true))
+                }
             };
             let out = match existing {
                 Some((id, false)) => (id, false),
@@ -907,6 +952,130 @@ async fn file_ask_card_via(
     let out = found.lock().unwrap_or_else(|e| e.into_inner()).take();
     out.map(|(id, created)| (id, created, path))
         .ok_or_else(|| "card write returned no id".into())
+}
+
+/// Tag on every card the turn-end recorder files, on any lane.
+pub(crate) const TURN_END_ASK_TAG: &str = "turn-end-owner-ask";
+
+/// The ask without the "May <lane> proceed with this:" wrapper as_question
+/// adds, which every auto-filed card shares and which would make any two of
+/// them look alike.
+fn ask_core(q: &str) -> String {
+    let t = q.trim();
+    match t.find(" proceed with this:") {
+        Some(i) if t.starts_with("May ") => t[i + " proceed with this:".len()..].trim().to_string(),
+        _ => t.to_string(),
+    }
+}
+
+/// Same ask, reworded? Overlap relative to the SHORTER ask (not Jaccard):
+/// a long restatement of a short ask adds words that would sink a union-based
+/// score, measured on TP-44 ("about $16 of Gemini embedding?") against TP-45
+/// (the same plus a cost breakdown). Tokens come from goal_loop::tokens, so
+/// URLs and numbers are normalized. Asks with fewer than three content tokens never merge.
+pub(crate) fn same_ask(a: &str, b: &str) -> bool {
+    // Waiting-and-asking filler says HOW the lane asked, not WHAT it asks for.
+    const FILLER: &[&str] = &[
+        "still", "blocked", "waiting", "wait", "your", "you", "ok", "okay", "go", "goahead", "only",
+        "remaining", "step", "steps", "need", "needs", "needed", "approve", "approval", "say", "word",
+        "want", "should", "shall", "may", "can", "could", "would", "the", "and", "for", "on", "of",
+        "to", "about", "this", "that", "with", "from", "please", "i", "im", "me", "my", "it", "is",
+        "are", "be", "am", "a", "an", "in", "at", "yet",
+    ];
+    let content = |t: &str| {
+        let mut set = super::goal_loop::tokens(&ask_core(t));
+        set.retain(|w| !FILLER.contains(&w.as_str()));
+        set
+    };
+    let (x, y) = (content(a), content(b));
+    let small = x.len().min(y.len());
+    if small < 3 {
+        return false;
+    }
+    x.intersection(&y).count() as f64 / small as f64 >= ASK_MERGE_OVERLAP
+}
+const ASK_MERGE_OVERLAP: f64 = 0.6;
+
+/// Kill switch for answering an isolated lane's in-boundary asks "proceed"
+/// under owner policy (default on).
+pub(crate) const AUTO_PROCEED_KEY: &str = "AMUX_ISOLATED_AUTO_PROCEED";
+/// The owner-policy guard: owner configuration, so it reaches isolated lanes.
+pub(crate) const OWNER_POLICY_GUARD: &str = "owner-policy:auto-proceed";
+
+fn day_bucket() -> i64 {
+    (crate::config::now_f64() as i64) / 86_400
+}
+
+fn policy_text(sentence: &str) -> String {
+    format!(
+        "[amux owner-policy] Your last turn ended by asking: \"{}\". Ethan's standing \
+         authority covers this, so proceed now; if you offered options, take your \
+         recommended one. Stop and file a needsyou card only for {BOUNDARY_TEXT}.",
+        clip(sentence, 240)
+    )
+}
+
+/// Deliver the owner-policy "proceed" to a lane.
+async fn policy_proceed(state: &AppState, name: &str, sentence: &str, id: &str) -> Result<(), String> {
+    sv::steer_enqueue_idempotent_report(state, name, &policy_text(sentence), OWNER_POLICY_GUARD, "", id)
+        .await
+        .map(|_| ())?;
+    sv::steer_deliver_for_session(state, name).await;
+    Ok(())
+}
+
+/// Clear in-boundary asks already parked on isolated lanes before auto-proceed
+/// existed: an idle lane never reaches another turn end, so nothing else would
+/// answer them. Only cards this recorder filed with no boundary (title
+/// "Owner ask (decision): ..."), still open, on an isolated lane that is idle.
+/// Each card is answered once, then closed with the answer as evidence.
+pub(crate) async fn auto_proceed_open_isolated_asks(state: &AppState, idle_isolated: &[String]) {
+    use crate::db::board_store as bs;
+    for lane in idle_isolated {
+        if !enabled(lane, AUTO_PROCEED_KEY) {
+            continue;
+        }
+        let ids: Vec<String> = {
+            let Ok(conn) = state.store.read() else { continue };
+            let Ok(mut st) = conn.prepare(
+                "SELECT i.id FROM issues i JOIN issue_tags t ON t.issue_id = i.id \
+                 WHERE i.session = ?1 AND t.tag = ?2 AND i.deleted IS NULL \
+                 AND i.status IN ('needsyou','backlog','todo') AND i.title LIKE 'Owner ask (decision):%'",
+            ) else { continue };
+            st.query_map(rusqlite::params![lane, ISOLATED_ASK_TAG], |r| r.get::<_, String>(0))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default()
+        };
+        for id in ids {
+            let row = {
+                let Ok(conn) = state.store.read() else { continue };
+                bs::get_issue(&conn, &id).ok().flatten()
+            };
+            let Some(row) = row else { continue };
+            let q = row.ask_question.clone().or(row.decision_question.clone()).unwrap_or(row.title.clone());
+            if !claim_once(state, lane, "turn_end.isolated_proceed_sweep", format!("iso-sweep:{id}"), json!({"card": id})).await {
+                continue;
+            }
+            match policy_proceed(state, lane, &q, &format!("iso-sweep-{id}")).await {
+                Ok(()) => {
+                    let id2 = id.clone();
+                    let _ = state.store.write_async(move |conn| {
+                        if let Some(mut r) = bs::get_issue(conn, &id2)? {
+                            r.desc.push_str("\n\n--- answered by owner policy ---\n\nSent proceed to the lane (AMUX_ISOLATED_AUTO_PROCEED).");
+                            r.evidence = Some("owner-policy auto-proceed delivered to the lane (in-boundary ask, isolated lane)".into());
+                            r.status = "done".into();
+                            bs::save_patched(conn, &mut r)?;
+                        }
+                        Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+                    }).await;
+                    tracing::warn!(session = %lane, card = %id, verdict = "isolated_ask_swept_proceed",
+                        "owner policy answered a parked in-boundary ask and closed its card");
+                }
+                Err(e) => tracing::warn!(session = %lane, card = %id, verdict = "isolated_ask_sweep_refused", error = %e,
+                    "owner-policy proceed refused for a parked ask; card left open"),
+            }
+        }
+    }
 }
 
 /// Kill switch for recording an ISOLATED lane's owner asks as cards.
@@ -1126,6 +1295,29 @@ async fn isolated_owner_ask(state: &AppState, name: &str, records: &[Value], tur
         OwnerAsk::InBoundary { sentence } => (sentence, None),
         OwnerAsk::Boundary { sentence, kind } => (sentence, Some(kind)),
     };
+    // AUTO-PROCEED (Ethan, 2026-09-27 13:20: "it needs to be optimized for
+    // auto pushing this is ridiculous"). Of 17 Needs-input items that hour, the
+    // in-boundary ones ("Want me to start on 1 and 2?", "Should I start on
+    // 3-5?", "say the word and i'll update") were all from ISOLATED lanes,
+    // parked as cards because amux may not steer them. The owner configured
+    // this answer, so it is delivered as owner policy; boundary asks (money,
+    // outbound, prod data, credentials) still become cards.
+    if kind.is_none() && enabled(name, AUTO_PROCEED_KEY) && !owner_said_hold(&turn.prompt) {
+        let key = format!("isolated-proceed:{name}:{}:{}", question_key(&sentence), day_bucket());
+        if claim_once(state, name, "turn_end.isolated_proceed", key, json!({"sentence": sentence, "uuid": turn.uuid})).await {
+            match policy_proceed(state, name, &sentence, &format!("iso-proceed-{}", turn.uuid)).await {
+                Ok(()) => {
+                    tracing::warn!(session = %name, verdict = "isolated_ask_auto_proceeded", sentence = %clip(&sentence, 160),
+                        "turn-end: isolated lane's in-boundary ask answered proceed under owner policy");
+                    return;
+                }
+                Err(e) => tracing::warn!(session = %name, verdict = "isolated_ask_auto_proceed_refused", error = %e,
+                    "turn-end: owner-policy proceed refused; recording the ask as a card instead"),
+            }
+        } else {
+            return;
+        }
+    }
     if !enabled(name, ISOLATED_ASK_KEY) {
         tracing::info!(session = %name, verdict = "isolated_ask_disabled", sentence = %clip(&sentence, 160),
             "turn-end: isolated lane's owner ask not recorded ({ISOLATED_ASK_KEY} is off)");
@@ -1702,6 +1894,52 @@ mod tests {
         // Outside the window the same question may be steered again.
         assert!(claim_within(&state, "tubescience-parity", "turn_end.owner_ask_steer", &key, -1.0,
             "owner-ask:tubescience-parity:turn-4".into(), json!({})).await);
+    }
+
+    #[test]
+    fn a_report_bullet_above_a_standalone_ask_does_not_set_its_boundary() {
+        // Live, amux-meta-helper 2026-09-27 19:29 (AMH-17).
+        let t = "Needs your call:\n- Substantive production/policy decisions (19): MVS production promote, a CI merge-gate policy change, and similar calls.\n\nGiven the size, want me to keep this as a reference list, or would it help more to work through one category at a time (starting with the urgent security ones)?";
+        assert!(matches!(classify_owner_ask(t), OwnerAsk::InBoundary { .. }));
+        // A short ask still leans on the sentence above it, even across a blank line.
+        let t = "I can truncate the prod events table now.\n\nWant me to do it?";
+        assert!(matches!(classify_owner_ask(t), OwnerAsk::Boundary { .. }));
+        let t = "I can truncate the prod events table now. Should I go ahead with that cleanup before the backfill job runs tonight?";
+        assert!(matches!(classify_owner_ask(t), OwnerAsk::Boundary { .. }));
+    }
+
+    #[test]
+    fn owner_policy_is_owner_configuration_and_reads_clean() {
+        assert!(sv::is_owner_configured_guard(OWNER_POLICY_GUARD));
+        assert!(!sv::is_owner_configured_guard("owner-ask"));
+        let t = policy_text("Want me to start on 1 and 2?");
+        assert!(t.contains("Want me to start on 1 and 2?") && !t.contains('\u{2014}'));
+        // The live in-boundary specimens stay in-boundary, the boundary ones do not.
+        assert!(matches!(classify_owner_ask("Done.\n\nWant me to start on 1 and 2?"), OwnerAsk::InBoundary { .. }));
+        assert!(matches!(classify_owner_ask("Say the word and I'll update in one pass."), OwnerAsk::InBoundary { .. }));
+        assert!(!matches!(classify_owner_ask("Approve the welcome email to partners@thefasttrackgirl.com?"), OwnerAsk::InBoundary { .. }));
+        assert_eq!(boundary("Want me to send the welcome email to partners@thefasttrackgirl.com?"), Some(Boundary::ExternalSend));
+        assert_eq!(boundary("Shall I post the 15 drafts to LinkedIn?"), Some(Boundary::ExternalSend));
+        assert_eq!(boundary("Want me to reply to the thread?"), Some(Boundary::ExternalSend));
+    }
+
+    #[test]
+    fn rephrased_repeats_are_one_ask_and_different_asks_are_not() {
+        let spend = [
+            "May tubescience-parity proceed with this: The only remaining step needs your OK: about $16 of Gemini embedding?",
+            "May tubescience-parity proceed with this: I'm waiting for your OK on about $16 of Gemini embedding: roughly $15 to vector the ~750 remaining scenes and under $1 for search text on the 1,116 new ones?",
+            "May tubescience-parity proceed with this: Still waiting on your go for about $16 of Gemini embedding?",
+            "May tubescience-parity proceed with this: I'm still blocked on your OK to spend about $16 on Gemini embedding?",
+            "May tubescience-parity proceed with this: Still blocked on your OK to spend about $16 on Gemini embedding?",
+        ];
+        let signin = [
+            "May tubescience-parity proceed with this: Still blocked on your sign-in (TP-37) and the gs-3 push decision?",
+            "May tubescience-parity proceed with this: Still blocked on your sign-in (TP-37) and the gs-3 decision?",
+        ];
+        for a in &spend { for b in &spend { assert!(same_ask(a, b), "should merge:\n{a}\n{b}"); } }
+        for a in &signin { for b in &signin { assert!(same_ask(a, b), "should merge:\n{a}\n{b}"); } }
+        for a in &spend { for b in &signin { assert!(!same_ask(a, b), "must stay apart:\n{a}\n{b}"); } }
+        assert!(!same_ask("Want me to start on 1 and 2?", "Approve the welcome email to partners@thefasttrackgirl.com?"));
     }
 
     #[test]

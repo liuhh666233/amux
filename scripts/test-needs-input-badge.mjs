@@ -31,7 +31,7 @@ const fixture = {
 const fail = [];
 const check = (cond, msg) => { if (!cond) fail.push(msg); console.log((cond ? 'PASS ' : 'FAIL ') + msg); };
 
-const browser = await chromium.launch(process.env.PW_EXECUTABLE ? { executablePath: process.env.PW_EXECUTABLE } : {});
+const browser = await chromium.launch(process.env.PW_EXECUTABLE ? { executablePath: process.env.PW_EXECUTABLE } : { channel: 'chrome' });
 for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', { width: 1280, height: 900 }]]) {
   const ctx = await browser.newContext({ viewport, ignoreHTTPSErrors: true, serviceWorkers: 'block', isMobile: label === '390', hasTouch: label === '390' });
   const page = await ctx.newPage();
@@ -43,12 +43,17 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
     const res = await r.fetch();
     let list = [];
     try { list = await res.json(); } catch { list = []; }
-    list = (Array.isArray(list) ? list : []).filter(s => s.name !== fixture.name);
+    // Live lanes blocked on the owner would make the pill count depend on the
+    // fleet of the moment rather than on this fixture.
+    list = (Array.isArray(list) ? list : []).filter(s => s.name !== fixture.name)
+      .map(s => s.waiting_reason === 'owner' ? { ...s, status: 'idle', waiting_reason: '', owner_block: undefined } : s);
     r.fulfill({ contentType: 'application/json', body: JSON.stringify([fixture, ...list]) });
   });
+  // An empty triage queue (AMUX-5286), so the pill counts only the fixture.
+  await page.route(/\/api\/needs-input(\?.*)?$/, r => r.fulfill({ contentType: 'application/json', body: '{"items":[],"snoozed":[],"count":0}' }));
   const opened = [];
   await page.exposeFunction('__recordOpen', id => opened.push(id));
-  await page.goto(base + '/');
+  await page.goto(base + '/', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.evaluate(() => { const o = window.openBoardDetail; window.openBoardDetail = id => { window.__recordOpen(id); }; window.__origOpen = o; });
   const badge = page.locator('.status-badge.needs-input').first();
   await badge.waitFor({ timeout: 20000 });
@@ -73,8 +78,13 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['1280', 
   await page.screenshot({ path: path.join(out, `needs-input-list-${label}.png`) });
   await badge.click();
   check(opened.includes('TP-37'), `${label}: tapping the badge opens TP-37`);
-  // The pill jumps to the worker: the peek header shows the same badge.
+  // AMUX-5286: the pill opens the triage sheet; the peek header still shows
+  // the same badge when the worker is opened.
   await pill.click();
+  await page.locator('#ni-overlay .ni-modal').waitFor({ timeout: 5000 });
+  check(/TP-37/.test(await page.locator('#ni-body').innerText()), `${label}: the pill opens the triage sheet on TP-37`);
+  await page.keyboard.press('Escape');
+  await page.evaluate(n => openPeek(n), fixture.name);
   const peekBadge = page.locator('#peek-session-status .status-badge.needs-input');
   await peekBadge.waitFor({ timeout: 15000 });
   const pb = await peekBadge.boundingBox();

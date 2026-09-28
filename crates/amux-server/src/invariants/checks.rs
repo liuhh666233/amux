@@ -1169,6 +1169,8 @@ pub const TIMESTAMP_COLUMNS: &[(&str, &str, bool)] = &[
     ("org_teams", "created_at", false),
     ("owner_alerts", "ts", false),
     // AMUX-5270: every writer uses chrono Utc::now().timestamp().
+    ("pinned_notes", "created_at", false), // UNVERIFIED: no rows yet; api/pinned.rs writes as_secs() and 0092 defaults to unixepoch()
+    ("pinned_notes", "updated_at", false), // UNVERIFIED: no rows yet; same writer as created_at
     ("standing_approvals", "granted_at", false),
     ("standing_approvals", "expires_at", false),
     ("standing_approvals", "revoked_at", false),
@@ -1202,6 +1204,7 @@ pub const TIMESTAMP_COLUMNS: &[(&str, &str, bool)] = &[
     ("task_attempts", "ended_at", false),
     ("task_attempts", "started_at", false),
     ("token_ledger", "ts", false),
+    ("trace_archive", "archived_at", false), // measured 2026-09-27: 1790517771..1790535244 over 5405 rows
     ("waitlist", "ts", false), // UNVERIFIED: no rows yet; seconds is the convention every sibling follows
 ];
 

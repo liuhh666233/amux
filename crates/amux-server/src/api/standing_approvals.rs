@@ -876,6 +876,227 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
+// ---------------------------------------------------------------------------
+// Learned from the owner's own approvals
+// ---------------------------------------------------------------------------
+//
+// Ethan, 2026-09-28 08:55: "this needs to be more systematic. whenever we
+// approve it needs to be saved across the harness." Until now only "Approve &
+// always" (with a rule he typed) recorded anything; a plain Approve in triage,
+// Approve all, dragging the card on the board or `amux board todo` from his
+// shell answered one card and left every other lane to ask again. So every
+// owner move of a card OUT of needsyou records a standing approval learned from
+// the ask itself, published like any other into every worker's MEMORY.md and
+// consulted by the alert and needsyou doors.
+//
+// Learned approvals are NARROWER than hand-written ones, because nobody chose
+// their wording: they need two of the ask's own distinctive words (the matcher
+// requires one of them to appear), spend is capped at the figure he approved,
+// prod-data and spend stay on the asking lane, and they lapse after
+// LEARNED_TTL_DAYS. Outbound is never learned: the standing rule is "Draft it
+// and show me. I send it", so one approved send is not the next one.
+
+/// Days a learned approval stays active. Revocable earlier in Settings.
+pub const LEARNED_TTL_DAYS: i64 = 90;
+/// `AMUX_STANDING_APPROVALS_LEARN=0` in the process env stops learning (the
+/// main kill switch stops everything).
+pub const LEARN_KEY: &str = "AMUX_STANDING_APPROVALS_LEARN";
+
+/// The same predicate `refuse_non_owner` refuses on, stated positively: no
+/// worker header and not a scoped org member.
+pub fn is_owner_request(headers: &HeaderMap) -> bool {
+    let worker = ["x-amux-session", "x-amux-worker"].iter().any(|h| {
+        headers
+            .get(*h)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|s| !s.trim().is_empty())
+    });
+    let scoped_member =
+        super::org::local_member_scope(headers).is_some_and(|scope| !scope.is_global());
+    !worker && !scoped_member
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Learned {
+    pub title: String,
+    pub allowed: String,
+    pub category: String,
+    pub scope: String,
+    pub max_per_day: Option<i64>,
+    pub max_amount_usd: Option<f64>,
+    pub require_terms: Vec<String>,
+    pub source: String,
+    pub expires_at: i64,
+}
+
+fn learned_source(card: &str) -> String {
+    format!("card:{card} owner approval")
+}
+
+/// The ask's own distinctive words: long, not a stopword, not a category
+/// keyword (those are shared by every ask in the category).
+fn distinctive_terms(question: &str) -> Vec<String> {
+    let generic = |t: &str| {
+        CATEGORY_KEYWORDS
+            .iter()
+            .any(|(_, kws)| kws.iter().any(|k| t.starts_with(k)))
+    };
+    let mut toks: Vec<String> = tokens(question)
+        .into_iter()
+        .filter(|t| t.chars().count() >= 5 && !generic(t) && !t.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    toks.sort_by(|a, b| b.chars().count().cmp(&a.chars().count()).then(a.cmp(b)));
+    toks.dedup();
+    toks.truncate(3);
+    toks
+}
+
+/// Pure: the standing approval an owner approval of this ask teaches, or why
+/// it teaches none. `note` is the text the approval wrote on the card, which
+/// is how a Decline, a Reply or "I've provided it" is told from an Approve.
+pub fn learn_from(
+    card: &str,
+    session: &str,
+    ask_type: &str,
+    question: &str,
+    note: &str,
+    now: i64,
+) -> Result<Learned, &'static str> {
+    let n = note.to_ascii_lowercase();
+    if ["declined", "owner reply", "provided by owner"].iter().any(|w| n.contains(w)) {
+        return Err("not an approval (decline, reply or provided)");
+    }
+    let q = question.trim();
+    let q = q
+        .strip_prefix("Owner ask")
+        .and_then(|r| r.split_once("):").map(|(_, rest)| rest.trim()))
+        .unwrap_or(q);
+    if q.is_empty() {
+        return Err("no ask text to learn from");
+    }
+    let (cat, _) = super::needs_input::classify(ask_type, q);
+    let category = super::needs_input::standing_category(ask_type, cat);
+    if category == "customer_outbound" {
+        return Err("outbound is approved per send (Draft it and show me. I send it.)");
+    }
+    let terms = distinctive_terms(q);
+    if terms.len() < 2 {
+        return Err("too generic to reuse safely (fewer than two distinctive words)");
+    }
+    let narrow = matches!(category, "budget" | "prod_data");
+    if narrow && session.trim().is_empty() {
+        return Err("spend or prod-data approval with no asking lane to scope it to");
+    }
+    let scope = if narrow { format!("worker:{}", session.trim()) } else { "global".to_string() };
+    let (max_amount_usd, max_per_day) = match category {
+        // The range-aware parser: "$390-425/mo" is approved up to 425.
+        "budget" => match super::needs_input_auto::max_dollar_figure(q) {
+            Some(v) => (Some(v), None),
+            None => (None, Some(1)),
+        },
+        "prod_data" => (None, Some(1)),
+        _ => (None, None),
+    };
+    Ok(Learned {
+        title: format!("Approved {card}: {}", truncate(q, 80)),
+        allowed: truncate(q, 400),
+        category: category.to_string(),
+        scope,
+        max_per_day,
+        max_amount_usd,
+        require_terms: terms,
+        source: learned_source(card),
+        expires_at: now + LEARNED_TTL_DAYS * 86_400,
+    })
+}
+
+/// Record what the owner's approval of `card` teaches, once per card. Called
+/// by the board's HTTP PATCH route after an owner write took the card out of
+/// needsyou. Every outcome is a log verdict, so a missing record is explainable.
+pub async fn learn_after_owner_approval(state: &AppState, card: &str, note: &str) {
+    if std::env::var(LEARN_KEY).is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off" | "no")) {
+        return;
+    }
+    let id = card.to_string();
+    let row = state
+        .store
+        .read_async(move |c| Ok(crate::db::board_store::get_issue(c, &id)?))
+        .await
+        .ok()
+        .flatten();
+    let Some(row) = row else { return };
+    if row.status == "needsyou" {
+        return;
+    }
+    let session = row.session.clone().unwrap_or_default();
+    if !enabled(&session) {
+        return;
+    }
+    let question = row
+        .ask_question
+        .clone()
+        .filter(|q| !q.trim().is_empty())
+        .or(row.decision_question.clone().filter(|q| !q.trim().is_empty()))
+        .unwrap_or_else(|| row.title.clone());
+    let ask_type = row.ask_type.clone().unwrap_or_default();
+    let learned = match learn_from(card, &session, &ask_type, &question, note, now_s()) {
+        Ok(l) => l,
+        Err(why) => {
+            tracing::info!(verdict = "standing_approval_not_learned", card = %card, session = %session,
+                reason = why, "owner approval recorded no standing approval");
+            return;
+        }
+    };
+    let l = learned.clone();
+    let new_id: Arc<Mutex<i64>> = Arc::new(Mutex::new(0));
+    let slot = new_id.clone();
+    let res = state
+        .store
+        .write_async(move |conn| {
+            let exists: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM standing_approvals WHERE source = ?1 AND revoked = 0 LIMIT 1",
+                    [&l.source],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if exists.is_some() {
+                return Ok(crate::db::WriteOutcome { applied: false, events: vec![] });
+            }
+            conn.execute(
+                "INSERT INTO standing_approvals (title, allowed, category, limits, max_per_day, \
+                 max_amount_usd, require_terms, scope, granted_by, granted_at, source, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'owner', ?9, ?10, ?11)",
+                rusqlite::params![
+                    l.title,
+                    l.allowed,
+                    l.category,
+                    "learned from the owner approving the card; narrower than a written rule",
+                    l.max_per_day,
+                    l.max_amount_usd,
+                    l.require_terms.join(","),
+                    l.scope,
+                    now_s(),
+                    l.source,
+                    l.expires_at
+                ],
+            )?;
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = conn.last_insert_rowid();
+            Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+        })
+        .await;
+    let id = *new_id.lock().unwrap_or_else(|e| e.into_inner());
+    match res {
+        Ok(_) if id > 0 => tracing::info!(verdict = "standing_approval_learned", approval = %format!("SA-{id}"),
+            card = %card, category = %learned.category, scope = %learned.scope,
+            terms = %learned.require_terms.join(","), "owner approval saved as a standing approval"),
+        Ok(_) => tracing::info!(verdict = "standing_approval_not_learned", card = %card,
+            reason = "already learned from this card", "owner approval recorded no standing approval"),
+        Err(e) => tracing::warn!(verdict = "standing_approval_learn_failed", card = %card, error = %e,
+            "could not save the owner approval as a standing approval"),
+    }
+}
+
 /// Owner-only writes: the rule `grants.rs` and `/api/config/cross-group` use.
 /// A request carrying a worker identity is a worker; so is a scoped (invited,
 /// non-global) dashboard member. A lane that could write here would be
@@ -1433,6 +1654,60 @@ pub fn memory_section_from(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod learn_tests {
+    use super::*;
+
+    #[test]
+    fn what_an_owner_approval_teaches() {
+        let now = 1_790_000_000;
+        // Live 2026-09-27/28 specimens.
+        let l = learn_from("MM-83", "mxp-marketing", "credential",
+            "Can you mint a new Ethan Personal org API key in Studio and store it as GTM_MIXPEEK_API_KEY?", "", now).unwrap();
+        assert_eq!((l.category.as_str(), l.scope.as_str()), ("credential", "global"));
+        assert!(l.require_terms.len() >= 2 && l.require_terms.iter().all(|t| t.chars().count() >= 5), "{:?}", l.require_terms);
+        assert_eq!(l.expires_at, now + LEARNED_TTL_DAYS * 86_400);
+
+        // Spend stays on the asking lane and is capped at the approved figure.
+        let l = learn_from("MI-5655", "mvs-infra", "budget",
+            "Do you approve a TS indexer node (about $90-130/mo spot or $390-425/mo on-demand), or hold?", "", now).unwrap();
+        assert_eq!((l.category.as_str(), l.scope.as_str()), ("budget", "worker:mvs-infra"));
+        assert_eq!(l.max_amount_usd, Some(425.0));
+
+        // Prod data: the lane, once a day.
+        let l = learn_from("MI-5204", "mvs-infra", "decision",
+            "Do you approve purging the five corrupt legacy default-namespace indexes?", "", now).unwrap();
+        assert_eq!((l.category.as_str(), l.scope.as_str(), l.max_per_day), ("prod_data", "worker:mvs-infra", Some(1)));
+
+        // Not learned: outbound, a decline, a reply, a generic ask, the recorder's prefix handled.
+        assert!(learn_from("LV-83", "launch-videos", "customer_outbound", "Post the 526-character launch tweet natively from X?", "", now).is_err());
+        assert!(learn_from("MM-83", "mxp-marketing", "credential", "Can you mint a new Studio API key for Teal Renewables?", "[Sep 28] Declined by owner in needs-input triage.", now).is_err());
+        assert!(learn_from("X-1", "lane", "decision", "Proceed?", "", now).is_err());
+        let l = learn_from("AMH-17", "amux-meta-helper", "decision",
+            "Owner ask (decision): Given the size, want me to keep this as a reference list, or work through one category at a time?", "", now).unwrap();
+        assert!(!l.allowed.starts_with("Owner ask"), "{}", l.allowed);
+    }
+
+    #[test]
+    fn a_learned_approval_matches_the_same_ask_again_and_not_an_unrelated_one() {
+        let now = 1_790_000_000;
+        let l = learn_from("MM-83", "mxp-marketing", "credential",
+            "Can you mint a new Ethan Personal org API key in Studio and store it as GTM_MIXPEEK_API_KEY?", "", now).unwrap();
+        let a = StandingApproval {
+            id: 1, title: l.title, allowed: l.allowed, category: l.category, limits: String::new(),
+            max_per_day: l.max_per_day, max_amount_usd: l.max_amount_usd, require_terms: l.require_terms,
+            scope: l.scope, granted_by: "owner".into(), granted_at: now, source: l.source,
+            expires_at: Some(l.expires_at), revoked: false, revoked_at: None, revoked_by: None,
+        };
+        let v = match_ask(std::slice::from_ref(&a), "Can you mint the Ethan Personal org API key again and store GTM_MIXPEEK_API_KEY?",
+            Some("credential"), "gtm-engine", &[], now, &|_| 0);
+        assert!(matches!(v, MatchVerdict::Applied { .. }), "{v:?}");
+        let v = match_ask(std::slice::from_ref(&a), "Can you rotate the NPM_TOKEN in the org's GitHub secrets?",
+            Some("credential"), "mixpeek-docs", &[], now, &|_| 0);
+        assert!(!matches!(v, MatchVerdict::Applied { .. }), "{v:?}");
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod tests {

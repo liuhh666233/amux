@@ -2461,6 +2461,28 @@ fn warn_once_on_unrecognized_spinner(lines: &[&str]) {
     }
 }
 
+/// Is a picker footer ("Enter to select ... Esc to cancel") the live bottom of
+/// the frame? True when every line after it is chrome: a rule line, a bare
+/// prompt, or the status bar (mode, shells, agents, "esc to interrupt").
+fn picker_footer_is_live(lines: &[&str]) -> bool {
+    let Some(footer) = lines.iter().rposition(|l| {
+        let ll = l.to_lowercase();
+        ll.contains("enter to select") && ll.contains("esc to cancel")
+    }) else {
+        return false;
+    };
+    lines[footer + 1..].iter().all(|l| {
+        let t = l.trim();
+        let tl = t.to_lowercase();
+        t.starts_with('\u{2500}')
+            || matches!(t, "\u{276f}" | "\u{203a}")
+            || t.contains("\u{23f5}\u{23f5}")
+            || tl.contains("bypass permissions")
+            || tl.contains("plan mode")
+            || tl.contains("esc to interrupt")
+    })
+}
+
 pub(crate) fn detect_claude_status(raw_output: &str) -> String {
     if raw_output.is_empty() {
         return String::new();
@@ -2485,6 +2507,16 @@ pub(crate) fn detect_claude_status(raw_output: &str) -> String {
         return "active".into();
     }
     let reading_re = cached_re!(r"^Reading \d+ file");
+    // A LIVE picker blocks the main turn even while background agents run
+    // (gs-3-bucket-objects, 2026-09-24): its footer sits ABOVE the prompt,
+    // and the agents' "esc to interrupt" would otherwise read as active. It
+    // is live only when nothing but chrome follows the footer. A picker
+    // QUOTED in output is followed by more output ("⏺ Finished normally."),
+    // which a whole-frame scan for the footer could not tell apart
+    // (status_chaos_tests::current_questions_survive_but_quoted_questions_do_not).
+    if picker_footer_is_live(&lines) {
+        return "waiting".into();
+    }
     // Claude Code yields the main composer while background agents continue,
     // so every ordinary main-turn signal looks idle. This provider-owned row
     // is the positive lifecycle statement; share its exact parser with the
@@ -2533,19 +2565,6 @@ pub(crate) fn detect_claude_status(raw_output: &str) -> String {
             status_bar = lsl;
             break;
         }
-    }
-    // A picker's footer sits ABOVE the prompt line, outside `current_lines`.
-    // When background agents paint "esc to interrupt" on the status bar, the
-    // status-bar check below returns "active" before the picker loop at (2)
-    // ever runs. The picker is the blocking state: the user must answer it
-    // before the main turn continues, regardless of background agents.
-    // Scan the bottom of the FULL frame for the footer.
-    let picker_footer_visible = lines[n.saturating_sub(20)..].iter().any(|l| {
-        let ll = l.to_lowercase();
-        ll.contains("enter to select") && ll.contains("esc to cancel")
-    });
-    if picker_footer_visible {
-        return "waiting".into();
     }
     if status_bar.is_empty() {
         if current.contains("Resume from summary") && current.contains("Resume full session") {
@@ -9868,6 +9887,16 @@ pub(crate) fn send_failure_status(msg: &str) -> (StatusCode, Option<&'static str
             Some("the message is in the lane's composer and submits at its next idle boundary; do not resend it"),
         );
     }
+    // --- 409: the composer still holds text after two C-u clears, usually
+    //     because a picker or dialog is covering it (9397589f). The send was
+    //     ABORTED before pasting so nothing got concatenated; nothing was
+    //     delivered and the lane's own state has to change first.
+    if m.starts_with("composer could not be cleared before pasting") {
+        return (
+            StatusCode::CONFLICT,
+            Some("nothing was pasted: the lane's composer holds text or a dialog is open. Open the worker, submit or clear what is there, then resend"),
+        );
+    }
     // --- 404: the target does not exist.
     if m.starts_with("session '") && m.ends_with("not found") {
         return (
@@ -11131,7 +11160,11 @@ pub(crate) fn is_schedule_guard(guard: &str) -> bool {
 /// have been continued automatically on the harness level. especially since
 /// its a /goal"). Both reach isolated workers, as owner input.
 pub(crate) fn is_owner_configured_guard(guard: &str) -> bool {
-    is_schedule_guard(guard) || guard.starts_with("goal:")
+    // `owner-policy:` is standing authority the owner configured (Ethan,
+    // 2026-09-27 13:20: "it needs to be optimized for auto pushing"): an
+    // in-boundary ask from an isolated lane is answered "proceed" on his behalf
+    // instead of parking as a card only he can clear. Same class as a schedule.
+    is_schedule_guard(guard) || guard.starts_with("goal:") || guard.starts_with("owner-policy:")
 }
 
 pub(crate) async fn deliver_automated(
@@ -20818,8 +20851,10 @@ fn orphan_landing(session: &str, text: &str, queued_at: f64) -> OrphanLanding {
         return OrphanLanding::Landed;
     }
     // Pasted but not submitted: re-queueing would type it twice.
+    // Exact-match target, so a sibling `amux-<session>-2` is never read instead.
+    let pt = crate::backend::tmux::pane_target(&format!("amux-{session}"));
     let pane = std::process::Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", &format!("amux-{session}"), "-S", "-80"])
+        .args(["capture-pane", "-p", "-t", &pt, "-S", "-80"])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -41191,13 +41226,12 @@ Enter to select \u{00b7} \u{2191}/\u{2193} to navigate \u{00b7} Esc to cancel\n\
             Some(json!({"toggle_pin": true})),
         )
         .await;
+        // A STOPPED project worker is deletable (8c2f32c4, Ethan 2026-09-26:
+        // "i want a way to delete workers"); only a RUNNING one is refused,
+        // because it may be writing the project's shared checkout. This test
+        // has no tmux, so the worker reads as stopped and the delete lands.
         let mut project_env = EnvFile::load(&env_path("probe"));
         project_env.set("CC_PROJECT", "sample");
-        project_env.write(&env_path("probe")).unwrap();
-        let (st, v) = call(&app, "POST", "/api/sessions/probe/delete", None).await;
-        assert_eq!(st, StatusCode::CONFLICT, "{v}");
-        assert!(env_path("probe").exists(), "project worker history must survive");
-        project_env.remove("CC_PROJECT");
         project_env.write(&env_path("probe")).unwrap();
         let (st, v) = call(&app, "POST", "/api/sessions/probe/delete", None).await;
         assert_eq!(st, StatusCode::OK, "{v}");

@@ -84,6 +84,7 @@ pub fn routes() -> Router<AppState> {
         .route("/stop", post(stop))
         .route("/identify", post(identify))
         .route("/profiles", get(profiles))
+        .route("/profile-access", get(super::browser_scope::profile_access))
         .route("/profile/create", post(profile_create))
         .route("/profile/combine", post(profile_combine))
         .route("/profile/{name}", delete(profile_delete))
@@ -1107,6 +1108,17 @@ pub(crate) async fn connect_session(
     // sequence that spans a rebuild continues instead of reporting "no
     // amux-launched browser is running" about a browser that is right there.
     chrome::adopt_if_orphaned(&chrome::amux_home()).await;
+    // PROFILE SCOPE (AMUX-5307). A lane that started nothing still drives the
+    // one running browser (`port_for_session` rule 2), which may be on a
+    // profile it may not use. `"amux"` and `"search"` are the anonymous tab
+    // buckets, not a worker identity, so they are not checked here.
+    if session != "amux" && session != "search" {
+        if let Some(profile) = chrome::profile_for_session(session) {
+            if let Err(denied) = super::browser_scope::profile_allowed(session, &profile) {
+                return Err(denied.response());
+            }
+        }
+    }
     let page = chrome::resolve_page(session, create_url)
         .await
         .map_err(driver_err)?;
@@ -1236,6 +1248,14 @@ async fn start(
     // same-session match, or two anonymous callers stomp each other freely
     // and every anonymous refusal frames the default lane.
     let attrib = explicit_session(body.session.as_deref(), &headers);
+    // PROFILE SCOPE (AMUX-5307). Checked before the takeover guard and before
+    // any launch: a refused profile must not cost a Chrome start or displace a
+    // running browser. Owner requests (no attribution) are always allowed.
+    if let Err(denied) =
+        super::browser_scope::profile_allowed(attrib.as_deref().unwrap_or(""), &body.profile)
+    {
+        return denied.response();
+    }
     // TAKEOVER GUARD (AMUX-3063). One browser per machine means start REPLACES
     // whatever is running — including another session's staged, logged-in
     // page. Refuse a cross-session replace unless the caller says takeover
@@ -2194,7 +2214,7 @@ struct ProfilesQuery {
 ///
 /// Read-only and copy-first: the live DB is never opened in place, because a
 /// listing must not be able to disturb a login.
-fn profile_contents(dir: &std::path::Path) -> (Option<i64>, Vec<String>) {
+pub(crate) fn profile_contents(dir: &std::path::Path) -> (Option<i64>, Vec<String>) {
     let Some(db) = profile_cookie_db(dir) else {
         return (Some(0), Vec::new());
     };
@@ -2224,7 +2244,7 @@ fn profile_contents(dir: &std::path::Path) -> (Option<i64>, Vec<String>) {
     }
 }
 
-async fn profiles(Query(q): Query<ProfilesQuery>) -> Response {
+async fn profiles(headers: HeaderMap, Query(q): Query<ProfilesQuery>) -> Response {
     let with_sizes = q
         .sizes
         .as_deref()
@@ -2252,6 +2272,14 @@ async fn profiles(Query(q): Query<ProfilesQuery>) -> Response {
     let running: std::collections::HashSet<String> =
         chrome::running_all().into_iter().map(|(p, ..)| p).collect();
     let now = crate::config::now_f64();
+    // WHO CAN USE EACH PROFILE (AMUX-5307). Discovery stays open to everyone;
+    // this only annotates. `allowed_for_you` answers for the calling worker
+    // (true for the owner, who is never refused).
+    let you = explicit_session(None, &headers);
+    let access = super::browser_scope::AccessIndex::build(
+        &crate::api::session_verbs::home(),
+        you.as_deref(),
+    );
     let rows: Vec<Value> = list
         .iter()
         .map(|p| {
@@ -2277,6 +2305,10 @@ async fn profiles(Query(q): Query<ProfilesQuery>) -> Response {
                     json!(age_days.map(|d| (d * 10.0).round() / 10.0)),
                 );
                 o.insert("reap_exempt_reason".into(), json!(exempt));
+                o.insert("access".into(), access.for_profile(&p.name));
+                // `owner`/`description` only when a human recorded one in the
+                // registry; `summary` below is the derived description.
+                o.insert("owner".into(), json!(p.owner));
                 // DERIVED, so discovery never depends on anyone having
                 // remembered to describe a profile.
                 let dir = crate::integrations::browser::resolve_profile_dir(
@@ -2383,8 +2415,16 @@ async fn profile_combine(
     headers: HeaderMap,
     Json(body): Json<CombineBody>,
 ) -> Response {
-    let _ = (&state, &headers);
+    let _ = &state;
     let name = body.name.trim().to_string();
+    // PROFILE SCOPE (AMUX-5307): combining copies every source's logins into
+    // the new profile, so it is a USE of each source and of the result.
+    let actor = explicit_session(None, &headers).unwrap_or_default();
+    for p in body.sources.iter().map(|s| s.trim()).chain([name.as_str()]) {
+        if let Err(denied) = super::browser_scope::profile_allowed(&actor, p) {
+            return denied.response();
+        }
+    }
     if name.is_empty()
         || !name
             .chars()
@@ -2644,6 +2684,13 @@ async fn profile_create(
             StatusCode::BAD_REQUEST,
             json!({ "error": "'default' already exists" }),
         );
+    }
+    // PROFILE SCOPE (AMUX-5307): create opens a sign-in window on the profile.
+    if let Err(denied) = super::browser_scope::profile_allowed(
+        &explicit_session(body.session.as_deref(), &headers).unwrap_or_default(),
+        &name,
+    ) {
+        return denied.response();
     }
     let home = chrome::amux_home();
     // Create in the amux-owned location so create-path == use-path (the L7
@@ -4071,7 +4118,8 @@ fn catalog_body(path: &str) -> Response {
             "error": format!("browser route not found: {path}"),
             "routes": [
                 "GET /api/browser/status", "GET /api/browser/state", "GET /api/browser/screenshot",
-                "GET /api/browser/profiles", "GET /api/browser/pw-profiles", "GET /api/browser/sessions",
+                "GET /api/browser/profiles", "GET /api/browser/profile-access?level=&name=",
+                "GET /api/browser/pw-profiles", "GET /api/browser/sessions",
                 "GET /api/browser/history (durable redacted action trail)",
                 "GET /api/browser/ios/targets (local iOS Simulator runtime/device inventory)",
                 "POST /api/browser/ios/start (session, udid, url); /ios/{status,state,screenshot,action,stop} (explicit session required)",
@@ -4281,6 +4329,100 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, v, proxied)
+    }
+
+    /// AMUX-5307 through the real routes, over a hermetic home. The refusal
+    /// happens before any launch, so no Chrome is spawned by the denied start.
+    #[tokio::test]
+    async fn profile_scope_refuses_a_worker_start_with_a_useful_body() {
+        let _reg = crate::integrations::browser::TEST_REGISTRY.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(dir.path());
+        chrome::test_clear_running();
+        let h = dir.path();
+        std::fs::write(h.join("amux.env"), "AMUX_BROWSER_PROFILES_DENY=netsuite\n").unwrap();
+        std::fs::create_dir_all(h.join("sessions")).unwrap();
+        std::fs::write(h.join("sessions/w1.env"), "CC_TAGS=gtm\n").unwrap();
+        std::fs::create_dir_all(h.join("env")).unwrap();
+        std::fs::write(h.join("env/gtm.env"), "AMUX_BROWSER_PROFILES_ALLOW=persona-*\n").unwrap();
+        for p in ["netsuite", "persona-a", "ethan-tubescience"] {
+            std::fs::create_dir_all(h.join("playwright-auth/profiles").join(p)).unwrap();
+        }
+        let app = app();
+
+        // Group allow list replaces the global default: netsuite is refused at
+        // the GROUP scope (the global deny is never reached).
+        let (status, v, _) = send(
+            &app,
+            "POST",
+            "/api/browser/start",
+            Some(r#"{"profile":"netsuite","session":"w1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["code"], "profile_not_in_scope", "{v}");
+        assert_eq!(v["rule"]["scope"], "group:gtm", "{v}");
+        assert_eq!(v["rule"]["key"], "AMUX_BROWSER_PROFILES_ALLOW", "{v}");
+        assert_eq!(v["allowed_profiles"], json!(["persona-a"]), "{v}");
+        assert!(chrome::running_snapshot_for("netsuite").is_none(), "nothing launched");
+
+        // A worker outside the group hits the global deny.
+        std::fs::write(h.join("sessions/w2.env"), "").unwrap();
+        let (status, v, _) = send(
+            &app,
+            "POST",
+            "/api/browser/start",
+            Some(r#"{"profile":"netsuite","session":"w2"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["rule"]["scope"], "global", "{v}");
+        assert_eq!(v["rule"]["key"], "AMUX_BROWSER_PROFILES_DENY", "{v}");
+
+        // create and combine are uses too.
+        let (status, v, _) = send(
+            &app,
+            "POST",
+            "/api/browser/profile/create",
+            Some(r#"{"name":"ethan-new","session":"w1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+
+        // A driver verb that would drive the ONE running browser (started by
+        // someone else, on a profile w1 may not use) is refused too.
+        chrome::test_seed_running("netsuite", "amux-gtm", 424243);
+        let (status, v, _) = send(
+            &app,
+            "POST",
+            "/api/browser/navigate",
+            Some(r#"{"url":"https://example.com","session":"w1"}"#),
+        )
+        .await;
+        chrome::test_clear_running();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["profile"], "netsuite", "{v}");
+
+        // The level view the Scope tab renders.
+        let (status, v, _) = send(
+            &app,
+            "GET",
+            "/api/browser/profile-access?level=group&name=gtm",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["set_here"]["allow"], "persona-*", "{v}");
+        assert_eq!(v["n_allowed"], 1, "{v}");
+
+        // Discovery stays open: the listing still shows all three, annotated.
+        let (status, v, _) = send(&app, "GET", "/api/browser/profiles", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = v["profiles"].as_array().unwrap();
+        let ns = rows.iter().find(|r| r["name"] == "netsuite").unwrap();
+        assert_eq!(ns["access"]["all_workers"], json!(false), "{ns}");
+        assert_eq!(ns["access"]["allowed_for_you"], json!(true), "owner sees it usable");
+        assert!(rows.len() >= 3);
     }
 
     /// `/keepalive` resets the activity clock, and SAYS WHICH BROWSER (AMUX-4685).

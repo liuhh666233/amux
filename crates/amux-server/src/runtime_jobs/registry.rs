@@ -106,6 +106,7 @@ pub mod ids {
     pub const SELF_ADOPT: &str = "self-adoption";
     pub const TUNNEL: &str = "tunnel-relay";
     pub const BROWSER_REAPER: &str = "browser-idle-reaper";
+    pub const COMPUTER_REAPER: &str = "computer-sandbox-reaper";
     // The PeriodicTask ids below are NOT referenced by any spawn site — they
     // register themselves through `spawn_periodic_every` under the name their
     // own module passes. They are listed here only so CATALOG rows and tests
@@ -131,6 +132,7 @@ pub mod ids {
     pub const MODEL_CATALOG_REFRESH: &str = "model-catalog-refresh";
     pub const CAPTURE_RECONCILE: &str = "capture-reconcile";
     pub const EMAIL_APPROVAL_DIGEST: &str = "email-approval-digest";
+    pub const NEEDS_INPUT_AUTO: &str = "needs-input-auto";
 }
 
 /// Every id above, enumerated. `mod ids` is a set of constants and Rust cannot
@@ -155,6 +157,7 @@ pub const ALL_IDS: &[&str] = &[
     ids::SELF_ADOPT,
     ids::TUNNEL,
     ids::BROWSER_REAPER,
+    ids::COMPUTER_REAPER,
     ids::AUTOFIX,
     ids::BOARD_DRIVE,
     ids::CDC_POLLER,
@@ -180,6 +183,7 @@ pub const ALL_IDS: &[&str] = &[
     ids::MODEL_CATALOG_REFRESH,
     ids::CAPTURE_RECONCILE,
     ids::EMAIL_APPROVAL_DIGEST,
+    ids::NEEDS_INPUT_AUTO,
 ];
 
 /// An env var this job reads at startup. It is a READOUT, never a switch: a
@@ -436,6 +440,25 @@ pub const CATALOG: &[Doc] = &[
         env: &[EnvControl { var: "AMUX_RS_BOOTSTRAP_SECS", effect: "pass seconds (default 2)", off: None }],
         pref: None,
         detail: None,
+    },
+    Doc {
+        id: ids::COMPUTER_REAPER,
+        name: "Computer sandbox reaper",
+        purpose: "Removes amux-labelled CUA computer-use containers that are idle, exited, duplicated for one lane, or unowned. Never starts Docker; finds containers by the amux-computer label only.",
+        env: &[
+            EnvControl {
+                var: "AMUX_COMPUTER_IDLE_S",
+                effect: "seconds without an action before a sandbox is stopped (default 900 = 15 min); 0 disables this arm",
+                off: None, // disables one arm, not the running job
+            },
+            EnvControl {
+                var: "AMUX_COMPUTER_REAP_TICK_S",
+                effect: "sweep interval in seconds (default 60)",
+                off: None,
+            },
+        ],
+        pref: None,
+        detail: Some("/api/computer/status"),
     },
     Doc {
         id: ids::BROWSER_REAPER,
@@ -807,6 +830,34 @@ pub const CATALOG: &[Doc] = &[
         ],
         pref: None,
         detail: Some("/api/email/approvals"),
+    },
+    Doc {
+        id: ids::NEEDS_INPUT_AUTO,
+        name: "Needs-input auto-approve",
+        purpose: "Every minute, approves each NEW needs-input item that its worker's policy \
+                  covers (judgment asks and spend up to $50 by default; production data and \
+                  outbound sends off), exactly as the triage sheet's Approve does, once per \
+                  item. Credential and access asks are never approved. AMUX-5301.",
+        env: &[
+            EnvControl {
+                var: "AMUX_NEEDS_INPUT_AUTO",
+                effect: "0 in server.env stops it fleet-wide; scoped per worker/group it turns \
+                         one worker or group off (re-read every tick)",
+                off: None,
+            },
+            EnvControl {
+                var: "AMUX_NEEDS_INPUT_AUTO_TICK_S",
+                effect: "seconds between passes (default 60, floor 30)",
+                off: None,
+            },
+            EnvControl {
+                var: "AMUX_NEEDS_INPUT_AUTO_SECS",
+                effect: "0 disables the job",
+                off: Some("0"),
+            },
+        ],
+        pref: None,
+        detail: Some("/api/needs-input/auto"),
     },
 ];
 

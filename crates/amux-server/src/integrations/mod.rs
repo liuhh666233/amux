@@ -19,6 +19,7 @@
 pub mod brex;
 pub mod browser;
 pub mod calendar;
+pub mod computer;
 pub mod email;
 
 use serde_json::{json, Map, Value};

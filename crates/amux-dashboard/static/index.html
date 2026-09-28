@@ -225,7 +225,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <span id="rate-limit-pill-text">0 limited</span>
       <span id="rate-limit-pill-count" aria-hidden="true">0</span>
     </button>
-    <button class="btn-rate-limit btn-needs-input" id="needs-input-pill" title="Workers waiting on you" onclick="event.stopPropagation();openFirstNeedsInput()">
+    <button class="btn-rate-limit btn-needs-input" id="needs-input-pill" title="Needs your input: tap to triage" onclick="event.stopPropagation();openNeedsInput()">
       <span id="needs-input-pill-text">0 need input</span>
       <span id="needs-input-pill-count" aria-hidden="true">0</span>
     </button>
@@ -441,6 +441,12 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
           <div id="standing-approvals-list" style="font-size:0.78rem;">Loading…</div>
           <div style="font-weight:600;font-size:0.8rem;margin:10px 0 6px;">Recent auto-answers</div>
           <div id="standing-approvals-uses" style="font-size:0.74rem;color:var(--dim);"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="needs-input-auto-section">
+          <div class="settings-section-label">Automatic approval</div>
+          <div style="font-size:0.68rem;color:var(--dim);margin-bottom:8px;line-height:1.4;">Worker asks approved for you as they arrive. This is the fleet default; each worker can override it in its Configurations tab.</div>
+          <div id="ni-auto-settings" style="font-size:0.78rem;">Loading…</div>
         </div>
         </div>
         <div class="settings-tab-panel" id="stab-integrations" data-stab="integrations">

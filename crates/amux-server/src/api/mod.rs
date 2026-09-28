@@ -15,11 +15,13 @@ pub mod branding;
 pub mod brex;
 pub mod browser;
 pub mod browser_import;
+pub mod browser_scope;
 pub mod calendar;
 pub mod channels;
 pub mod chat_stream;
 pub mod chat_worker;
 pub mod commit_mentions;
+pub mod computer;
 pub mod config_iac;
 pub mod connection;
 pub mod connectors;
@@ -58,6 +60,8 @@ pub mod map;
 pub mod mcp;
 pub mod mdai;
 pub mod measured;
+pub mod needs_input;
+pub mod needs_input_auto;
 pub mod memories;
 pub mod messages;
 pub(crate) mod native_status;
@@ -247,6 +251,9 @@ pub fn router(state: AppState) -> Router {
         // standing proof of the cutover. Matrix:
         // docs/rust-migration/server-boundary.md.
         .nest("/api/browser", browser::routes())
+        // Rung 3 of the access ladder (AMUX-5300): CUA computer-use sandboxes,
+        // one Docker desktop per lane. api/computer.rs.
+        .nest("/api/computer", computer::routes())
         // Server-machine screen capture (AMUX-4661): a real macOS Screen
         // Recording permission grant needs the OS's own native prompt, not a
         // manually-added System Settings entry — see screen.rs header for why.
@@ -306,6 +313,9 @@ pub fn router(state: AppState) -> Router {
         .merge(grants::routes())
         // AMUX-5270: the owner's standing answers to escalations.
         .merge(standing_approvals::routes())
+        // AMUX-5286: the owner's one-at-a-time triage queue.
+        .merge(needs_input::routes())
+        .merge(needs_input_auto::routes())
         .merge(vault::routes())
         .merge(self_update::routes())
         .nest("/api/proxies", proxies::routes())

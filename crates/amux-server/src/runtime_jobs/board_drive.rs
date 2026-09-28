@@ -9305,74 +9305,86 @@ fn capture_shell_cost(conn: &rusqlite::Connection) -> Value {
     })
 }
 
-/// GET /api/board/nudges — current CC_STANDING_ORDERS state at every scope.
+/// The file a nudges scope lives in: the SAME files `scoped_setting_in` reads.
+/// The worker scope used to be `workers/<name>/env`, which nothing reads (none
+/// existed on 2026-09-27), so the panel's worker On/Off changed nothing.
+fn nudges_scope_path(home: &std::path::Path, level: &str, name: &str) -> Option<std::path::PathBuf> {
+    match level {
+        "global" => Some(home.join("amux.env")),
+        "group" if !name.is_empty() => Some(home.join("env").join(format!("{name}.env"))),
+        "worker" if !name.is_empty() => Some(home.join("sessions").join(format!("{name}.env"))),
+        _ => None,
+    }
+}
+
+/// Explicit CC_STANDING_ORDERS in one scope file: Some(on/off), or None if absent.
+fn nudges_explicit(path: &std::path::Path) -> Option<bool> {
+    crate::config::parse_env_file(path)
+        .into_iter()
+        .find(|(k, _)| k == "CC_STANDING_ORDERS")
+        .map(|(_, v)| crate::api::session_verbs::auto_continue_on(Some(v.as_str())))
+}
+
+/// Of the workers with an env file, how many actually get continue-nudges,
+/// through the one predicate the board drive uses. Lets the panel say what an
+/// On/Off DID rather than only what it wrote.
+fn nudges_effective(home: &std::path::Path) -> (usize, usize) {
+    let mut on = 0;
+    let mut total = 0;
+    if let Ok(rd) = std::fs::read_dir(home.join("sessions")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("env") {
+                continue;
+            }
+            let Some(name) = p.file_stem().and_then(|x| x.to_str()) else { continue };
+            total += 1;
+            if crate::api::session_verbs::standing_orders_on_in(home, name, "CC_AUTO_CONTINUE") {
+                on += 1;
+            }
+        }
+    }
+    (on, total)
+}
+
+/// GET /api/board/nudges — explicit CC_STANDING_ORDERS at every scope, and how
+/// many workers actually get continue-nudges.
 ///
-/// Returns `{"global": bool, "groups": {"name": bool, ...}, "workers": {"name": bool, ...}}`
-/// where `true` = nudges ON, `false` = disabled at that level (default OFF).
-///
-/// Reads the env files directly — same source `standing_orders_on_in` reads.
+/// DEFAULT OFF since 0d2a0757 (Ethan, 2026-09-24: every board toggle off by
+/// default except decompose). An absent key is OFF. A nudge fires only when
+/// the master (CC_STANDING_ORDERS) and the class (CC_AUTO_CONTINUE) both
+/// resolve on, so `effective_on` is the number the panel should believe.
 pub async fn get_nudges() -> axum::response::Response {
     use axum::response::IntoResponse;
     let home = crate::api::session_verbs::home();
-
-    let global_val = crate::config::parse_env_file(&home.join("amux.env"))
-        .into_iter()
-        .find(|(k, _)| k == "CC_STANDING_ORDERS")
-        .map(|(_, v)| crate::api::session_verbs::auto_continue_on(Some(v.as_str())));
-
-    // Groups: ~/.amux/env/<name>.env
-    let mut groups: serde_json::Map<String, Value> = serde_json::Map::new();
-    if let Ok(rd) = std::fs::read_dir(home.join("env")) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("env") {
-                let name = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if name.is_empty() {
+    let scan = |dir: std::path::PathBuf| {
+        let mut out = serde_json::Map::new();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("env") {
                     continue;
                 }
-                let val = crate::config::parse_env_file(&p)
-                    .into_iter()
-                    .find(|(k, _)| k == "CC_STANDING_ORDERS")
-                    .map(|(_, v)| crate::api::session_verbs::auto_continue_on(Some(v.as_str())));
-                if let Some(b) = val {
-                    groups.insert(name, Value::Bool(b));
+                let Some(name) = p.file_stem().and_then(|x| x.to_str()) else { continue };
+                if let Some(b) = nudges_explicit(&p) {
+                    out.insert(name.to_string(), Value::Bool(b));
                 }
             }
         }
-    }
-
-    // Workers: ~/.amux/workers/<name>/env
-    let mut workers: serde_json::Map<String, Value> = serde_json::Map::new();
-    if let Ok(rd) = std::fs::read_dir(home.join("workers")) {
-        for entry in rd.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let env_path = entry.path().join("env");
-                if env_path.exists() {
-                    let val = crate::config::parse_env_file(&env_path)
-                        .into_iter()
-                        .find(|(k, _)| k == "CC_STANDING_ORDERS")
-                        .map(|(_, v)| {
-                            crate::api::session_verbs::auto_continue_on(Some(v.as_str()))
-                        });
-                    if let Some(b) = val {
-                        workers.insert(name, Value::Bool(b));
-                    }
-                }
-            }
-        }
-    }
-
+        out
+    };
+    let (on, total) = nudges_effective(&home);
     (axum::http::StatusCode::OK, axum::Json(json!({
         "key": "CC_STANDING_ORDERS",
-        "note": "true = nudges on (default), false = disabled. Scopes: global > group > worker.",
-        "global": global_val,
-        "groups": groups,
-        "workers": workers,
+        "default": false,
+        "note": "Absent = off (default). A worker is nudged only when CC_STANDING_ORDERS and CC_AUTO_CONTINUE both resolve on. Scopes: worker > group > global.",
+        "global": nudges_explicit(&home.join("amux.env")),
+        "groups": scan(home.join("env")),
+        "workers": scan(home.join("sessions")),
+        "effective_on": on,
+        "effective_total": total,
+        "measured": true,
+        "n_considered": total,
     }))).into_response()
 }
 
@@ -9383,73 +9395,56 @@ pub struct NudgesPatch {
     pub enabled: bool,
 }
 
-/// PATCH /api/board/nudges — enable or disable board nudges at a scope.
-///
-/// `{"level": "global", "enabled": false}` — silences all nudges fleet-wide.
-/// `{"level": "group", "name": "my-group", "enabled": false}` — group-level.
-/// `{"level": "worker", "name": "ts-gke", "enabled": false}` — per-worker.
-///
-/// Writes/removes CC_STANDING_ORDERS in the appropriate env file, which is the
-/// same file `standing_orders_on` reads. No restart required.
+/// PATCH /api/board/nudges — turn board nudges on or off at a scope by writing
+/// CC_STANDING_ORDERS=1 or 0 into that scope's env file, the file
+/// `standing_orders_on` reads. On must be WRITTEN: removing the key used to
+/// mean "default on" and now means off. Other keys, their order and the file
+/// mode are kept (EnvFile's atomic write). No restart required.
 pub async fn patch_nudges(axum::Json(body): axum::Json<NudgesPatch>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let home = crate::api::session_verbs::home();
     let level = body.level.as_str();
-    let name = body.name.as_deref().unwrap_or("");
-
-    if matches!(level, "group" | "worker") && name.is_empty() {
+    let name = body.name.as_deref().unwrap_or("").trim();
+    if matches!(level, "group" | "worker")
+        && (name.is_empty() || name.contains('/') || name.contains(".."))
+    {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": "name is required for group/worker level"})),
+            axum::Json(json!({"error": "a plain group or worker name is required for that level"})),
         )
             .into_response();
     }
-
-    let path = match level {
-        "global" => home.join("amux.env"),
-        "group" => home.join("env").join(format!("{name}.env")),
-        "worker" => home.join("workers").join(name).join("env"),
-        _ => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": "level must be global, group, or worker"})),
-            )
-                .into_response()
-        }
+    let Some(path) = nudges_scope_path(&home, level, name) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "level must be global, group, or worker"})),
+        )
+            .into_response();
     };
-
+    if level == "worker" && !path.exists() {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": format!("no worker named {name} (GET /api/sessions lists them)")})),
+        )
+            .into_response();
+    }
     if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({"error": e.to_string()})),
-            )
-                .into_response();
-        }
+        let _ = std::fs::create_dir_all(parent);
     }
-
-    // Read current env, set or remove CC_STANDING_ORDERS, write back.
-    let mut env: std::collections::BTreeMap<String, String> = if path.exists() {
-        crate::config::parse_env_file(&path).into_iter().collect()
-    } else {
-        Default::default()
-    };
-
-    if body.enabled {
-        env.remove("CC_STANDING_ORDERS"); // remove = default ON; explicit True is redundant
-    } else {
-        env.insert("CC_STANDING_ORDERS".into(), "False".into());
-    }
-
-    let text: String = env.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    if let Err(e) = std::fs::write(&path, text) {
+    let (before, _) = nudges_effective(&home);
+    let mut env = crate::api::session_verbs::EnvFile::load(&path);
+    env.set("CC_STANDING_ORDERS", if body.enabled { "1" } else { "0" });
+    if let Err(e) = env.write(&path) {
         return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({"error": e.to_string()})),
+            axum::Json(json!({"error": format!("could not write {}: {e}", path.display())})),
         )
             .into_response();
     }
-
+    let (after, total) = nudges_effective(&home);
+    tracing::info!(level, name, enabled = body.enabled, effective_before = before,
+        effective_after = after, n_considered = total, measured = true,
+        verdict = "nudges_scope_set", "board nudges set at a scope");
     (
         axum::http::StatusCode::OK,
         axum::Json(json!({
@@ -9457,14 +9452,50 @@ pub async fn patch_nudges(axum::Json(body): axum::Json<NudgesPatch>) -> axum::re
             "level": level,
             "name": name,
             "enabled": body.enabled,
-            "note": if body.enabled {
-                "CC_STANDING_ORDERS removed from env (nudges on by default)"
-            } else {
-                "CC_STANDING_ORDERS=False written to env (nudges disabled)"
-            },
+            "effective_on": after,
+            "effective_total": total,
+            "note": format!("CC_STANDING_ORDERS={} written. Workers getting continue-nudges: {before} -> {after} of {total}.",
+                if body.enabled { 1 } else { 0 }),
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod nudges_scope_tests {
+    use super::*;
+
+    /// The panel's scopes are the files the resolver reads, On is written
+    /// explicitly, and other keys survive the write.
+    #[test]
+    fn nudges_scopes_write_the_files_the_resolver_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join("sessions")).unwrap();
+        let w = h.join("sessions").join("lane.env");
+        std::fs::write(&w, "CC_DIR=\"/tmp\"\nCC_AUTO_CONTINUE=\"1\"\n").unwrap();
+        assert_eq!(nudges_scope_path(h, "worker", "lane").as_deref(), Some(w.as_path()));
+        assert_eq!(nudges_effective(h), (0, 1), "default off: the class key alone does not nudge");
+
+        let mut env = crate::api::session_verbs::EnvFile::load(&w);
+        env.set("CC_STANDING_ORDERS", "1");
+        env.write(&w).unwrap();
+        assert_eq!(nudges_explicit(&w), Some(true));
+        assert_eq!(nudges_effective(h), (1, 1), "master on + class on at worker scope = nudged");
+        let text = std::fs::read_to_string(&w).unwrap();
+        assert!(text.contains("CC_DIR") && text.contains("CC_AUTO_CONTINUE"), "{text}");
+
+        // A global Off beats nothing more specific here: worker scope already
+        // says 1, and worker outranks global, so it stays on.
+        std::fs::write(h.join("amux.env"), "CC_STANDING_ORDERS=0\n").unwrap();
+        assert_eq!(nudges_effective(h), (1, 1));
+        let mut env = crate::api::session_verbs::EnvFile::load(&w);
+        env.set("CC_STANDING_ORDERS", "0");
+        env.write(&w).unwrap();
+        assert_eq!(nudges_effective(h), (0, 1));
+        assert_eq!(nudges_scope_path(h, "worker", ""), None);
+        assert_eq!(nudges_scope_path(h, "fleet", "x"), None);
+    }
 }
 
 pub fn routes() -> axum::Router<AppState> {
@@ -10762,6 +10793,7 @@ mod tests {
         // scope fixed while parallel tests install and remove fixture homes.
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         drive_card(&store, "PARKED", "backlog", "agent", "code");
         drive_card(&store, "EXTERNAL", "todo", "agent", "code");
@@ -10806,6 +10838,9 @@ mod tests {
 
     #[tokio::test]
     async fn pending_blocker_review_suppresses_more_reviews_and_generic_nudges() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         for id in ["PARKED-A", "PARKED-B"] {
             drive_card(&store, id, "backlog", "agent", "code");
@@ -11049,6 +11084,9 @@ mod tests {
 
     #[test]
     fn missing_continuation_backlog_is_prepared_instead_of_repeatedly_failing_claim() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, _state, store) = drive_state();
         drive_card(&store, "INCOMPLETE", "backlog", "agent", "code");
         store
@@ -11082,6 +11120,9 @@ mod tests {
 
     #[tokio::test]
     async fn incomplete_intake_is_recoverable_and_delivery_failure_consumes_no_attempt() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         drive_card(&store, "INCOMPLETE", "backlog", "agent", "code");
         store.write(|conn| {
@@ -11515,6 +11556,9 @@ mod tests {
 
     #[tokio::test]
     async fn reviewed_blocker_yields_to_independent_verification_and_preserves_hold() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let (_dir, state, store) = drive_state();
         drive_card(&store, "HELD", "backlog", "agent", "code");
         drive_card(&store, "READY", "done", "agent", "code");
@@ -11942,6 +11986,7 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let (_dir, state, store) = drive_state();
         drive_card(&store, "READY", "backlog", "agent", "code");
@@ -12605,6 +12650,7 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let (_dir, state, store) = drive_state();
         drive_card(&store, "BACKLOG-REFUSED", "backlog", "agent", "code");
@@ -12625,6 +12671,7 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let (_dir, state, store) = drive_state();
         drive_card(&store, "DEP", "doing", "agent", "code");
@@ -14610,45 +14657,54 @@ mod tests {
     /// not convert the other two into failures that hide their own result.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// worker is expected to keep driving. Default-on is safe because the drain
-    /// query excludes every parked/human/trigger shape; an explicit 0 remains
-    /// the worker/group/global opt-out.
+    /// Backlog dispatch is OFF by default since 0d2a0757 (Ethan, 2026-09-24:
+    /// "every board toggle disabled by default except decompose onto board").
+    /// A test that exercises the drain opts its lane in at WORKER scope inside
+    /// its own temp home, which is how a real worker turns it on, rather than
+    /// relying on the old default or mutating the shared process env.
+    fn opt_in_backlog_dispatch(home: &std::path::Path, lane: &str) {
+        use std::io::Write as _;
+        let dir = home.join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(format!("{lane}.env")))
+            .unwrap();
+        writeln!(f, "{DISPATCH_BACKLOG_KEY}=1").unwrap();
+    }
+
+    /// Backlog dispatch is OFF unless the lane opts in (0d2a0757, Ethan
+    /// 2026-09-24: "all new workers should have every board toggle disabled by
+    /// default except decompose onto board"). This used to pin default-ON.
+    /// Scope files only: the process env is the operator override and is
+    /// cleared so it cannot stand in for either answer.
     #[test]
-    fn backlog_dispatch_is_on_by_default_and_supports_an_explicit_opt_out() {
+    fn backlog_dispatch_is_off_by_default_and_supports_an_explicit_opt_in() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The default must be tested against an actually empty scope chain,
         // not the developer machine's ~/.amux global configuration.
         let home = tempfile::tempdir().expect("temp home");
         let _home = crate::api::settings::test_env::set_home(home.path());
+        std::env::remove_var(DISPATCH_BACKLOG_KEY);
         let build = || {
             let conn = board_db();
             // No todo at all: the only state where this may fire.
-            add_card(
-                &conn,
-                "B-1",
-                "lane",
-                "backlog",
-                "oldest",
-                "SCOPE: x\n- [ ] y",
-            );
-            add_card(
-                &conn,
-                "B-2",
-                "lane",
-                "backlog",
-                "newer",
-                "SCOPE: x\n- [ ] y",
-            );
-            conn.execute("UPDATE issues SET created=100 WHERE id='B-1'", [])
-                .unwrap();
-            conn.execute("UPDATE issues SET created=200 WHERE id='B-2'", [])
-                .unwrap();
+            add_card(&conn, "B-1", "lane", "backlog", "oldest", "SCOPE: x\n- [ ] y");
+            add_card(&conn, "B-2", "lane", "backlog", "newer", "SCOPE: x\n- [ ] y");
+            conn.execute("UPDATE issues SET created=100 WHERE id='B-1'", []).unwrap();
+            conn.execute("UPDATE issues SET created=200 WHERE id='B-2'", []).unwrap();
             conn
         };
 
-        // DEFAULT ON: the oldest eligible card drains without every worker
-        // needing a redundant opt-in key.
-        std::env::remove_var(DISPATCH_BACKLOG_KEY);
+        // DEFAULT OFF: an empty scope chain moves no backlog card.
+        match select_pickup_with(&build(), "lane", now_f64(), false) {
+            Pickup::None { reason, .. } => assert_eq!(reason, "no-eligible-card"),
+            other => panic!("backlog dispatch must be off by default: {other:?}"),
+        }
+
+        // EXPLICIT OPT-IN at worker scope: the oldest eligible card drains.
+        opt_in_backlog_dispatch(home.path(), "lane");
         match select_pickup_with(&build(), "lane", now_f64(), false) {
             Pickup::DrainBacklog {
                 card,
@@ -14656,26 +14712,12 @@ mod tests {
                 todo_refusals,
                 ..
             } => {
-                assert_eq!(
-                    card, "B-1",
-                    "oldest first, so a starved card is not starved further"
-                );
-                assert_eq!(
-                    backlog_left, 2,
-                    "the count reports what is drainable, before the move"
-                );
+                assert_eq!(card, "B-1", "oldest first, so a starved card is not starved further");
+                assert_eq!(backlog_left, 2, "the count reports what is drainable, before the move");
                 assert_eq!(todo_refusals, 0, "an empty todo queue has no refusals");
             }
-            other => panic!("default-on backlog dispatch did not run: {other:?}"),
+            other => panic!("an opted-in lane must drain backlog: {other:?}"),
         }
-
-        // EXPLICIT OPT-OUT: no backlog card moves.
-        std::env::set_var(DISPATCH_BACKLOG_KEY, "0");
-        match select_pickup_with(&build(), "lane", now_f64(), false) {
-            Pickup::None { reason, .. } => assert_eq!(reason, "no-eligible-card"),
-            other => panic!("an opted-out lane must not drain backlog: {other:?}"),
-        }
-        std::env::remove_var(DISPATCH_BACKLOG_KEY);
     }
 
     /// The trace must SAY why a drain declined (AMUX-4055 follow-up).
@@ -16042,6 +16084,9 @@ mod tests {
     /// otherwise stop forever after its current card completed.
     #[test]
     fn a_blocked_todo_does_not_hide_actionable_backlog_from_auto_drain() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        opt_in_backlog_dispatch(home.path(), "lane");
         let conn = board_db();
         let now = now_f64();
         add_card(

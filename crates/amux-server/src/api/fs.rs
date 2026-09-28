@@ -460,6 +460,35 @@ async fn resolve_rel(method: Method, RawQuery(q): RawQuery) -> Response {
             return Json(json!({ "resolved": s, "exists": true, "tried": tried })).into_response();
         }
     }
+    // SIBLING SUBTREES (Ethan, 2026-09-27, mxp-marketing): a worker in
+    // gtm/playbooks printed `nbcuni/nbcuni-story.mp4` relative to
+    // gtm/launch-videos/prospect-videos, a directory it had named two lines
+    // earlier. The ascent tries ancestor/rel and the descent searches below
+    // the cwd, so a file in a SIBLING branch was reachable by neither and the
+    // viewer said "does not exist here". Search below each ancestor up to the
+    // repo root, nearest first, and take a match only when it is unique.
+    let mut ambiguous: Vec<String> = Vec::new();
+    if !exists {
+        let rel_clean = rel.trim().trim_start_matches('/').trim_start_matches("./");
+        if let Some(top) = git_toplevel_of(&cwd).await {
+            let cwd_path = PathBuf::from(cwd.trim_end_matches('/'));
+            match resolve_rel_sibling(&cwd_path, Path::new(&top), rel_clean, &allowed_exists, &real_list_dirs) {
+                Ok(Some(found)) => {
+                    let s = found.display().to_string();
+                    tracing::info!(rel = %rel, resolved = %s, measured = true, n_considered = 1,
+                        verdict = "fs_resolve_sibling_match", "resolved a path in a sibling subtree of the cwd");
+                    tried.push(s.clone());
+                    return Json(json!({ "resolved": s, "exists": true, "sibling": true, "tried": tried })).into_response();
+                }
+                Err(many) => {
+                    ambiguous = many.iter().map(|p| p.display().to_string()).collect();
+                    tracing::info!(rel = %rel, n = ambiguous.len(), measured = true, n_considered = ambiguous.len(),
+                        verdict = "fs_resolve_sibling_ambiguous", "path matches several sibling files; not guessing");
+                }
+                Ok(None) => {}
+            }
+        }
+    }
     // Git fallback: the file may exist on origin/main even though it is not
     // on disk (shared checkout behind origin, graft-push workflows). Ethan's
     // screenshots 2026-09-16: gtm-engine committed a file, pushed it, and the
@@ -475,6 +504,9 @@ async fn resolve_rel(method: Method, RawQuery(q): RawQuery) -> Response {
             }))
             .into_response();
         }
+    }
+    if !ambiguous.is_empty() {
+        return Json(json!({ "resolved": resolved, "exists": exists, "ambiguous": ambiguous, "tried": tried })).into_response();
     }
     Json(json!({ "resolved": resolved, "exists": exists, "tried": tried })).into_response()
 }
@@ -722,6 +754,69 @@ pub(crate) fn real_list_dirs(dir: &Path) -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Search below each ANCESTOR of `cwd`, nearest first, up to and including
+/// `top` (the repo root), for `ancestor/.../rel`. The cwd's own subtree is
+/// skipped (the plain descent already searched it), and so is the branch just
+/// climbed out of. At the first ancestor with any match, exactly one match is
+/// returned; several come back as `Err` rather than guessed between. Bounded
+/// per ancestor by the same depth, visit cap and skip list as the descent.
+pub(crate) fn resolve_rel_sibling(
+    cwd: &Path,
+    top: &Path,
+    rel: &str,
+    exists: &dyn Fn(&Path) -> bool,
+    list_dirs: &dyn Fn(&Path) -> Vec<PathBuf>,
+) -> Result<Option<PathBuf>, Vec<PathBuf>> {
+    if rel.is_empty() || !cwd.starts_with(top) {
+        return Ok(None);
+    }
+    let mut came_from = cwd.to_path_buf();
+    let mut anc = cwd.parent();
+    while let Some(a) = anc {
+        if !a.starts_with(top) {
+            break;
+        }
+        let mut matches: Vec<PathBuf> = Vec::new();
+        let mut frontier = vec![a.to_path_buf()];
+        let mut visited = 0usize;
+        'walk: for _ in 0..DESCEND_MAX_DEPTH {
+            let mut next = Vec::new();
+            for dir in frontier {
+                for child in list_dirs(&dir) {
+                    let name = child.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if child == came_from || DESCEND_SKIP.contains(&name) || !is_path_allowed(&child) {
+                        continue;
+                    }
+                    if visited >= DESCEND_MAX_DIRS {
+                        break 'walk;
+                    }
+                    visited += 1;
+                    let cand = child.join(rel);
+                    if exists(&cand) && !matches.contains(&cand) {
+                        matches.push(cand);
+                        if matches.len() >= 5 {
+                            break 'walk;
+                        }
+                    }
+                    next.push(child);
+                }
+            }
+            frontier = next;
+        }
+        match matches.len() {
+            0 => {}
+            1 => return Ok(matches.pop()),
+            _ => return Err(matches),
+        }
+        if a == top {
+            break;
+        }
+        came_from = a.to_path_buf();
+        anc = a.parent();
+    }
+    Ok(None)
 }
 
 /// Does this path segment elide part of a name (`...FLOW-MAP.md`,
@@ -3038,6 +3133,64 @@ mod tests {
     /// (ai-for-smbs/smb-workspace). Rebuilt from Ethan's screenshots: the
     /// file overlay said jobs.py "does not exist here" for a file the same
     /// terminal pane had just shown being edited.
+    /// mxp-marketing, 2026-09-27: the cwd is gtm/playbooks and the file is in
+    /// gtm/launch-videos/prospect-videos, a sibling branch neither the ascent
+    /// nor the descent reaches.
+    fn sibling_tree(files: &'static [&'static str]) -> (impl Fn(&Path) -> bool, impl Fn(&Path) -> Vec<PathBuf>) {
+        let exists = move |p: &Path| files.iter().any(|f| Path::new(f) == p);
+        let list_dirs = move |d: &Path| -> Vec<PathBuf> {
+            let mut kids: Vec<PathBuf> = files
+                .iter()
+                .flat_map(|f| Path::new(f).ancestors().map(Path::to_path_buf).collect::<Vec<_>>())
+                .filter(|a| a.parent() == Some(d) && !files.iter().any(|f| Path::new(f) == a))
+                .collect();
+            kids.sort();
+            kids.dedup();
+            kids
+        };
+        (exists, list_dirs)
+    }
+
+    #[test]
+    fn sibling_search_finds_a_file_in_a_sibling_branch() {
+        let (exists, list_dirs) = sibling_tree(&[
+            "/m/gtm/launch-videos/prospect-videos/nbcuni/nbcuni-story.mp4",
+            "/m/gtm/playbooks/README.md",
+        ]);
+        let got = resolve_rel_sibling(Path::new("/m/gtm/playbooks"), Path::new("/m"),
+            "nbcuni/nbcuni-story.mp4", &exists, &list_dirs);
+        assert_eq!(got, Ok(Some(PathBuf::from("/m/gtm/launch-videos/prospect-videos/nbcuni/nbcuni-story.mp4"))));
+    }
+
+    #[test]
+    fn sibling_search_refuses_to_guess_between_two_matches() {
+        let (exists, list_dirs) = sibling_tree(&[
+            "/m/gtm/launch-videos/prospect-videos/nbcuni/nbcuni-story.mp4",
+            "/m/gtm/archive/nbcuni/nbcuni-story.mp4",
+        ]);
+        let got = resolve_rel_sibling(Path::new("/m/gtm/playbooks"), Path::new("/m"),
+            "nbcuni/nbcuni-story.mp4", &exists, &list_dirs);
+        assert_eq!(got.map_err(|v| v.len()), Err(2));
+    }
+
+    #[test]
+    fn sibling_search_prefers_the_nearest_ancestor_and_stops_at_the_repo_root() {
+        let (exists, list_dirs) = sibling_tree(&[
+            "/m/gtm/videos/nbcuni/nbcuni-story.mp4",
+            "/m/other/nbcuni/nbcuni-story.mp4",
+            "/outside/nbcuni/nbcuni-story.mp4",
+        ]);
+        // gtm/ is nearer than /m, so its one match wins over /m/other's.
+        let got = resolve_rel_sibling(Path::new("/m/gtm/playbooks"), Path::new("/m"),
+            "nbcuni/nbcuni-story.mp4", &exists, &list_dirs);
+        assert_eq!(got, Ok(Some(PathBuf::from("/m/gtm/videos/nbcuni/nbcuni-story.mp4"))));
+        // Nothing above the repo root is searched.
+        let (exists, list_dirs) = sibling_tree(&["/outside/nbcuni/nbcuni-story.mp4"]);
+        let got = resolve_rel_sibling(Path::new("/m/gtm/playbooks"), Path::new("/m"),
+            "nbcuni/nbcuni-story.mp4", &exists, &list_dirs);
+        assert_eq!(got, Ok(None));
+    }
+
     #[test]
     fn descend_finds_a_nested_workspace_the_ascent_cannot_reach() {
         let root = Path::new("/Users/ethan/Dev/ai-for-smbs");

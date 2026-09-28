@@ -1269,9 +1269,22 @@ fn worker_configurations_are_editable_from_backlog_through_terminal_states() {
     );
 
     let app = asset("app.js");
+    // a4371f28 ("Hide unused harness configuration for raw workers"): an
+    // ISOLATED worker takes no harness automation, so its Configurations show
+    // only env and skin. Every other worker still sees every capability the
+    // server returns.
     assert!(
-        app.contains("const _visCaps = (lvl === 'worker') ? d.capabilities"),
-        "worker Configurations must show every capability returned by the server"
+        app.contains("const _visCaps = _visibleScopeCapabilities(lvl, sessions.find(s => s.name === w)?.isolated, d.capabilities);"),
+        "worker Configurations must filter capabilities through the one shared predicate"
+    );
+    let vis = app
+        .find("function _visibleScopeCapabilities(level, isolated, capabilities)")
+        .map(|i| &app[i..i + 300.min(app.len() - i)])
+        .expect("capability visibility predicate exists");
+    assert!(
+        vis.contains("level === 'worker' ? (isolated ? ['env', 'skin'] : null)")
+            && vis.contains("keys ? capabilities.filter(c => keys.includes(c.key)) : capabilities"),
+        "a non-isolated worker must see every capability; an isolated one only env and skin"
     );
     assert!(
         !app.contains("Edited where it lives"),
@@ -2185,5 +2198,27 @@ fn connection_history_modal_uses_the_mobile_dialog_shell() {
             css.contains(needle),
             "connection modal CSS lost mobile-safe layout detail: {needle}"
         );
+    }
+}
+
+/// JavaScript has no `\UXXXXXXXX` escape: `'\U0001f535'` is the literal text
+/// "U0001f535". Six notification icons were written in Python's spelling when
+/// the dashboard was extracted (3976de4f, 2026-08-09) and every toast showed
+/// that text instead of its emoji until 2026-09-27. Use `\u{1f535}`.
+#[test]
+fn no_python_style_unicode_escapes_in_client_js() {
+    for name in ["app.js", "sw.js"] {
+        let src = asset(name);
+        let bad: Vec<String> = src
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.as_bytes().windows(10).any(|w| {
+                    w[0] == b'\\' && w[1] == b'U' && w[2..].iter().all(|c| c.is_ascii_hexdigit())
+                })
+            })
+            .map(|(i, l)| format!("{name}:{}: {}", i + 1, l.trim()))
+            .collect();
+        assert!(bad.is_empty(), "Python-style \\U escapes render as literal text in JS:\n{}", bad.join("\n"));
     }
 }

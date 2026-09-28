@@ -206,6 +206,18 @@ async fn tick(app: crate::api::AppState) {
     if !stamped.is_empty() {
         crate::api::goal_loop::restore_tick(&app, &stamped).await;
     }
+    // Owner policy: answer in-boundary asks already parked on idle isolated lanes.
+    let idle_isolated: Vec<String> = sessions
+        .iter()
+        .filter(|s| s["running"] == true && s["provider"] == "claude" && s["status"] == "idle"
+            || (s["running"] == true && s["provider"] == "claude" && s["waiting_reason"] == "owner"))
+        .filter_map(|s| s["name"].as_str())
+        .filter(|n| crate::api::session_verbs::session_is_isolated(n))
+        .map(str::to_string)
+        .collect();
+    if !idle_isolated.is_empty() {
+        crate::api::turn_end::auto_proceed_open_isolated_asks(&app, &idle_isolated).await;
+    }
     for s in &sessions {
         let name = s["name"].as_str().unwrap_or("").to_string();
         if name.is_empty() || s["running"] != true || s["archived"] == true || s["provider"] != "claude" {
@@ -231,8 +243,11 @@ async fn tick(app: crate::api::AppState) {
         let n2 = name.clone();
         let (records, footer) = tokio::task::spawn_blocking(move || {
             let records = crate::api::session_verbs::iter_jsonl_tail(&path, 6_000_000);
+            // Exact-match target: a bare `amux-x` resolves to a sibling
+            // `amux-x-2` pane while `amux-x` is briefly absent.
+            let pt = crate::backend::tmux::pane_target(&format!("amux-{n2}"));
             let footer = std::process::Command::new("tmux")
-                .args(["capture-pane", "-p", "-t", &format!("amux-{n2}"), "-S", "-12"])
+                .args(["capture-pane", "-p", "-t", &pt, "-S", "-12"])
                 .output()
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains("/goal active"))

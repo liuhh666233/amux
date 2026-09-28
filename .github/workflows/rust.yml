@@ -182,7 +182,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: rui314/setup-mold@v1
+      # Optimise DEPENDENCIES only (workspace crates stay debug, with
+      # debug_assertions). The long pole was one request_log test inserting
+      # 260k rows through an -O0 bundled SQLite: 163s of a 174s shard. In
+      # $CARGO_HOME so it cannot touch the checkout; `key` below keeps the
+      # cache from restoring -O0 deps under the same key and never re-saving.
+      - name: Optimise dependencies for the test build
+        run: printf '[profile.dev.package."*"]\nopt-level = 2\n' >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: deps-opt2
       - uses: taiki-e/install-action@nextest
       - name: Build all workspace test binaries into a nextest archive
         run: cargo nextest archive --workspace --archive-file ${{ runner.temp }}/nextest.tar.zst
