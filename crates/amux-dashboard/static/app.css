@@ -1185,9 +1185,10 @@
      letter per line): flex made every color span and linked path in the
      header its own column. The caret hangs in the left gutter and wrapped
      command text lines up under the tool name, as in the terminal. */
-  .ptc-head { cursor: pointer; display: block; position: relative; user-select: none;
+  .ptc-head { cursor: text; display: block; position: relative; -webkit-user-select: text; user-select: text;
     padding-left: calc(0.84em + 2ch); text-indent: -2ch; }
   .ptc-head:hover { background: rgba(255,255,255,0.04); border-radius: 4px; }
+  .ptc-caret { cursor: pointer; -webkit-user-select: none; user-select: none; }
   .ptc-caret { position: absolute; left: 0; top: 0.35em; width: 1.2em; text-indent: 0; text-align: center; font-size: 0.7em; color: var(--dim); transition: transform 0.15s; }
   .ptc-caret::before { content: '\25BE'; }
   .ptc.collapsed .ptc-caret { transform: rotate(-90deg); }

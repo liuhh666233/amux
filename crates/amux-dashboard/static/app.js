@@ -13258,7 +13258,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1160';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1161';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -15509,7 +15509,28 @@ function _peekHtml(raw) {
 }
 
 const _peekToolCollapsed = {};
-function _peekToggleTool(id) {
+// SELECTABLE HEADERS (Ethan, 2026-09-28: "the accordion expansion thing in
+// peek, make sure i can highlight it not just click"). The header text can be
+// selected like the rest of the terminal. The caret always toggles; on the
+// text, a drag-select or a double/triple click (word or line select) never
+// does, and a single click toggles after a beat so a second click can cancel
+// it instead of collapsing the block under the selection.
+let _ptcClickTimer = 0;
+function _peekToggleTool(id, ev) {
+  const onCaret = !!(ev && ev.target && ev.target.closest && ev.target.closest('.ptc-caret'));
+  if (ev && !onCaret) {
+    clearTimeout(_ptcClickTimer);
+    if (ev.detail > 1) return;
+    if (window.getSelection && String(window.getSelection()) !== '') return;
+    _ptcClickTimer = setTimeout(() => {
+      if (window.getSelection && String(window.getSelection()) !== '') return;
+      _peekToggleToolNow(id);
+    }, 250);
+    return;
+  }
+  _peekToggleToolNow(id);
+}
+function _peekToggleToolNow(id) {
   _peekToolCollapsed[id] = !_peekToolCollapsed[id];
   const el = document.getElementById('ptc-' + id);
   if (!el) return;
@@ -15537,7 +15558,7 @@ function _wrapToolCalls(html) {
     const collapsed = _peekToolCollapsed[id];
     if (hasBody) {
       out.push('<div class="ptc' + (collapsed ? ' collapsed' : '') + '" id="ptc-' + id + '">'
-        + '<div class="ptc-head" onclick="_peekToggleTool(' + id + ')">'
+        + '<div class="ptc-head" onclick="_peekToggleTool(' + id + ', event)">'
         + '<span class="ptc-caret"></span>' + lines[i] + '</div>'
         + '<div class="ptc-body">' + lines.slice(i + 1, end).join('\n') + '</div></div>');
     } else {
