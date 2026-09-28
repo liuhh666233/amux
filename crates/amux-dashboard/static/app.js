@@ -12334,7 +12334,8 @@ async function _nudgesLoad() {
 
 function _nudgesRow(label, enabled, level, name) {
   // Use data attributes so onclick strings stay simple and quote-safe.
-  const on = enabled !== false;
+  // Absent is OFF: every board toggle defaults off since 0d2a0757.
+  const on = enabled === true;
   return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0;border-bottom:1px solid var(--border);">'
     + '<span style="color:var(--text);font-size:0.76rem;">' + esc(label) + '</span>'
     + '<button class="btn' + (on ? '' : ' primary') + '" data-nlvl="' + esc(level) + '" data-nname="' + esc(name || '') + '" data-nen="' + (!on) + '" style="font-size:0.7rem;min-height:28px;padding:3px 9px;flex:0 0 auto;" onclick="_nudgesRowClick(this)">'
@@ -12357,7 +12358,7 @@ function _nudgesRender() {
 
   let h = '<div style="font-size:0.7rem;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Board nudges</div>';
 
-  // Global row — null/undefined means key absent = on
+  // Global row: null/undefined means the key is absent, which is off
   h += _nudgesRow('Global (all workers)', s.global, 'global', null);
 
   // Group rows — only groups with an explicit value
@@ -12386,7 +12387,8 @@ function _nudgesRender() {
       + '</div></div>';
   }
 
-  h += '<div style="color:var(--dim);font-size:0.66rem;margin-top:8px;">On = default. Off disables board nudges at that scope (sets CC_STANDING_ORDERS=False).</div>';
+  if (typeof s.effective_on === 'number') h += '<div style="color:var(--text);font-size:0.72rem;margin-top:8px;">Nudged now: <b>' + s.effective_on + '</b> of ' + s.effective_total + ' workers</div>';
+  h += '<div style="color:var(--dim);font-size:0.66rem;margin-top:4px;">Off is the default. On sets CC_STANDING_ORDERS=1 at that scope; a worker is nudged when its auto-continue is also on. Worker beats group beats global.</div>';
   el.innerHTML = h;
 }
 
@@ -13258,7 +13260,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1162';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1163';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
