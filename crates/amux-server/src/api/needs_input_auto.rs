@@ -340,7 +340,11 @@ pub fn never_reason(item: &Value) -> Option<&'static str> {
         "/v1/", "new endpoint", "new primitive", "public surface", "api design", "pricing page",
         "new sourcetype", "new source type",
     ];
-    if surface.iter().any(|w| t.contains(w)) {
+    // "a new collection SourceType" (BACKE-3829), "a new GET" (MF-1963).
+    let new_surface = r"\bnew\b[^.?!]{0,40}\b(sourcetype|source type|primitive|endpoint|route|get|post|put|patch)\b";
+    if surface.iter().any(|w| t.contains(w))
+        || regex::Regex::new(new_surface).map(|r| r.is_match(&t)).unwrap_or(false)
+    {
         return Some("public_surface");
     }
     // The ask is for the OWNER to do something: approval cannot complete it.

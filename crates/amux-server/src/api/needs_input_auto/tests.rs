@@ -426,3 +426,12 @@ fn the_three_misrouted_send_backs_stay_with_the_owner() {
     assert!(!matches!(decide(&p, &cat(b3621, "access")), Decision::SendBack(_)));
     assert!(!matches!(decide(&p, &cat(g54, "budget")), Decision::SendBack(_)));
 }
+
+#[test]
+fn a_new_primitive_or_route_is_public_surface() {
+    let p = Policy::default();
+    let d = |q: &str| decide(&p, &item("card", "other", "decision", q));
+    assert_eq!(d("Approve a new collection SourceType = a retriever execution materialized by a group_by key (one document per key)?"), Decision::Never("public_surface"));
+    assert_eq!(d("Should app slug availability be checkable (for example a new GET) before a create or PATCH attempt?"), Decision::Never("public_surface"));
+    assert_eq!(d("Should I get a new test fixture for the flaky suite?"), Decision::Approve);
+}

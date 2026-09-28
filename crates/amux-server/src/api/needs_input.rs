@@ -80,6 +80,8 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
             // Paid compute with no figure in the ask: GCA-54 "the logo corpus
             // re-ingest ... 189,830 docs (5.1x)" went back to its worker.
             "re ingest", "reingest", "re extract", "reextract", "re embed", "gpu ", "cost basis",
+            // MFEM1-51 "Materialise iconik-ad-library's 4,206,893 objects into MVS".
+            "materialis", "materializ",
         ]);
     if has(&[
         "prod data",
@@ -107,7 +109,8 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
         "collection migration",
         "renames collections",
         "rename collections",
-    ]) {
+    ]) || destroys_data(&t)
+    {
         return ("prod_data", 0);
     }
     if ask_type == "customer_outbound" {
@@ -146,6 +149,24 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
         return ("outbound", 0);
     }
     ("other", 1)
+}
+
+/// A destructive verb over a data noun, the same pairing turn_end's boundary
+/// uses (`boundary_of`), without its prod-risk half: a worker may restart or
+/// roll its own services. MI-5204 "Do you approve purging the five corrupt
+/// legacy default-namespace indexes" was auto-approved as a judgment call at
+/// 20:35 on 2026-09-27; mvs-infra declined it on its own.
+fn destroys_data(t: &str) -> bool {
+    use std::sync::OnceLock;
+    static VERB: OnceLock<regex::Regex> = OnceLock::new();
+    static NOUN: OnceLock<regex::Regex> = OnceLock::new();
+    let verb = VERB.get_or_init(|| {
+        regex::Regex::new(r"\b(delete|deleting|drop|dropping|truncate|purge|purging|wipe|erase|destroy|migrate|migrating|migration|backfill|overwrite)\b").expect("verb")
+    });
+    let noun = NOUN.get_or_init(|| {
+        regex::Regex::new(r"\b(prod|production|customer|customers|tenant|tenants|table|tables|collection|collections|database|db|bucket|buckets|index|indexes|indices|namespace|namespaces|records|rows|documents|objects|mongo|postgres|bigquery|s3|gcs)\b").expect("noun")
+    });
+    verb.is_match(t) && noun.is_match(t)
 }
 
 /// Does this ask clear the owner bar: a real spend, outbound to outside
@@ -963,5 +984,20 @@ mod tests {
             ["email:apr_00000000000000aa", "card:T-2", "card:T-1", "card:T-7"]
         );
         assert_eq!(q.snoozed.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod destroys_data_tests {
+    use super::*;
+    #[test]
+    fn the_2035_approvals_classify_as_the_owners() {
+        // Live 2026-09-27: each was auto-approved as a judgment call.
+        assert_eq!(classify("decision", "Do you approve purging the five corrupt legacy default-namespace indexes, and should auto-PQ stay armed at the 1 GiB default on both planes?").0, "prod_data");
+        assert_eq!(classify("budget", "Materialise iconik-ad-library's 4,206,893 objects into MVS, and if so in what batch size?").0, "money");
+        assert_eq!(classify("budget", "Do you approve GPU re-extraction for the sample-data demo namespace's missing multimodal embeddings?").0, "money");
+        // Mentions without a destructive verb stay judgment calls.
+        assert_eq!(classify("decision", "Should the collection page show the index size?").0, "other");
+        assert_eq!(classify("decision", "Delete the stale draft card?").0, "other");
     }
 }
