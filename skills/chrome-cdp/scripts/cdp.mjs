@@ -648,9 +648,12 @@ async function runDaemon(targetId) {
   async function autoSync(tag) {
     if (!AUTO_SYNC) return;
     try {
-      const r = await cdp.send('Runtime.evaluate', { expression: 'location.href', returnByValue: true }, sessionId);
+      // The URL from the browser, not the page: Runtime.evaluate hangs on a
+      // busy or dialog-blocked tab (2026-09-28, the amux dashboard tab timed
+      // out twice and held its daemon's shutdown for 15s).
+      const { targetInfo } = await cdp.send('Target.getTargetInfo', { targetId });
       let url;
-      try { url = new URL(r.result.value); } catch { return; }
+      try { url = new URL(targetInfo.url); } catch { return; }
       if (!/^https?:$/.test(url.protocol)) return;
       const site = siteOf(url.hostname);
       if (!site) return;
