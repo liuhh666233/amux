@@ -7598,7 +7598,7 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
    One item at a time. Full screen on phones with the actions in the thumb
    zone at the bottom; a centered modal on desktop. Every control is 44px. */
 .ni-overlay.modal-overlay {
-  height: calc(var(--dialog-viewport-height, 100dvh) - max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px))) !important;
+  top: max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px));
 }
 .ni-overlay .ni-modal { max-width:620px; max-height:min(88dvh, 760px); }
 .ni-head { display:flex; align-items:baseline; gap:10px; min-width:0; }
