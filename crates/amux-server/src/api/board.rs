@@ -90,7 +90,7 @@ pub fn routes() -> Router<AppState> {
         // RR-0052 Invariant 3: the pull half of dispatch. Static, so it sits
         // before the /{id} wildcard like clear-done.
         .route("/lease-next", post(lease_next_item))
-        .route("/{id}", get(get_item).patch(patch_item).delete(delete_item))
+        .route("/{id}", get(get_item).patch(patch_item_route).delete(delete_item))
         .route("/{id}/archive", post(archive_item))
         .route("/{id}/restore", post(restore_item))
         // The inverse of DELETE (AF-922) — see undelete_item's own doc comment.
@@ -10243,6 +10243,36 @@ pub(crate) fn retype_hint_for(gate_source: Option<&bs::GateSource>) -> String {
     }
 }
 
+/// The HTTP PATCH route: `patch_item`, then, when the OWNER took the card out
+/// of needsyou, save what that approval teaches as a standing approval
+/// (standing_approvals::learn_after_owner_approval). Only this route learns:
+/// the needs-input auto policy calls `patch_item` directly, so an approval the
+/// policy made is never mistaken for one the owner gave.
+async fn patch_item_route(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let owner = super::standing_approvals::is_owner_request(&headers);
+    let was_needsyou = owner && {
+        let id2 = id.clone();
+        state
+            .store
+            .read_async(move |c| Ok(bs::get_issue(c, &id2)?))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.status == "needsyou")
+    };
+    let note = body.get("desc_append").and_then(Value::as_str).unwrap_or("").to_string();
+    let resp = patch_item(State(state.clone()), Path(id.clone()), headers, Json(body)).await;
+    if was_needsyou && resp.status().is_success() {
+        super::standing_approvals::learn_after_owner_approval(&state, &id, &note).await;
+    }
+    resp
+}
+
 pub async fn patch_item(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -14938,6 +14968,74 @@ mod af701_archive_guard_tests {
             0,
             "a refusal must not mutate the card"
         );
+    }
+
+    fn set_ask(store: &crate::db::SharedStore, id: &str, ask_type: &str, q: &str) {
+        let (id, ask_type, q) = (id.to_string(), ask_type.to_string(), q.to_string());
+        store
+            .write(move |conn| {
+                conn.execute("UPDATE issues SET ask_type=?2, ask_question=?3 WHERE id=?1", rusqlite::params![id, ask_type, q])?;
+                Ok(WriteOutcome { applied: true, events: vec![] })
+            })
+            .expect("set ask");
+    }
+
+    fn learned(store: &crate::db::SharedStore) -> Vec<(String, String, String, String)> {
+        let conn = store.read().unwrap();
+        let mut st = conn.prepare("SELECT source, category, scope, require_terms FROM standing_approvals ORDER BY id").unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .flatten()
+            .collect()
+    }
+
+    async fn route(state: &AppState, id: &str, headers: HeaderMap, body: Value) -> StatusCode {
+        let resp = patch_item_route(State(state.clone()), Path(id.to_string()), headers, Json(body)).await;
+        let status = resp.status();
+        if !status.is_success() {
+            let b = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            eprintln!("route {id} -> {status}: {}", String::from_utf8_lossy(&b));
+        }
+        status
+    }
+
+    // Ethan, 2026-09-28: "whenever we approve it needs to be saved across the harness".
+    #[tokio::test]
+    async fn an_owner_approval_through_the_route_is_learned_once_and_a_workers_is_not() {
+        let (state, store) = fixture();
+        let q = "Can you mint a new Ethan Personal org API key in Studio and store it as GTM_MIXPEEK_API_KEY in mixpeek repo secrets?";
+        let owner_card = seed(&store, "mxp-marketing", "needsyou");
+        set_ask(&store, &owner_card, "credential", q);
+        assert_eq!(route(&state, &owner_card, HeaderMap::new(), json!({"status": "todo", "authorized_by": "owner (needs-input triage)", "desc_append": "[Sep 28] Approved by owner in needs-input triage."})).await, StatusCode::OK);
+        let rows = learned(&store);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].0, format!("card:{owner_card} owner approval"));
+        assert_eq!(rows[0].2, "global");
+        assert!(rows[0].3.split(',').count() >= 2, "{rows:?}");
+
+        // The loop closes: the lane asking the same thing again is refused
+        // at the needsyou door as already approved, and nothing new is learned.
+        assert_eq!(route(&state, &owner_card, owner_headers("mxp-marketing"), json!({"status": "needsyou"})).await, StatusCode::CONFLICT);
+        assert_eq!(learned(&store).len(), 1);
+        // A board drag by the owner (verified local member) learns too.
+        let dragged = seed(&store, "studio-plg", "needsyou");
+        set_ask(&store, &dragged, "decision", "Should persona test runs be exempted from the PropelAuth signup abuse limit by allowlisting this egress address?");
+        assert_eq!(route(&state, &dragged, local_member_headers(), json!({"status": "todo"})).await, StatusCode::OK);
+        assert_eq!(learned(&store).len(), 2, "{:?}", learned(&store));
+
+        // A worker moving its own card out of needsyou is not an owner approval.
+        let worker_card = seed(&store, "mvs-research", "needsyou");
+        set_ask(&store, &worker_card, "decision", "Should the rollout of the replica rebalancer wait for the soak harness verdict?");
+        assert!(route(&state, &worker_card, owner_headers("mvs-research"), json!({"status": "todo"})).await.is_success());
+        // The owner declining is not an approval either.
+        let declined = seed(&store, "mvs-research", "needsyou");
+        set_ask(&store, &declined, "decision", "Should the rollout of the replica rebalancer wait for the soak harness verdict?");
+        assert_eq!(route(&state, &declined, HeaderMap::new(), json!({"status": "todo", "authorized_by": "owner (needs-input triage)", "desc_append": "[Sep 28] Declined by owner in needs-input triage."})).await, StatusCode::OK);
+        // Nor is the policy path, which calls patch_item directly.
+        let policy = seed(&store, "mvs-research", "needsyou");
+        set_ask(&store, &policy, "decision", "Should the rollout of the replica rebalancer wait for the soak harness verdict?");
+        let _ = patch_item(State(state.clone()), Path(policy.clone()), HeaderMap::new(), Json(json!({"status": "todo", "authorized_by": "owner policy (needs-input auto-approve)"}))).await;
+        assert_eq!(learned(&store).len(), 2, "{:?}", learned(&store));
     }
 
     #[tokio::test]
