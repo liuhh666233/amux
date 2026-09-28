@@ -19,6 +19,7 @@ import { homedir } from 'os';
 import { resolve } from 'path';
 import { spawn, execFileSync } from 'child_process';
 import net from 'net';
+import { syncSite, siteOf, fingerprint, profilesIndex, coveringProfile, log as syncLog } from './profile-sync.mjs';
 
 const TIMEOUT = 15000;
 const NAVIGATION_TIMEOUT = 30000;
@@ -632,6 +633,51 @@ async function runDaemon(targetId) {
     process.exit(1);
   }
 
+  // SAVE LOGINS TO AN AMUX PROFILE (Ethan, 2026-09-28). When a worker drives
+  // a site in the real Chrome, carry that site's logins into an amux saved
+  // profile so the next worker reaches it natively: once if no profile covers
+  // the site yet, and again whenever its login cookies change during this
+  // session (Ethan signed in, or handed over credentials). Runs after the
+  // command has answered, and once more at shutdown. Off for amux profiles
+  // themselves (they are already the native path) and with CDP_PROFILE_SYNC=0.
+  const AUTO_SYNC = process.env.CDP_PROFILE_SYNC !== '0' && !process.env.CDP_PORT && !process.env.AMUX_PROFILE;
+  const baselines = new Map();
+  const lastSync = new Map();
+  let profCache = null, profCacheAt = 0, syncNote = '';
+  let syncChain = Promise.resolve();
+  async function autoSync(tag) {
+    if (!AUTO_SYNC) return;
+    try {
+      const r = await cdp.send('Runtime.evaluate', { expression: 'location.href', returnByValue: true }, sessionId);
+      let url;
+      try { url = new URL(r.result.value); } catch { return; }
+      if (!/^https?:$/.test(url.protocol)) return;
+      const site = siteOf(url.hostname);
+      if (!site) return;
+      const { cookies } = await cdp.send('Storage.getCookies', {});
+      const fp = fingerprint(cookies, site);
+      if (!fp) return; // nothing login-shaped on this site
+      if (!baselines.has(site)) baselines.set(site, fp);
+      if (Date.now() - (lastSync.get(site) || 0) < 60_000) return;
+      if (!profCache || Date.now() - profCacheAt > 300_000) { profCache = profilesIndex(); profCacheAt = Date.now(); }
+      const covered = coveringProfile(site, profCache);
+      const changed = baselines.get(site) !== fp;
+      if (covered && !changed) return;
+      const reason = covered ? 'login changed during this CDP session' : 'no amux profile covered this site';
+      const out = await syncSite(CDP, cdp, sessionId, { reason, list: profCache });
+      lastSync.set(site, Date.now());
+      baselines.set(site, fp);
+      profCache = null;
+      if (out.profile) {
+        syncNote = `[amux] saved ${site} logins to amux profile '${out.profile}' (${out.cookies_landed}/${out.cookies_sent} cookies` +
+          `${out.local_storage_set ? `, ${out.local_storage_set} localStorage keys` : ''}, ${reason}). ` +
+          `Next time: AMUX_PROFILE=${out.profile}`;
+      }
+    } catch (e) {
+      syncLog({ error: e.message, tag, target: targetId });
+    }
+  }
+
   // Shutdown helpers
   let alive = true;
   function shutdown() {
@@ -639,8 +685,9 @@ async function runDaemon(targetId) {
     alive = false;
     server.close();
     if (!IS_WINDOWS) try { unlinkSync(sp); } catch {}
-    cdp.close();
-    process.exit(0);
+    const done = () => { cdp.close(); process.exit(0); };
+    if (!AUTO_SYNC) return done();
+    Promise.race([syncChain.then(() => autoSync('shutdown')), sleep(60_000)]).finally(done);
   }
 
   // Exit if target goes away or Chrome disconnects
@@ -688,10 +735,21 @@ async function runDaemon(targetId) {
         case 'type': result = await typeStr(cdp, sessionId, args[0]); break;
         case 'loadall': result = await loadAllStr(cdp, sessionId, args[0], args[1] ? parseInt(args[1]) : 1500); break;
         case 'evalraw': result = await evalRawStr(cdp, sessionId, args[0], args[1]); break;
+        case 'save-profile': {
+          await syncChain;
+          const out = await syncSite(CDP, cdp, sessionId, { profile: args[0] || '', reason: 'explicit save-profile' });
+          result = JSON.stringify(out, null, 2);
+          break;
+        }
         case 'stop': return { ok: true, result: '', stopAfter: true };
         default: return { ok: false, error: `Unknown command: ${cmd}` };
       }
-      return { ok: true, result: result ?? '' };
+      if (AUTO_SYNC && !['list', 'list_raw', 'save-profile'].includes(cmd)) {
+        syncChain = syncChain.then(() => autoSync(cmd));
+      }
+      const note = syncNote;
+      syncNote = '';
+      return { ok: true, result: (result ?? '') + (note ? `\n${note}` : '') };
     } catch (e) {
       return { ok: false, error: e.message };
     }
@@ -849,6 +907,9 @@ Usage: cdp <command> [args]
 
   list                              List open pages (shows unique target prefixes)
   relay                             Status of the shared connection (one "Allow" per Chrome launch)
+  save-profile <target> [profile]   Save the tab's site logins into an amux profile (appends to the
+                                    profile already registered for the site). Done automatically
+                                    when a site has no profile or its login changes; CDP_PROFILE_SYNC=0 stops it
   snap  <target>                    Accessibility tree snapshot
   eval  <target> <expr>             Evaluate JS expression
   shot  <target> [file]             Screenshot (default: screenshot-<target>.png in runtime dir); prints coordinate mapping
@@ -901,7 +962,7 @@ DAEMON IPC (for advanced use / scripting)
 
 const NEEDS_TARGET = new Set([
   'snap','snapshot','eval','shot','screenshot','html','nav','navigate',
-  'net','network','click','clickxy','type','loadall','evalraw',
+  'net','network','click','clickxy','type','loadall','evalraw','save-profile',
 ]);
 
 // Tell amux this browser is being driven (AMUX-4685).
