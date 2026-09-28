@@ -501,11 +501,409 @@ async fn fill(headers: HeaderMap, AxPath(id): AxPath<String>, Json(body): Json<V
     }
 }
 
+/// JS that navigates a checkout flow: detects the current page type (product,
+/// cart, checkout) and advances to the next step. Returns a JSON object
+/// describing what it did and what page it ended on.
+fn checkout_navigate_script(quantity: u64) -> String {
+    format!(
+        r#"(async () => {{
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const result = {{ steps: [], page_type: "unknown", url: location.href }};
+
+  // Detect page type by looking for known patterns
+  const hasCheckoutForm = !!document.querySelector(
+    '[autocomplete="cc-number"], input[name*="cardnumber" i], #payment, .wc-credit-card-form, .payment_methods'
+  );
+  const hasCartTable = !!document.querySelector('.woocommerce-cart-form, .cart_totals, [class*="cart-item"]');
+  const hasTicketForm = !!document.querySelector(
+    '#tribe-tickets__tickets-form, .tribe-tickets__tickets-form, [class*="ticket-form"], .eventbrite-widget'
+  );
+  const hasBuyButton = !!document.querySelector(
+    'button[class*="checkout"], .checkout-button, a[href*="checkout"], .wc-proceed-to-checkout'
+  );
+
+  if (hasCheckoutForm) {{
+    result.page_type = "checkout";
+    result.steps.push("already on checkout page");
+    return result;
+  }}
+
+  if (hasCartTable) {{
+    result.page_type = "cart";
+    result.steps.push("on cart page, looking for checkout button");
+    const checkoutBtn = document.querySelector(
+      '.checkout-button, a[href*="checkout"], .wc-proceed-to-checkout a, a.checkout-button'
+    );
+    if (checkoutBtn) {{
+      checkoutBtn.click();
+      result.steps.push("clicked proceed to checkout");
+      await sleep(3000);
+      result.url = location.href;
+      result.page_type = "checkout";
+      return result;
+    }}
+    result.steps.push("no checkout button found on cart");
+    return result;
+  }}
+
+  if (hasTicketForm) {{
+    result.page_type = "ticket_form";
+    // Set quantity
+    const qtyInput = document.querySelector(
+      'input[type="number"][id*="quantity"], input[type="number"][class*="quantity"]'
+    );
+    if (qtyInput) {{
+      const nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+      qtyInput.focus();
+      nativeSet.set.call(qtyInput, '{qty}');
+      qtyInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+      qtyInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+      qtyInput.blur();
+      result.steps.push("set ticket quantity to {qty}");
+    }}
+
+    // Click "Get Tickets" or similar submit button
+    const submitBtn = document.querySelector(
+      'button[type="submit"]:not([disabled]), .tribe-tickets__buy button, button[class*="submit"]'
+    );
+    const allButtons = [...document.querySelectorAll('button')];
+    const getTicketsBtn = submitBtn || allButtons.find(b =>
+      /get tickets|buy|add to cart|purchase/i.test(b.textContent)
+    );
+    if (getTicketsBtn) {{
+      getTicketsBtn.click();
+      result.steps.push("clicked: " + (getTicketsBtn.textContent || "").trim().slice(0, 40));
+      // Wait for navigation or AJAX
+      await sleep(3000);
+      result.url = location.href;
+
+      // Check if we ended up on cart or checkout
+      if (location.href.includes('/cart') || location.href.includes('/basket')) {{
+        result.page_type = "cart";
+        // Auto-proceed to checkout from cart
+        await sleep(1000);
+        const checkoutBtn2 = document.querySelector(
+          '.checkout-button, a[href*="checkout"], .wc-proceed-to-checkout a'
+        );
+        if (checkoutBtn2) {{
+          checkoutBtn2.click();
+          result.steps.push("auto-proceeded to checkout from cart");
+          await sleep(3000);
+          result.url = location.href;
+          result.page_type = "checkout";
+        }}
+      }} else if (location.href.includes('/checkout')) {{
+        result.page_type = "checkout";
+      }}
+    }} else {{
+      result.steps.push("no submit button found on ticket form");
+    }}
+    return result;
+  }}
+
+  // Generic product page: look for add-to-cart
+  const addBtn = document.querySelector(
+    'button[name="add-to-cart"], .single_add_to_cart_button, button[class*="add-to-cart"]'
+  );
+  if (addBtn) {{
+    result.page_type = "product";
+    addBtn.click();
+    result.steps.push("clicked add to cart");
+    await sleep(3000);
+    result.url = location.href;
+  }}
+
+  return result;
+}})()
+"#,
+        qty = quantity
+    )
+}
+
+/// A worker asks the harness to complete the order on the page it is looking
+/// at. The worker never names a vault item or touches any credential API; it
+/// states the charge and the harness resolves the rest. This is the seam that
+/// keeps the model out of the credential loop: the worker's action is "complete
+/// my order" and the harness's action is "apply the vault item's fields."
+///
+/// When `url` is provided, the harness drives the entire flow: it starts a
+/// browser, navigates to the URL, walks through the checkout (add to cart,
+/// proceed to checkout), fills all fields from the vault, and optionally
+/// submits. The worker only supplies intent (amount, merchant, purpose) and
+/// never touches a form. This is the Rye/Pattern-2 approach: the model is
+/// completely out of the browser loop for purchases.
+///
+/// Resolves the FIRST active vault item (there is typically one card). If
+/// multiple items exist, `item_name` narrows it.
+async fn complete_order(headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    let home = amux_home();
+    let session = body["session"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| origin_name(&headers));
+    let amount = body["amount_usd"].as_f64().unwrap_or(f64::NAN);
+    let currency = body["currency"].as_str().unwrap_or("USD").to_string();
+    let merchant = body["merchant"].as_str().unwrap_or("").trim().to_string();
+    let purpose = body["purpose"].as_str().unwrap_or("").trim().to_string();
+    let item_name = body["item_name"].as_str().unwrap_or("").trim().to_lowercase();
+    let url = body["url"].as_str().unwrap_or("").trim().to_string();
+    let quantity = body["quantity"].as_u64().unwrap_or(1).max(1);
+    let auto_submit = body["auto_submit"].as_bool().unwrap_or(false);
+    let profile = body["profile"].as_str().unwrap_or("default").to_string();
+    if merchant.is_empty() || purpose.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "merchant and purpose are required"}),
+        );
+    }
+    let items = load_items(&home);
+    let item = if item_name.is_empty() {
+        items
+            .iter()
+            .find(|i| i["status"].as_str() == Some("active"))
+    } else {
+        items.iter().find(|i| {
+            i["status"].as_str() == Some("active")
+                && i["name"]
+                    .as_str()
+                    .is_some_and(|n| n.to_lowercase().contains(&item_name))
+        })
+    };
+    let Some(item) = item.cloned() else {
+        return err(
+            StatusCode::NOT_FOUND,
+            json!({"error": "no active vault item found",
+                   "hint": "the owner activates items from the dashboard"}),
+        );
+    };
+    let id = item["id"].as_str().unwrap_or("").to_string();
+    let base_audit = json!({"ts": now_f64(), "event": "complete_order", "item": id,
+        "session": session, "amount_usd": amount, "currency": currency,
+        "merchant": merchant, "purpose": purpose, "url": url});
+    let target = spend_target(&id, amount, &merchant);
+    match decide(&item, amount, &currency) {
+        SpendDecision::Refused(why) => {
+            let mut a = base_audit.clone();
+            a["decision"] = json!("refused");
+            a["why"] = json!(why);
+            audit(&home, a);
+            return err(StatusCode::FORBIDDEN, json!({"ok": false, "error": why}));
+        }
+        SpendDecision::NeedsApproval { limit } => {
+            if super::grants::take_allowance(&home, &session, &target).is_none() {
+                let summary = format!(
+                    "{session} wants to complete a {currency} {amount:.2} order at {merchant}: \
+                     {purpose} (rule: approval above ${limit:.0})",
+                );
+                let grant = super::grants::create_grant(
+                    &home,
+                    "vault_spend",
+                    &session,
+                    &summary,
+                    json!({
+                        "origin": session, "target": target, "item": id,
+                        "amount_usd": amount, "currency": currency,
+                        "merchant": merchant, "purpose": purpose,
+                    }),
+                );
+                let mut a = base_audit.clone();
+                a["decision"] = json!("needs_approval");
+                a["grant"] = json!(grant);
+                audit(&home, a);
+                return err(
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "ok": false, "requires_approval": true, "grant_id": grant,
+                        "error": format!("this order (${amount:.2}) needs the owner's approval"),
+                        "next": "the owner approves it in the dashboard, then retry",
+                    }),
+                );
+            }
+        }
+        SpendDecision::Allowed => {}
+    }
+
+    // If a URL is provided, drive the full checkout flow server-side
+    let cdp_result = if !url.is_empty() {
+        checkout_with_url(&home, &session, &url, &profile, quantity).await
+    } else {
+        // Legacy path: connect to existing browser session
+        match super::browser::connect_session(&session, None).await {
+            Ok((_page, cdp)) => Ok(cdp),
+            Err(_) => Err(format!(
+                "no browser page for session '{session}': pass a 'url' to let the harness \
+                 drive the browser, or navigate to the checkout page first"
+            )),
+        }
+    };
+
+    let mut cdp = match cdp_result {
+        Ok(cdp) => cdp,
+        Err(e) => {
+            let mut a = base_audit;
+            a["decision"] = json!("browser_failed");
+            a["why"] = json!(e);
+            audit(&home, a);
+            return err(StatusCode::BAD_GATEWAY, json!({"ok": false, "error": e}));
+        }
+    };
+
+    let f = &item["fields"];
+    let yy: String = f["exp_year"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let values = json!({
+        "number": f["number"],
+        "exp": format!("{}/{}", f["exp_month"].as_str().unwrap_or(""), yy),
+        "exp_month": f["exp_month"], "exp_year": f["exp_year"],
+        "cvc": f["cvc"], "name": f["name"],
+        "address": f["address"], "city": f["city"], "state": f["state"],
+        "zip": f["zip"], "country": f["country"], "email": f["email"],
+    });
+    let fill_result = cdp
+        .eval(&fill_script(&values), 15)
+        .await
+        .map_err(|e| e.to_string());
+
+    // Optionally click submit/place-order
+    let submit_result = if auto_submit {
+        if fill_result.is_ok() {
+            let submit_js = r#"(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const btn = document.querySelector(
+    '#place_order, button[name="woocommerce_checkout_place_order"], ' +
+    'input[type="submit"][name="woocommerce_checkout_place_order"], ' +
+    'button[type="submit"][class*="place-order"], ' +
+    'button[type="submit"][class*="checkout"]'
+  ) || [...document.querySelectorAll('button[type="submit"]')].find(
+    b => /place order|complete|pay now|submit order|confirm/i.test(b.textContent)
+  );
+  if (!btn) return { submitted: false, reason: "no submit button found" };
+  btn.click();
+  await sleep(2000);
+  return { submitted: true, url: location.href };
+})()"#;
+            cdp.eval(submit_js, 30).await.ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut a = base_audit;
+    match fill_result {
+        Ok(r) => {
+            let filled = r.get("filled").cloned().unwrap_or(json!([]));
+            let not_found = r.get("not_found").cloned().unwrap_or(json!([]));
+            a["decision"] = json!("filled");
+            a["filled"] = filled.clone();
+            a["not_found"] = not_found.clone();
+            a["page"] = r.get("url").cloned().unwrap_or(Value::Null);
+            if let Some(ref sr) = submit_result {
+                a["submit"] = sr.clone();
+            }
+            audit(&home, a);
+            tracing::info!(item = %id, session = %session, amount, merchant = %merchant,
+                measured = true, n_considered = 1, verdict = "order_completed",
+                "order form filled by the harness (values not logged)");
+            let mut resp = json!({"ok": true, "filled": filled, "not_found": not_found,
+                "payment_iframes": r.get("payment_iframes"),
+                "note": "the harness filled the order form. Values are not returned."});
+            if let Some(sr) = submit_result {
+                resp["submit"] = sr;
+            }
+            Json(resp).into_response()
+        }
+        Err(e) => {
+            a["decision"] = json!("fill_failed");
+            a["why"] = json!(e);
+            audit(&home, a);
+            err(StatusCode::BAD_GATEWAY, json!({"ok": false, "error": e}))
+        }
+    }
+}
+
+/// Drive the full checkout flow: start browser, navigate, walk through
+/// add-to-cart and checkout pages, and return a connected CDP client on the
+/// checkout page ready for payment field filling.
+async fn checkout_with_url(
+    home: &Path,
+    session: &str,
+    url: &str,
+    profile: &str,
+    quantity: u64,
+) -> Result<crate::integrations::browser::CdpClient, String> {
+    use crate::integrations::browser as chrome;
+
+    // Start a browser on this profile if one isn't already running
+    if chrome::port_for_session(session).is_none() {
+        chrome::start(home, profile, url, session, session, true)
+            .await
+            .map_err(|e| format!("failed to start browser: {e}"))?;
+    }
+
+    // Connect to the browser
+    let page = chrome::resolve_page(session, Some(url))
+        .await
+        .map_err(|e| format!("failed to resolve browser page: {e:?}"))?;
+    let mut cdp = chrome::CdpClient::connect(&page.ws_url)
+        .await
+        .map_err(|e| format!("failed to connect CDP: {e}"))?;
+
+    // Navigate to the URL if not already there
+    let current = cdp
+        .eval("location.href", 5)
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
+    if !current.contains(url.split('/').nth(2).unwrap_or("")) {
+        cdp.call(
+            "Page.navigate",
+            json!({"url": url}),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .map_err(|e| format!("navigation failed: {e}"))?;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+
+    // Run the checkout navigation script
+    let nav_result = cdp
+        .eval(&checkout_navigate_script(quantity), 30)
+        .await
+        .map_err(|e| format!("checkout navigation failed: {e}"))?;
+
+    tracing::info!(
+        session,
+        url,
+        nav_result = %nav_result,
+        measured = true,
+        n_considered = 1,
+        verdict = "checkout_navigated",
+        "checkout flow navigated by the harness"
+    );
+
+    // Wait for the checkout page to settle
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    Ok(cdp)
+}
+
 pub fn routes() -> Router<super::AppState> {
     Router::new()
         .route("/api/vault", get(list).post(create))
         .route("/api/vault/{id}", axum::routing::patch(update).delete(remove))
         .route("/api/vault/{id}/fill", post(fill))
+        .route("/api/browser/complete-order", post(complete_order))
 }
 
 #[cfg(test)]
