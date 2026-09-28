@@ -501,11 +501,158 @@ async fn fill(headers: HeaderMap, AxPath(id): AxPath<String>, Json(body): Json<V
     }
 }
 
+/// A worker asks the harness to complete the order on the page it is looking
+/// at. The worker never names a vault item or touches any credential API; it
+/// states the charge and the harness resolves the rest. This is the seam that
+/// keeps the model out of the credential loop: the worker's action is "complete
+/// my order" and the harness's action is "apply the vault item's fields."
+///
+/// Resolves the FIRST active vault item (there is typically one card). If
+/// multiple items exist, `item_name` narrows it.
+async fn complete_order(headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    let home = amux_home();
+    let session = body["session"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| origin_name(&headers));
+    let amount = body["amount_usd"].as_f64().unwrap_or(f64::NAN);
+    let currency = body["currency"].as_str().unwrap_or("USD").to_string();
+    let merchant = body["merchant"].as_str().unwrap_or("").trim().to_string();
+    let purpose = body["purpose"].as_str().unwrap_or("").trim().to_string();
+    let item_name = body["item_name"].as_str().unwrap_or("").trim().to_lowercase();
+    if merchant.is_empty() || purpose.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "merchant and purpose are required"}),
+        );
+    }
+    let items = load_items(&home);
+    let item = if item_name.is_empty() {
+        items
+            .iter()
+            .find(|i| i["status"].as_str() == Some("active"))
+    } else {
+        items.iter().find(|i| {
+            i["status"].as_str() == Some("active")
+                && i["name"]
+                    .as_str()
+                    .is_some_and(|n| n.to_lowercase().contains(&item_name))
+        })
+    };
+    let Some(item) = item.cloned() else {
+        return err(
+            StatusCode::NOT_FOUND,
+            json!({"error": "no active vault item found",
+                   "hint": "the owner activates items from the dashboard"}),
+        );
+    };
+    let id = item["id"].as_str().unwrap_or("").to_string();
+    let base_audit = json!({"ts": now_f64(), "event": "complete_order", "item": id,
+        "session": session, "amount_usd": amount, "currency": currency,
+        "merchant": merchant, "purpose": purpose});
+    let target = spend_target(&id, amount, &merchant);
+    match decide(&item, amount, &currency) {
+        SpendDecision::Refused(why) => {
+            let mut a = base_audit.clone();
+            a["decision"] = json!("refused");
+            a["why"] = json!(why);
+            audit(&home, a);
+            return err(StatusCode::FORBIDDEN, json!({"ok": false, "error": why}));
+        }
+        SpendDecision::NeedsApproval { limit } => {
+            if super::grants::take_allowance(&home, &session, &target).is_none() {
+                let summary = format!(
+                    "{session} wants to complete a {currency} {amount:.2} order at {merchant}: \
+                     {purpose} (rule: approval above ${limit:.0})",
+                );
+                let grant = super::grants::create_grant(
+                    &home,
+                    "vault_spend",
+                    &session,
+                    &summary,
+                    json!({
+                        "origin": session, "target": target, "item": id,
+                        "amount_usd": amount, "currency": currency,
+                        "merchant": merchant, "purpose": purpose,
+                    }),
+                );
+                let mut a = base_audit.clone();
+                a["decision"] = json!("needs_approval");
+                a["grant"] = json!(grant);
+                audit(&home, a);
+                return err(
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "ok": false, "requires_approval": true, "grant_id": grant,
+                        "error": format!("this order (${amount:.2}) needs the owner's approval"),
+                        "next": "the owner approves it in the dashboard, then retry",
+                    }),
+                );
+            }
+        }
+        SpendDecision::Allowed => {}
+    }
+    let f = &item["fields"];
+    let yy: String = f["exp_year"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let values = json!({
+        "number": f["number"],
+        "exp": format!("{}/{}", f["exp_month"].as_str().unwrap_or(""), yy),
+        "exp_month": f["exp_month"], "exp_year": f["exp_year"],
+        "cvc": f["cvc"], "name": f["name"],
+        "address": f["address"], "city": f["city"], "state": f["state"],
+        "zip": f["zip"], "country": f["country"], "email": f["email"],
+    });
+    let result = match super::browser::connect_session(&session, None).await {
+        Ok((_page, mut cdp)) => cdp
+            .eval(&fill_script(&values), 15)
+            .await
+            .map_err(|e| e.to_string()),
+        Err(_) => Err(format!(
+            "no browser page for session '{session}': navigate to the checkout first"
+        )),
+    };
+    let mut a = base_audit;
+    match result {
+        Ok(r) => {
+            let filled = r.get("filled").cloned().unwrap_or(json!([]));
+            let not_found = r.get("not_found").cloned().unwrap_or(json!([]));
+            a["decision"] = json!("filled");
+            a["filled"] = filled.clone();
+            a["not_found"] = not_found.clone();
+            a["page"] = r.get("url").cloned().unwrap_or(Value::Null);
+            audit(&home, a);
+            tracing::info!(item = %id, session = %session, amount, merchant = %merchant,
+                measured = true, n_considered = 1, verdict = "order_completed",
+                "order form filled by the harness (values not logged)");
+            Json(json!({"ok": true, "filled": filled, "not_found": not_found,
+                "payment_iframes": r.get("payment_iframes"),
+                "note": "the harness filled the order form. Values are not returned."}))
+                .into_response()
+        }
+        Err(e) => {
+            a["decision"] = json!("fill_failed");
+            a["why"] = json!(e);
+            audit(&home, a);
+            err(StatusCode::BAD_GATEWAY, json!({"ok": false, "error": e}))
+        }
+    }
+}
+
 pub fn routes() -> Router<super::AppState> {
     Router::new()
         .route("/api/vault", get(list).post(create))
         .route("/api/vault/{id}", axum::routing::patch(update).delete(remove))
         .route("/api/vault/{id}/fill", post(fill))
+        .route("/api/browser/complete-order", post(complete_order))
 }
 
 #[cfg(test)]

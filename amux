@@ -5571,6 +5571,65 @@ ${BOLD}Examples:${RESET}
 EOF
 }
 
+cmd_order() {
+  local amount="" merchant="" purpose="" session="${AMUX_SESSION:-}" item_name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --amount)   amount="${2:-}"; shift 2 ;;
+      --merchant) merchant="${2:-}"; shift 2 ;;
+      --purpose)  purpose="${2:-}"; shift 2 ;;
+      --session)  session="${2:-}"; shift 2 ;;
+      --item)     item_name="${2:-}"; shift 2 ;;
+      --help|-h)
+        cat <<'HELP'
+Usage: amux order --amount <USD> --merchant <name> --purpose <why> [--item <name>]
+
+Tell the harness to complete the order on your current browser page.
+The harness fills the form from its own store; no credential ever enters
+your session. Charges within the owner's pre-set limit proceed; larger
+ones pause for dashboard approval.
+
+  --amount    charge in USD (required)
+  --merchant  who you are paying (required)
+  --purpose   what for (required)
+  --item      vault item name filter (optional; uses the first active item)
+  --session   override session (default: $AMUX_SESSION)
+HELP
+        return 0
+        ;;
+      *) die "amux order: unknown flag '$1' (try --help)" ;;
+    esac
+  done
+  [[ -n "$amount" ]]   || die "amux order: --amount is required"
+  [[ -n "$merchant" ]] || die "amux order: --merchant is required"
+  [[ -n "$purpose" ]]  || die "amux order: --purpose is required"
+  local body result
+  body=$(A="$amount" M="$merchant" P="$purpose" S="$session" I="$item_name" python3 -c '
+import json, os
+print(json.dumps({
+  "amount_usd": float(os.environ["A"]),
+  "currency": "USD",
+  "merchant": os.environ["M"],
+  "purpose": os.environ["P"],
+  "session": os.environ["S"],
+  "item_name": os.environ["I"],
+}))' 2>/dev/null) || die "amux order: bad --amount (must be a number)"
+  result=$(_curl -sk -X POST -H 'Content-Type: application/json' \
+    -H "X-Amux-Session: ${AMUX_SESSION:-}" \
+    -d "$body" "$AMUX_API/api/browser/complete-order")
+  local ok filled
+  ok=$(echo "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("1" if d.get("ok") else "0")' 2>/dev/null || echo 0)
+  if [[ "$ok" == "1" ]]; then
+    filled=$(echo "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(", ".join(d.get("filled",[])))' 2>/dev/null || echo "?")
+    echo "order form filled by the harness (fields: $filled)"
+  else
+    local emsg
+    emsg=$(echo "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("error","unknown error"))' 2>/dev/null || echo "$result")
+    echo "amux order: $emsg" >&2
+    return 1
+  fi
+}
+
 cmd_tunnel() {
   local AMUX_API="${AMUX_API:-https://localhost:8824}"
   local subcmd="${1:-status}"; shift 2>/dev/null || true
@@ -6304,6 +6363,7 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
     browser|br)      shift; cmd_browser "$@" ;;
     delegate)        shift; cmd_delegate "$@" ;;
     crm)              shift; cmd_crm "$@" ;;
+    order)            shift; cmd_order "$@" ;;
     tunnel|t)         shift; cmd_tunnel "$@" ;;
     alert)            shift; cmd_alert "$@" ;;
     approvals)        shift; cmd_approvals "$@" ;;
