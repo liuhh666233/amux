@@ -699,13 +699,21 @@ disk_trend() { # <prev_ts> <prev_free_gb> <now_ts> <now_free_gb> <min_gbh>
 
 # One line per constrained class, "<class> <reason>". Nothing printed means
 # nothing is constrained. -1 inputs mean "not measured" and never trip a class.
-classify_constraints() { # <disk_free_gb> <burn> <hours_to_full> <pressure> <swap_free_mb> <load15> <ncpu> <family_exceeds:0|1>
-  awk -v df="$1" -v b="$2" -v h="$3" -v pr="$4" -v sw="$5" -v l="$6" -v n="$7" -v fam="$8" \
+# swap_total_mb==0 means macOS has never had to create a swapfile since boot
+# (dynamic_pager allocates it lazily, on first real pressure) -- that reads as
+# free=0 on a perfectly healthy machine, indistinguishable from free=0 on a
+# machine with a large swapfile that is actually full, unless total is also
+# checked. MO-3629/MO-3638/MO-3629(again): three escalations in one day,
+# swap_free=0.00MB each time, kern.memorystatus_vm_pressure_level=1 (normal)
+# and >=90% memory free every time -- a swapfile that was never created is not
+# a constraint, so this class only trips when a swapfile actually exists.
+classify_constraints() { # <disk_free_gb> <burn> <hours_to_full> <pressure> <swap_free_mb> <load15> <ncpu> <family_exceeds:0|1> <swap_total_mb>
+  awk -v df="$1" -v b="$2" -v h="$3" -v pr="$4" -v sw="$5" -v l="$6" -v n="$7" -v fam="$8" -v swt="$9" \
       -v floor="$DISK_FLOOR_GB" -v htf="$HOURS_TO_FULL" -v swf="$SWAP_FREE_FLOOR_MB" -v cs="$CPU_SHARE" 'BEGIN{
     if (df >= 0 && df < floor) printf "disk free %.1fG is under the %dG floor\n", df, floor
     else if (h != "-" && h+0 < htf) printf "disk burning %.1fG/h, full in %.1fh (under %dh)\n", b, h, htf
     if (pr >= 2) printf "memory kernel pressure %d after the purge arm\n", pr
-    else if (sw >= 0 && sw < swf) printf "memory swap has %dMB free (under %dMB)\n", sw, swf
+    else if (swt > 0 && sw >= 0 && sw < swf) printf "memory swap has %dMB free (under %dMB)\n", sw, swf
     if (l >= 0 && n > 0 && l/n > cs) printf "cpu 15-min load %.1f is %.0f%% of %d cores (over %.0f%%)\n", l, l/n*100, n, cs*100
     if (fam == 1) print "family a process family is over its share of RAM"
   }'
@@ -1079,6 +1087,7 @@ disk_now=$(df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2{ printf "%.1f", $
 case "$disk_now" in ''|*[!0-9.]*) disk_now=-1 ;; esac
 level_now=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null); case "$level_now" in ''|*[!0-9]*) level_now=-1 ;; esac
 swap_free_now=$(sysctl -n vm.swapusage 2>/dev/null | sed -E 's/.*free = ([0-9.]+)M.*/\1/'); case "$swap_free_now" in ''|*[!0-9.]*) swap_free_now=-1 ;; esac
+swap_total_now=$(sysctl -n vm.swapusage 2>/dev/null | sed -E 's/.*total = ([0-9.]+)M.*/\1/'); case "$swap_total_now" in ''|*[!0-9.]*) swap_total_now=-1 ;; esac
 load15=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $4}'); case "$load15" in ''|*[!0-9.]*) load15=-1 ;; esac
 ncpu=$(sysctl -n hw.ncpu 2>/dev/null || echo 0)
 STATE="$STATE_DIR/state"
@@ -1097,8 +1106,8 @@ fi
 if [ "$burn" = "-" ]; then burn_txt="unmeasured (no previous reading)"; else burn_txt="${burn}G/h from ${burn_src}"; fi
 if [ "$htf" = "-" ]; then htf_txt="not filling"; else htf_txt="full in ${htf}h"; fi
 [ "$DRY" = "1" ] || state_put "$STATE" "last_ts=$now" "last_disk_free_gb=$disk_now"
-verdicts=$(classify_constraints "$disk_now" "$burn" "$htf" "$level_now" "$swap_free_now" "$load15" "$ncpu" "$fam_over")
-echo "mac-cleanup: assess disk=${disk_now}G burn=${burn_txt} ${htf_txt} pressure=${level_now} swap_free=${swap_free_now}MB load15=${load15}/${ncpu}"
+verdicts=$(classify_constraints "$disk_now" "$burn" "$htf" "$level_now" "$swap_free_now" "$load15" "$ncpu" "$fam_over" "$swap_total_now")
+echo "mac-cleanup: assess disk=${disk_now}G burn=${burn_txt} ${htf_txt} pressure=${level_now} swap_free=${swap_free_now}MB swap_total=${swap_total_now}MB load15=${load15}/${ncpu}"
 escalated=0
 if [ -z "$verdicts" ]; then
   echo "mac-cleanup: constraints none"
