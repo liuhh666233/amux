@@ -4,10 +4,17 @@
 // Requires Node 22+ (built-in WebSocket).
 //
 // Per-tab persistent daemon: page commands go through a daemon that holds
-// the CDP session open. Chrome's "Allow debugging" modal fires once per
-// daemon (= once per tab). Daemons auto-exit after 20min idle.
+// the CDP session open. Daemons auto-exit after 20min idle.
+//
+// Chrome's "Allow remote debugging?" modal fires once per NEW connection to the
+// real Chrome, and Chrome offers no way to remember it. So every connection to
+// the real Chrome goes through relay.mjs, which holds ONE approved connection
+// for as long as Chrome runs and multiplexes every daemon and `list` over it:
+// one click per Chrome launch instead of one per tab (Ethan, 2026-09-28).
+// CDP_NO_RELAY=1 connects directly. amux saved profiles (AMUX_PROFILE/CDP_PORT)
+// never show the modal and never use the relay.
 
-import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, openSync } from 'fs';
 import { homedir } from 'os';
 import { resolve } from 'path';
 import { spawn, execFileSync } from 'child_process';
@@ -111,8 +118,51 @@ function amuxCdpPort() {
   return Number(selected.cdp_port);
 }
 
+const RELAY_PORT = Number(process.env.CDP_RELAY_PORT || 9322);
+const RELAY_SCRIPT = resolve(new URL('.', import.meta.url).pathname, 'relay.mjs');
+
+function relayVersion() {
+  try {
+    const v = JSON.parse(execFileSync('curl', ['-s', '--max-time', '2', `http://127.0.0.1:${RELAY_PORT}/json/version`],
+                                      { encoding: 'utf8' }));
+    return v.Browser === 'amux-cdp-relay' ? v : null;
+  } catch { return null; }
+}
+
+// The relay's websocket URL, starting the relay if it is not running. Null
+// when it cannot start, and the caller then connects directly (one modal).
+function relayWsUrl() {
+  let v = relayVersion();
+  if (!v) {
+    const log = resolve(homedir(), '.cache', 'cdp', 'relay.log');
+    let out = 'ignore';
+    try { mkdirSync(resolve(homedir(), '.cache', 'cdp'), { recursive: true, mode: 0o700 }); out = openSync(log, 'a'); } catch {}
+    const child = spawn(process.execPath, [RELAY_SCRIPT], {
+      detached: true, stdio: ['ignore', out, out],
+      env: { ...process.env, CDP_PORT: '', AMUX_PROFILE: '' },
+    });
+    child.unref();
+    for (let i = 0; i < 30 && !v; i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      v = relayVersion();
+    }
+    if (!v) process.stderr.write(`cdp: relay did not start (see ${log}); connecting directly\n`);
+  }
+  return v ? v.webSocketDebuggerUrl : null;
+}
+
 function getWsUrl() {
   const port = amuxCdpPort();
+  if (!port && process.env.CDP_NO_RELAY !== '1') {
+    const viaRelay = relayWsUrl();
+    if (viaRelay) return viaRelay;
+  }
+  return directWsUrl(port);
+}
+
+// The real Chrome's own endpoint (or an amux profile's). relay.mjs reads this
+// through `cdp.mjs upstream-url`, so discovery lives in one place.
+function directWsUrl(port = amuxCdpPort()) {
   if (port) {
     // The browser endpoint needs its PATH, not just the port: Chrome's browser
     // websocket is `/devtools/browser/<uuid>`, which only `/json/version`
@@ -798,6 +848,7 @@ const USAGE = `cdp - lightweight Chrome DevTools Protocol CLI (no Puppeteer)
 Usage: cdp <command> [args]
 
   list                              List open pages (shows unique target prefixes)
+  relay                             Status of the shared connection (one "Allow" per Chrome launch)
   snap  <target>                    Accessibility tree snapshot
   eval  <target> <expr>             Evaluate JS expression
   shot  <target> [file]             Screenshot (default: screenshot-<target>.png in runtime dir); prints coordinate mapping
@@ -925,6 +976,16 @@ async function main() {
   // Daemon mode (internal)
   if (cmd === '_daemon') { await runDaemon(args[0]); return; }
 
+  // For relay.mjs: the real Chrome's endpoint, never the relay's own.
+  if (cmd === 'upstream-url') { console.log(directWsUrl(null)); return; }
+
+  if (cmd === 'relay') {
+    try {
+      console.log(execFileSync('curl', ['-s', '--max-time', '2', `http://127.0.0.1:${RELAY_PORT}/status`], { encoding: 'utf8' }));
+    } catch { console.log('relay not running (it starts on the next command that needs Chrome)'); }
+    return;
+  }
+
   // Every real command counts as driving. Placed after the daemon branch so the
   // long-lived daemon does not send one per poll, and before the help/usage
   // exits so a `help` invocation does not pretend a browser is in use.
@@ -959,7 +1020,6 @@ async function main() {
     cdp.close();
     writeFileSync(PAGES_CACHE, JSON.stringify(pages), { mode: 0o600 });
     console.log(`Opened new tab: ${targetId.slice(0, 8)}  ${url}`);
-    console.log('Note: this tab will need "Allow debugging?" approval on first access.');
     return;
   }
 
