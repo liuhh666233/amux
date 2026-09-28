@@ -1,7 +1,13 @@
 {
   "measured": true,
-  "n_considered": 2258,
+  "n_considered": 2257,
   "command_handlers": {
+    "_addToPinGroup": {
+      "kind": "command._addToPinGroup",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_applyEmbedView": {
       "kind": "command._applyEmbedView",
       "feedback_required": true,
@@ -656,6 +662,12 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_createAndLaunchPin": {
+      "kind": "command._createAndLaunchPin",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_dictAddWord": {
       "kind": "command._dictAddWord",
       "feedback_required": true,
@@ -874,6 +886,12 @@
     },
     "_fileDownload": {
       "kind": "command._fileDownload",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_filePinOverlay": {
+      "kind": "command._filePinOverlay",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
@@ -2018,30 +2036,6 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
-    "_pinnedCreate": {
-      "kind": "command._pinnedCreate",
-      "feedback_required": true,
-      "target": "control-or-request",
-      "queue_policy": "transport-declared"
-    },
-    "_pinnedDelete": {
-      "kind": "command._pinnedDelete",
-      "feedback_required": true,
-      "target": "control-or-request",
-      "queue_policy": "transport-declared"
-    },
-    "_pinnedLaunch": {
-      "kind": "command._pinnedLaunch",
-      "feedback_required": true,
-      "target": "control-or-request",
-      "queue_policy": "transport-declared"
-    },
-    "_pinnedUpdateOpacity": {
-      "kind": "command._pinnedUpdateOpacity",
-      "feedback_required": true,
-      "target": "control-or-request",
-      "queue_policy": "transport-declared"
-    },
     "_placePeekTabCustomizer": {
       "kind": "command._placePeekTabCustomizer",
       "feedback_required": true,
@@ -2650,6 +2644,12 @@
     },
     "_showFilesMenu": {
       "kind": "command._showFilesMenu",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_showPinGroupPicker": {
+      "kind": "command._showPinGroupPicker",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
@@ -3586,6 +3586,12 @@
     },
     "openFilePreview": {
       "kind": "command.openFilePreview",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "openFirstNeedsInput": {
+      "kind": "command.openFirstNeedsInput",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

@@ -1036,6 +1036,7 @@ function _applyZoom() {
     document.documentElement.style.fontSize = '';
     document.documentElement.style.zoom = (_zoomLevel / 100);
   }
+  document.documentElement.style.setProperty('--root-zoom', _zoomLevel / 100);
   localStorage.setItem('amux_zoom', _zoomLevel);
   const el = document.getElementById('zoom-level-display');
   if (el) el.textContent = _zoomLevel + '%';
@@ -12464,7 +12465,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1148';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1166';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -17691,7 +17692,7 @@ function _atRender(inp, el, pickCall) {
     return `<div class="ac-item at-item" onmousedown="${pickCall}(${i})">` +
       `<span class="at-at">@</span>${name}` +
       `<span class="ac-desc">${_atStatusBadge(r.s)}open channel &rarr;</span></div>`;
-  }).join('');
+  }).join('') + '<button class="ac-close" onmousedown="event.preventDefault();slashAcDismiss()" title="Close">&times;</button>';
   el._atItems = ranked.map(r => r.s);
   el.classList.add('open');
   return true;
@@ -19165,10 +19166,18 @@ function slashAcUpdate() {
   if (!slashAcItems.length) { el.classList.remove('open'); return; }
   el.innerHTML = slashAcItems.map((c, i) =>
     `<div class="ac-item" onmousedown="slashAcPick(${i})">${esc(c.cmd)}<span class="ac-desc">${esc(c.desc)}</span></div>`
-  ).join('');
+  ).join('') + '<button class="ac-close" onmousedown="event.preventDefault();slashAcDismiss()" title="Close">&times;</button>';
   el.classList.add('open');
 }
 
+function slashAcDismiss() {
+  const el = document.getElementById('slash-ac-list');
+  if (el) { el.classList.remove('open'); el.innerHTML = ''; }
+  slashAcItems = []; slashAcSelected = -1;
+  _slashAcSuppressNext = true;
+  const inp = document.getElementById('peek-cmd-input');
+  if (inp) inp.focus({ preventScroll: true });
+}
 function slashAcPick(i) {
   const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
@@ -25444,6 +25453,14 @@ function _showFilesMenu(path, btn, type) {
   connItem.textContent = 'Connect to .mdai…';
   connItem.onclick = () => { popup.remove(); _mdaiConnectPicker(path); };
   popup.appendChild(connItem);
+  // Pin as floating overlay (files only)
+  if (type !== 'dir' && type !== 'directory') {
+    const pinItem = document.createElement('button');
+    pinItem.className = 'explore-menu-item';
+    pinItem.textContent = '\u{1F4CC} Pin';
+    pinItem.onclick = () => { popup.remove(); _filePinOverlay(path); };
+    popup.appendChild(pinItem);
+  }
   // Rename
   const renItem = document.createElement('button');
   renItem.className = 'explore-menu-item';
@@ -28352,7 +28369,7 @@ function switchView(view) {
     ['logs', 'logs', 'flex'], ['messages', 'messages', 'flex'], ['skills', 'skills', 'flex'],
     ['sql', 'sql', 'flex'], ['map', 'map', 'flex'], ['metrics', 'metrics', 'flex'],
     ['cost', 'cost', 'flex'], ['disk', 'disk', 'flex'], ['torrents', 'torrents', 'flex'], ['terminal', 'terminal', ''],
-    ['browser', 'browser', 'flex'], ['pinned', 'pinned', 'flex'], ['graph', 'graph', 'flex'],
+    ['browser', 'browser', 'flex'], ['graph', 'graph', 'flex'],
     ['email', 'email', 'flex'], ['connectors', 'connectors', 'flex'],
   ];
   for (const [domId, name, display] of _svViews) {
@@ -28372,7 +28389,7 @@ function switchView(view) {
   if (view === 'cost') _costLoad();
   if (view === 'disk') _reclaimLoad(); else if (typeof _reclaimStopPolling === 'function') _reclaimStopPolling();
   if (view === 'browser') _bwInit(); else if (typeof _bwStopLive === 'function') _bwStopLive();
-  if (view === 'pinned') _pinnedLoad();
+
   if (view === 'journal') _journalInit();
   if (view === 'habits') _habitsLoad();
   if (view === 'skills') _skillsTabLoad();
@@ -48116,148 +48133,131 @@ async function _projectRetry(id,verification=false) {
   finally{_projectIntakeRetries.delete(key);await _projectsLoad();}
 }
 
-// ── Pinned notes tab ──────────────────────────────────────────────────
-let _pinnedNotes = [];
+// ── Pin file as floating overlay ──────────────────────────────────────
 
-async function _pinnedLoad() {
+async function _filePinOverlay(path) {
+  const fp = path || (_fileData && _fileData.path) || '';
+  if (!fp) { showToast('No file selected'); return; }
+
+  // Check for existing pin groups to offer tabbing into one.
+  let existing = [];
   try {
-    const r = await fetch('/api/pinned');
-    if (r.ok) _pinnedNotes = await r.json();
-  } catch (e) { _pinnedNotes = []; }
-  _pinnedRender();
-}
+    const lr = await fetch('/api/pinned');
+    if (lr.ok) existing = await lr.json();
+  } catch (_) {}
 
-function _pinnedRender() {
-  const el = document.getElementById('pinned-content');
-  if (!el) return;
-  let html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">'
-    + '<h2 style="margin:0;font-size:1.1rem;">Pinned Notes</h2>'
-    + '<button class="btn btn-sm" onclick="_pinnedShowAdd()" style="font-size:.82rem;">+ Pin a file</button>'
-    + '</div>';
+  // Build a map of groups: group_id -> array of pins.
+  const groups = {};
+  existing.forEach(p => {
+    const gid = p.group_id || ('solo_' + p.id);
+    if (!groups[gid]) groups[gid] = [];
+    groups[gid].push(p);
+  });
 
-  html += '<div id="pinned-add-form" style="display:none;margin-bottom:16px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">'
-    + '<div style="margin-bottom:8px;font-weight:500;">Select a file to pin</div>'
-    + '<div style="display:flex;gap:8px;align-items:center;">'
-    + '<input type="text" id="pinned-file-input" class="input" placeholder="/path/to/file.md" '
-    + 'style="flex:1;font-size:.85rem;padding:6px 10px;" autocomplete="off">'
-    + '<button class="btn" onclick="_pinnedBrowse()" style="font-size:.82rem;">Browse</button>'
-    + '</div>'
-    + '<div id="pinned-browse-list" style="display:none;margin-top:8px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;"></div>'
-    + '<div style="display:flex;gap:8px;margin-top:10px;">'
-    + '<button class="btn btn-sm" onclick="_pinnedCreate()" style="font-size:.82rem;background:var(--accent);color:var(--on-accent);">Pin</button>'
-    + '<button class="btn btn-sm" onclick="document.getElementById(\'pinned-add-form\').style.display=\'none\'" style="font-size:.82rem;">Cancel</button>'
-    + '</div>'
-    + '</div>';
+  // Skip the picker if there's nothing to merge into, or if this is already pinned.
+  const alreadyPinned = existing.some(p => p.file_path === fp);
+  if (alreadyPinned) { showToast('Already pinned'); return; }
 
-  if (_pinnedNotes.length === 0) {
-    html += '<div style="color:var(--dim);padding:20px;text-align:center;">No pinned notes yet. Pin a markdown file to float it on your desktop.</div>';
+  const groupKeys = Object.keys(groups).filter(k => !k.startsWith('solo_') || groups[k].length > 0);
+
+  if (groupKeys.length > 0) {
+    _showPinGroupPicker(fp, groups, groupKeys);
   } else {
-    for (const n of _pinnedNotes) {
-      const name = n.title || n.file_path.split('/').pop();
-      const opPct = Math.round((n.opacity || 0.6) * 100);
-      html += '<div class="pinned-card" style="padding:12px;margin-bottom:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">'
-        + '<div style="display:flex;align-items:center;justify-content:space-between;">'
-        + '<div>'
-        + '<div style="font-weight:600;font-size:.95rem;">📌 ' + _escHtml(name) + '</div>'
-        + '<div style="font-size:.78rem;color:var(--dim);margin-top:2px;">' + _escHtml(n.file_path) + '</div>'
-        + '</div>'
-        + '<div style="display:flex;gap:6px;align-items:center;">'
-        + '<span style="font-size:.75rem;color:var(--dim);">' + opPct + '% opacity</span>'
-        + '<input type="range" min="20" max="100" value="' + opPct + '" style="width:60px;accent-color:var(--accent);" '
-        + 'onchange="_pinnedUpdateOpacity(' + n.id + ',this.value)">'
-        + '<button class="btn btn-sm" onclick="_pinnedLaunch(' + n.id + ')" style="font-size:.78rem;" title="Launch floating overlay">▶ Float</button>'
-        + '<button class="btn btn-sm" onclick="_pinnedDelete(' + n.id + ')" style="font-size:.78rem;color:var(--danger);" title="Remove">✕</button>'
-        + '</div>'
-        + '</div>'
-        + '</div>';
-    }
-  }
-  el.innerHTML = html;
-}
-
-function _pinnedShowAdd() {
-  const f = document.getElementById('pinned-add-form');
-  if (f) f.style.display = '';
-}
-
-async function _pinnedBrowse() {
-  const input = document.getElementById('pinned-file-input');
-  const dir = input.value.trim() || (typeof _filesPath !== 'undefined' ? _filesPath : '~');
-  const list = document.getElementById('pinned-browse-list');
-  list.style.display = '';
-  list.innerHTML = '<div style="padding:8px;color:var(--dim);">Loading...</div>';
-  try {
-    const r = await fetch('/api/ls?path=' + encodeURIComponent(dir));
-    const data = await r.json();
-    const entries = data.entries || data || [];
-    let html = '';
-    if (dir !== '/' && dir !== '~') {
-      const parent = dir.replace(/\/[^/]+\/?$/, '') || '/';
-      html += '<div class="pinned-browse-item" style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border);" '
-        + 'onclick="_pinnedPickPath(\'' + _escJs(parent) + '\',true)">'
-        + '<span style="color:var(--dim);">↑ ..</span></div>';
-    }
-    for (const e of entries) {
-      const name = e.name || e;
-      const isDir = e.is_dir || name.endsWith('/');
-      const full = dir.replace(/\/$/, '') + '/' + name.replace(/\/$/, '');
-      html += '<div class="pinned-browse-item" style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border);" '
-        + 'onmouseover="this.style.background=\'var(--hover)\'" onmouseout="this.style.background=\'\'" '
-        + 'onclick="_pinnedPickPath(\'' + _escJs(full) + '\',' + isDir + ')">'
-        + (isDir ? '📁 ' : '📄 ') + _escHtml(name) + '</div>';
-    }
-    list.innerHTML = html || '<div style="padding:8px;color:var(--dim);">Empty directory</div>';
-  } catch (e) {
-    list.innerHTML = '<div style="padding:8px;color:var(--danger);">Error listing: ' + _escHtml(e.message) + '</div>';
+    await _createAndLaunchPin(fp, null);
   }
 }
 
-function _pinnedPickPath(path, isDir) {
-  const input = document.getElementById('pinned-file-input');
-  input.value = path;
-  if (isDir) _pinnedBrowse();
-  else document.getElementById('pinned-browse-list').style.display = 'none';
+function _showPinGroupPicker(fp, groups, groupKeys) {
+  document.querySelectorAll('.pin-group-picker').forEach(e => e.remove());
+  const overlay = document.createElement('div');
+  overlay.className = 'pin-group-picker';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:90000;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;';
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const fname = fp.split('/').pop();
+  let html = '<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;'
+    + 'padding:20px;max-width:380px;width:90%;max-height:70vh;overflow-y:auto;color:var(--text);">'
+    + '<div style="font-weight:700;font-size:0.95rem;margin-bottom:12px;">Pin: ' + esc(fname) + '</div>';
+
+  // "New pin" option
+  html += '<button class="pin-group-opt" data-action="new" style="display:flex;align-items:center;gap:8px;'
+    + 'width:100%;padding:10px 12px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;'
+    + 'background:var(--bg);color:var(--text);cursor:pointer;font-size:0.82rem;text-align:left;">'
+    + '<span style="font-size:1.1em;">+</span> New floating pin</button>';
+
+  // Existing groups/solo pins to merge into
+  groupKeys.forEach(gid => {
+    const pins = groups[gid];
+    const names = pins.map(p => p.file_path.split('/').pop()).join(', ');
+    const label = pins.length > 1
+      ? pins.length + ' tabs: ' + names
+      : names;
+    html += '<button class="pin-group-opt" data-gid="' + esc(gid) + '" data-first-id="' + pins[0].id + '" '
+      + 'style="display:flex;align-items:center;gap:8px;width:100%;padding:10px 12px;margin-bottom:6px;'
+      + 'border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);'
+      + 'cursor:pointer;font-size:0.82rem;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+      + '<span style="font-size:1.1em;">\u{1F4CC}</span> Add tab to: ' + esc(label) + '</button>';
+  });
+
+  html += '</div>';
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+
+  overlay.querySelectorAll('.pin-group-opt').forEach(btn => {
+    btn.onmouseenter = () => { btn.style.background = 'var(--hover)'; };
+    btn.onmouseleave = () => { btn.style.background = 'var(--bg)'; };
+    btn.onclick = async () => {
+      overlay.remove();
+      if (btn.dataset.action === 'new') {
+        await _createAndLaunchPin(fp, null);
+      } else {
+        const gid = btn.dataset.gid;
+        const realGid = gid.startsWith('solo_') ? null : gid;
+        const firstId = parseInt(btn.dataset.firstId) || 0;
+        await _addToPinGroup(fp, realGid, firstId);
+      }
+    };
+  });
 }
 
-function _escJs(s) { return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
-
-async function _pinnedCreate() {
-  const input = document.getElementById('pinned-file-input');
-  const fp = input.value.trim();
-  if (!fp) return;
+async function _createAndLaunchPin(fp, groupId) {
   try {
+    const body = { file_path: fp };
+    if (groupId) body.group_id = groupId;
     const r = await fetch('/api/pinned', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file_path: fp }),
+      body: JSON.stringify(body),
     });
-    if (r.ok) {
-      input.value = '';
-      document.getElementById('pinned-add-form').style.display = 'none';
-      await _pinnedLoad();
+    if (!r.ok) { showToast('Pin failed: ' + r.status); return; }
+    const data = await r.json();
+    await fetch('/api/pinned/' + data.id + '/launch', { method: 'POST' });
+    showToast('Pinned: ' + fp.split('/').pop());
+  } catch (e) { showToast('Pin error: ' + e.message); }
+}
+
+async function _addToPinGroup(fp, existingGroupId, firstPinId) {
+  try {
+    // If no group exists yet (solo pin), first assign a group_id to the existing pin.
+    let gid = existingGroupId;
+    if (!gid) {
+      gid = 'pg_' + Date.now();
+      await fetch('/api/pinned/' + firstPinId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: gid }),
+      });
     }
-  } catch (e) { console.error('pinned create:', e); }
-}
-
-async function _pinnedLaunch(id) {
-  try {
-    await fetch('/api/pinned/' + id + '/launch', { method: 'POST' });
-  } catch (e) { console.error('pinned launch:', e); }
-}
-
-async function _pinnedUpdateOpacity(id, val) {
-  try {
-    await fetch('/api/pinned/' + id, {
-      method: 'PATCH',
+    // Create the new pin in the same group.
+    const r = await fetch('/api/pinned', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ opacity: parseInt(val, 10) / 100 }),
+      body: JSON.stringify({ file_path: fp, group_id: gid }),
     });
-  } catch (e) { console.error('pinned update opacity:', e); }
-}
-
-async function _pinnedDelete(id) {
-  try {
-    await fetch('/api/pinned/' + id, { method: 'DELETE' });
-    await _pinnedLoad();
-  } catch (e) { console.error('pinned delete:', e); }
+    if (!r.ok) { showToast('Pin failed: ' + r.status); return; }
+    const data = await r.json();
+    // Launch the group (any member triggers the full group).
+    await fetch('/api/pinned/' + data.id + '/launch', { method: 'POST' });
+    showToast('Added tab: ' + fp.split('/').pop());
+  } catch (e) { showToast('Pin error: ' + e.message); }
 }

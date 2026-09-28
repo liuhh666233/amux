@@ -1829,6 +1829,12 @@
     top: auto; bottom: 100%; border-top: 1px solid var(--border); border-bottom: none;
     border-radius: 8px 8px 0 0; max-height: 220px;
   }
+  .ac-close {
+    position: sticky; bottom: 0; float: right; z-index: 1;
+    background: var(--card); border: none; color: var(--dim); cursor: pointer;
+    font-size: 1.1rem; line-height: 1; padding: 6px 10px; margin: 0;
+  }
+  .ac-close:hover { color: var(--text); }
   .ac-item .ac-desc { font-family: -apple-system, sans-serif; color: var(--dim); font-size: 0.75rem; margin-left: 8px; }
   .ac-item {
     padding: 8px 12px; font-size: 0.88rem; cursor: pointer;
@@ -7144,6 +7150,55 @@ input.mdai-edge-path-input:focus { border-color: var(--accent); box-shadow: 0 0 
   #teleprompter-overlay button { min-width:44px; min-height:44px; }
 }
 .conn-picker-overlay { align-items:center; padding:20px 12px; }
+
+/* CSS zoom on <html> breaks position:fixed inset:0 geometry: the overlay
+   fills the ZOOMED viewport (1.75x at 175%), so align-items:center puts
+   the dialog 69% down the physical screen instead of 50%. Counter the
+   root zoom on every fixed modal overlay, then re-apply it on the inner
+   dialog box so content matches the rest of the page. */
+.edit-overlay,
+.modal-overlay,
+.modal-backdrop,
+.queue-overlay,
+.board-edit-overlay,
+.focus-overlay,
+.map-modal,
+.chip-picker-overlay,
+.tts-overlay,
+.mdai-picker-overlay,
+.conn-picker-overlay,
+#conn-hist-modal.conn-hist-overlay { zoom: calc(1 / var(--root-zoom, 1)); }
+
+.edit-overlay > .edit-box,
+.modal-overlay > .modal,
+.modal-backdrop > .modal-box,
+.queue-overlay > .queue-box,
+.board-edit-overlay > .board-edit-box,
+.focus-overlay > .focus-card,
+.map-modal > .map-modal-box,
+.chip-picker-overlay > .chip-picker,
+.tts-overlay > .tts-dialog,
+.mdai-picker-overlay > .mdai-picker,
+.conn-picker-overlay > .conn-picker,
+#conn-hist-modal > .conn-hist-box { zoom: var(--root-zoom, 1); }
+
+.amux-dialog-backdrop,
+.amux-workspace-dialog,
+#upgrade-modal,
+#apikey-setup-modal,
+#team-scope-modal,
+#jrnl-config-overlay,
+#peek-lookup-modal,
+[data-ical-modal] { zoom: calc(1 / var(--root-zoom, 1)); }
+
+.amux-dialog-backdrop > div,
+.amux-workspace-dialog > div,
+#upgrade-modal > div,
+#apikey-setup-modal > div,
+#team-scope-modal > div,
+#jrnl-config-overlay > div,
+#peek-lookup-modal > div,
+[data-ical-modal] > * { zoom: var(--root-zoom, 1); }
 
 /* AF-750 / AF-751: balanced status controls at desktop and phone widths. */
 .header-row { gap:12px; }
