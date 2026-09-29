@@ -132,10 +132,71 @@ pub(crate) fn workspace_isolation_exports(name: &str) -> String {
     }
     let tmp = home().join("tmp").join(name);
     let _ = std::fs::create_dir_all(&tmp);
-    format!(
+    let mut out = format!(
         "export TMPDIR={}; export AMUX_PUSH_STRATEGY=\"${{AMUX_PUSH_STRATEGY:-rebase}}\"; ",
         sh_quote(&tmp.to_string_lossy())
-    )
+    );
+    if auto_continue_on(scoped_setting_in(&home(), name, "AMUX_KUBE_IMPERSONATE").as_deref()) {
+        let src = std::env::var("KUBECONFIG")
+            .ok()
+            .and_then(|v| v.split(':').next().map(PathBuf::from))
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".kube").join("config"));
+        let dst = home().join("kube").join(format!("{name}.config"));
+        match impersonating_kubeconfig(&src, &dst, name) {
+            Ok(n) => {
+                tracing::info!(session = name, users = n, kubeconfig = %dst.display(), measured = true,
+                    n_considered = n, verdict = "kube_identity_on",
+                    "worker kubeconfig impersonates amux:worker:<name>");
+                out.push_str(&format!("export KUBECONFIG={}; ", sh_quote(&dst.to_string_lossy())));
+            }
+            Err(e) => tracing::warn!(session = name, error = %e, source = %src.display(),
+                verdict = "kube_identity_failed",
+                "AMUX_KUBE_IMPERSONATE is on but the worker kubeconfig could not be built; it keeps the shared one"),
+        }
+    }
+    out
+}
+
+/// AMUX_KUBE_IMPERSONATE=1 (AH-223): copy `src` to `dst` with every user set to
+/// impersonate `amux:worker:<name>` in group `amux:workers`. The worker still
+/// authenticates as the shared identity (amux-ops), which may impersonate, and
+/// the cluster audit log then names the worker. The group is bound to the same
+/// role amux-ops holds (mixpeek server/infra/gke/rbac-amux-worker-identities.yaml),
+/// so this adds a name, not power. Rebuilt on every start; written 0600 via
+/// rename. Returns how many users were rewritten.
+pub(crate) fn impersonating_kubeconfig(src: &Path, dst: &Path, name: &str) -> Result<usize, String> {
+    let text = std::fs::read_to_string(src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
+    let users = doc
+        .get_mut("users")
+        .and_then(|u| u.as_sequence_mut())
+        .ok_or_else(|| format!("{} has no users", src.display()))?;
+    let mut n = 0;
+    for u in users.iter_mut() {
+        if let Some(m) = u.get_mut("user").and_then(|v| v.as_mapping_mut()) {
+            m.insert("as".into(), format!("amux:worker:{name}").into());
+            m.insert("as-groups".into(), serde_yaml::Value::Sequence(vec!["amux:workers".into()]));
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return Err(format!("{} has no user entries to rewrite", src.display()));
+    }
+    let body = serde_yaml::to_string(&doc).map_err(|e| e.to_string())?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = dst.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, dst).map_err(|e| e.to_string())?;
+    Ok(n)
 }
 
 pub(crate) fn headless_turn_prelude(name: &str, provider: &str, work_dir: &str) -> String {
@@ -49964,6 +50025,24 @@ mod workspace_isolation_tests {
         assert!(ex.contains(&format!("export TMPDIR={}", sh_quote(&tmp.to_string_lossy()))), "{ex}");
         assert!(tmp.is_dir(), "the worker's TMPDIR is created");
         assert!(ex.contains("AMUX_PUSH_STRATEGY=\"${AMUX_PUSH_STRATEGY:-rebase}\""), "{ex}");
+
+        // The kube identity knob rewrites every user in a copy of the kubeconfig.
+        let src = home.path().join("kubeconfig");
+        std::fs::write(&src, "apiVersion: v1\nkind: Config\nusers:\n- name: a\n  user:\n    exec:\n      command: gke-gcloud-auth-plugin\n- name: b\n  user:\n    token: t\n").unwrap();
+        let dst = home.path().join("kube").join("lane.config");
+        assert_eq!(impersonating_kubeconfig(&src, &dst, "lane"), Ok(2));
+        let v: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&dst).unwrap()).unwrap();
+        for u in v["users"].as_sequence().unwrap() {
+            assert_eq!(u["user"]["as"], "amux:worker:lane");
+            assert_eq!(u["user"]["as-groups"][0], "amux:workers");
+        }
+        assert_eq!(v["users"][0]["user"]["exec"]["command"], "gke-gcloud-auth-plugin", "auth config is kept");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(impersonating_kubeconfig(&home.path().join("missing"), &dst, "lane").is_err());
 
         // Worker scope can turn it back off for one lane.
         std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\nAMUX_WORKSPACE_ISOLATION=0\n").unwrap();
