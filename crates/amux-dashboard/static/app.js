@@ -6813,7 +6813,8 @@ function _renderPeekWorkerActions(s) {
     + '<span class="mi">&#x1F4C2;</span>File browser (split)</div>'
     + '<div class="peek-more-item" id="peek-focus-btn" role="menuitem" '
     + 'onclick="event.stopPropagation();_closePeekMore();togglePeekFocus()">'
-    + '<span class="mi">&#x25B4;</span>Focus mode</div>';
+    + '<span class="mi">&#x25B4;</span>Focus mode</div>'
+    + _peekChatMenuItem(s);
   if (menu.innerHTML !== html) menu.innerHTML = html;
 }
 
@@ -11564,12 +11565,14 @@ function _peekChatPanelRender() {
     + '<p style="color:var(--dim);font-size:0.85rem;line-height:1.5;margin:0 0 14px;">Turn it on to talk about this worker\u2019s work in plain language. The chat knows its current card, what waits on you, its board, git state and last reply, can look deeper with the amux CLI, and can direct the worker for you. Its history is saved like a coding transcript.</p>'
     + '<button class="btn primary" onclick="_peekChatSet(true)">Turn on chat</button></div>';
 }
-function _peekChatBarRender(target) {
-  const bar = document.getElementById('peek-chat-bar');
-  if (!bar) return;
-  bar.style.display = target ? 'flex' : 'none';
-  if (target) bar.innerHTML = '<span>Chat about <strong>' + esc(peekSession) + '</strong>. It can direct the worker for you.</span>'
-    + '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="_peekChatSet(false)">Turn off</button>';
+// The on/off control lives in the worker's ⋯ menu (Ethan via amux-chat,
+// 2026-09-29: move the inline "Chat about <worker> · Turn off" row there).
+function _peekChatMenuItem(s) {
+  if (!s || s.companion_of || _workerRenderer(s.name) === 'chat') return '';
+  const on = !!s.chat_companion;
+  return '<div class="peek-more-item" id="peek-chat-toggle-btn" data-peek-action="chat-toggle" role="menuitem" '
+    + 'onclick="event.stopPropagation();_closePeekMore();_peekChatSet(' + (on ? 'false' : 'true') + ')">'
+    + '<span class="mi">&#128172;</span>' + (on ? 'Turn off chat' : 'Turn on chat') + '</div>';
 }
 
 function setPeekTab(tab) {
@@ -11625,7 +11628,6 @@ function setPeekTab(tab) {
     if (tab === 'chat' && !chatTarget) { chatPanel.classList.add('active'); _peekChatPanelRender(); }
     else chatPanel.classList.remove('active');
   }
-  _peekChatBarRender(chatTarget);
   if (chatTarget) _chatMount(chatTarget);
   else if (typeof _chat !== 'undefined' && _chat.name && _chat.name !== peekSession) _chatUnmount();
   const bodyShown = tab === 'terminal' || !!chatTarget;
@@ -13353,7 +13355,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1180';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1181';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
