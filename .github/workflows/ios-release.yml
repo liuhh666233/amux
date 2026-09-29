@@ -22,6 +22,14 @@ on:
         description: 'yes = cancel a submission waiting for review first (needed to replace screenshots)'
         required: false
         default: 'no'
+      exclude_territories:
+        description: 'Comma list of territory ids to make unavailable before submitting, e.g. CHN'
+        required: false
+        default: ''
+      review_note:
+        description: 'Text appended to the App Review notes before submitting'
+        required: false
+        default: ''
 
 jobs:
   release:
@@ -67,4 +75,6 @@ jobs:
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           CANCEL_PENDING: ${{ inputs.cancel_pending == 'yes' && '1' || '' }}
+          EXCLUDE_TERRITORIES: ${{ inputs.exclude_territories }}
+          REVIEW_NOTE: ${{ inputs.review_note }}
           APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}

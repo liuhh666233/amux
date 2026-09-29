@@ -163,6 +163,76 @@ platform :ios do
       UI.user_error!("version never became editable (state #{state})") unless editable.include?(state)
     end
 
+    # EXCLUDE_TERRITORIES=CHN (comma list of territory ids): make the app
+    # unavailable in those storefronts before submitting. Added 2026-09-29:
+    # Apple rejected 1.1.0 under Guideline 5 because the listing names OpenAI,
+    # which needs an MIIT permit in China, and offered dropping the China
+    # mainland storefront as the fix. Uses the v2 availability API and reads
+    # every patched territory back, failing the lane if one did not change.
+    unless ENV["EXCLUDE_TERRITORIES"].to_s.strip.empty?
+      require "net/http"
+      require "json"
+      Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.from(hash: api_key)
+      bundle_id = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
+      app = Spaceship::ConnectAPI::App.find(bundle_id)
+      UI.user_error!("app #{bundle_id} not found on App Store Connect") unless app
+      asc = lambda do |method, path, body = nil|
+        uri = URI("https://api.appstoreconnect.apple.com#{path}")
+        req = (method == :patch ? Net::HTTP::Patch : Net::HTTP::Get).new(uri)
+        req["Authorization"] = "Bearer #{Spaceship::ConnectAPI.token.text}"
+        req["Content-Type"] = "application/json"
+        req.body = body.to_json if body
+        res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
+        UI.user_error!("#{method.upcase} #{path} -> #{res.code}: #{res.body[0, 400]}") unless res.code.to_i.between?(200, 299)
+        JSON.parse(res.body)
+      end
+      avail_id = asc.call(:get, "/v1/apps/#{app.id}/appAvailabilityV2")["data"]["id"]
+      rows = []
+      path = "/v2/appAvailabilities/#{avail_id}/territoryAvailabilities?limit=200"
+      while path
+        page = asc.call(:get, path)
+        rows.concat(page["data"])
+        nxt = page.dig("links", "next")
+        path = nxt ? nxt.sub("https://api.appstoreconnect.apple.com", "") : nil
+      end
+      territory_of = lambda { |r| r.dig("relationships", "territory", "data", "id") }
+      ENV["EXCLUDE_TERRITORIES"].split(",").map(&:strip).reject(&:empty?).each do |t|
+        row = rows.find { |r| territory_of.call(r) == t }
+        UI.user_error!("territory #{t} not in this app's availability (#{rows.size} territories)") unless row
+        if row["attributes"]["available"] == false
+          UI.message("AVAILABILITY #{t} already unavailable")
+          next
+        end
+        asc.call(:patch, "/v1/territoryAvailabilities/#{row['id']}",
+          { data: { type: "territoryAvailabilities", id: row["id"], attributes: { available: false } } })
+        back = asc.call(:get, "/v1/territoryAvailabilities/#{row['id']}")
+        UI.user_error!("#{t} still available after PATCH") unless back["data"]["attributes"]["available"] == false
+        UI.message("AVAILABILITY #{t} set unavailable (verified)")
+      end
+    end
+
+    # REVIEW_NOTE: appended to the version's existing App Review notes (never
+    # replacing them), for Apple's "update the Review Notes" step. Only the
+    # notes attribute is written, so contact details and the demo account stay.
+    unless ENV["REVIEW_NOTE"].to_s.strip.empty?
+      Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.from(hash: api_key)
+      bundle_id = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
+      app = Spaceship::ConnectAPI::App.find(bundle_id)
+      v = app.get_edit_app_store_version(platform: Spaceship::ConnectAPI::Platform::IOS)
+      UI.user_error!("no editable App Store version to annotate") unless v
+      detail = v.fetch_app_store_review_detail
+      note = ENV["REVIEW_NOTE"].strip
+      if detail.nil?
+        v.create_app_store_review_detail(attributes: { notes: note })
+        UI.message("REVIEW_NOTE created on #{v.version_string}")
+      elsif detail.notes.to_s.include?(note)
+        UI.message("REVIEW_NOTE already present on #{v.version_string}")
+      else
+        detail.update(attributes: { notes: [detail.notes.to_s.strip, note].reject(&:empty?).join("\n\n") })
+        UI.message("REVIEW_NOTE appended on #{v.version_string}")
+      end
+    end
+
     deliver(
       api_key: api_key,
       app_version: version,
