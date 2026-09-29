@@ -11543,7 +11543,15 @@ async function _peekChatSet(on) {
       await _peekChatScope(c, { CC_COMPANION_OF: w });
     }
     await _peekChatScope(w, { AMUX_CHAT_COMPANION: on ? '1' : null });
-    if (typeof fetchSessions === 'function') await fetchSessions();
+    // The session list is cached server-side, so the new companion can be
+    // missing from the first refresh; the tab would then keep the off panel
+    // over the composer. Refresh until the state it shows is the one just set.
+    for (let i = 0; i < 12; i++) {
+      if (typeof fetchSessions === 'function') await fetchSessions();
+      const s = sessions.find(x => x.name === w) || {};
+      if (on ? (!!s.chat_companion && sessions.some(x => x.name === c && x.companion_of === w)) : !s.chat_companion) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
     showToast(on ? 'Chat is on for ' + w : 'Chat is off for ' + w + ' (its history is kept)');
     setPeekTab('chat');
   } catch (e) { showToast('Chat: ' + (e.message || e)); }
@@ -13345,7 +13353,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1177';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1178';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
