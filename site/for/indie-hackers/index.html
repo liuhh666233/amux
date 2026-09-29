@@ -45,7 +45,7 @@
     "description": "Indie hackers use amux to run a 5-10 agent engineering team from their phone — shipping features overnight, automating support, and building products that compound while they sleep.",
     "url": "https://amux.io/for/indie-hackers/",
     "datePublished": "2026-07-07",
-    "dateModified": "2026-08-17",
+    "dateModified": "2026-09-29",
     "author": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "publisher": {"@type": "Organization", "name": "amux", "url": "https://amux.io", "logo": {"@type": "ImageObject", "url": "https://amux.io/icon.png"}},
     "image": "https://amux.io/og-image.png",
@@ -119,7 +119,15 @@
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <a href="/for/">For Developers</a> <span class="sep">›</span> <span>Indie Hackers</span></div>
 
     <h1>amux for Indie Hackers</h1>
-    <p class="subtitle">Run a 5-10 agent engineering team from your phone. Ship features overnight, automate the boring parts, and build products that compound while you sleep. <em>Updated August 2026.</em></p>
+    <p class="subtitle">Run a 5-10 agent engineering team from your phone. Ship features overnight, automate the boring parts, and build products that compound while you sleep. <em>Updated September 2026.</em></p>
+
+    <!-- EXP-108: indie-hackers Sept 2026 refresh top-of-page CTA -->
+    <div style="display:flex;align-items:center;gap:1rem;background:linear-gradient(135deg,#0f2027,#1a2a1a);border:1px solid #2d5a2d;border-radius:8px;padding:0.875rem 1.125rem;margin:1.5rem 0;flex-wrap:wrap">
+      <span style="font-size:13px;color:#a8d8a8;flex:1;min-width:180px">Running an AI engineering team solo — approval memory, overnight autonomy, iOS remote control →</span>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="if(window.posthog) posthog.capture('exp108_indie_hackers_topofpage_cta_click', {page: window.location.pathname})" style="display:inline-flex;align-items:center;gap:0.5rem;background:#2d8a2d;color:#fff;text-decoration:none;padding:0.5rem 1rem;border-radius:6px;font-size:13px;font-weight:600;white-space:nowrap">
+        ⭐ Star amux on GitHub
+      </a>
+    </div>
 
     <p>amux is an open-source control plane for running an AI engineering team from a single dashboard or your phone. It launches, monitors, and self-heals dozens of Claude Code, Codex, or Gemini CLI sessions simultaneously. Built-in kanban board, notes, CRM, Gmail API, browser automation, and scheduler — everything an indie hacker needs to run a product without a team.</p>
 
@@ -241,8 +249,29 @@ done</code></pre>
     </div>
     <p>At $30/night for 5 agents, you're spending $900/month on AI engineering capacity that would cost $15,000-30,000/month in freelancer time. The quality difference is real — agents need more review and correction than senior engineers — but for an indie hacker willing to review output and iterate, the leverage is extraordinary.</p>
 
+    <h2>What's New in September 2026</h2>
+    <p>Three features shipped in September that change how unattended overnight runs work for indie hackers:</p>
+
+    <h3>Approval memory: approve once, never asked again</h3>
+    <p>The single biggest friction in overnight agent runs is waking up to 15 paused sessions — each one stopped because an agent needed permission to do something you've approved a hundred times. Approval memory fixes this permanently. When you approve any action in the needs-input panel (delete a temp file, run a migration, call an external API), amux saves it as a standing rule. The next time any agent requests the same action type, scope, and context, it proceeds without pausing. Configure rules globally, per group, or per session:</p>
+    <pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1.2rem;overflow-x:auto;font-size:0.85rem;"><code># View your standing approvals
+amux approvals list
+
+# Promote a session rule to global
+amux approvals promote APPROVAL_ID --scope global
+
+# Revoke if needed
+amux approvals revoke APPROVAL_ID</code></pre>
+    <p>One approval now prevents 50 future interruptions. Overnight runs complete instead of pausing at 3am waiting for permission to do something routine.</p>
+
+    <h3>Vault checkout: amux handles procurement automatically</h3>
+    <p>If you run recurring orders — cloud credits, SaaS subscriptions, supplies for a physical product — <code>amux order --url</code> runs the full headless checkout flow unattended: navigate, fill shipping and payment, confirm, return a structured receipt. Combine with the scheduler for fully automated recurring purchases. The first run requires your approval; subsequent runs with the same merchant and amount range proceed automatically once approved.</p>
+
+    <h3>Needs-input owner gating for irreversible actions</h3>
+    <p>Destructive decisions — dropping a database table, making a mass price change, deleting customer records — now stay with the owner instead of being delegated to whatever agent happened to touch the task. Even if an agent is mid-task and hits a point where the next step is irreversible, it routes the decision to you rather than proceeding or passing it to another agent. As a solo founder, this means you make the call that matters; agents handle everything routine before and after it.</p>
+
     <h2>What's New in August 2026</h2>
-    <p>Several features shipped this summer that change the economics further for indie hackers running unattended agent fleets:</p>
+    <p>Earlier summer features that changed the economics for unattended agent fleets:</p>
 
     <h3>Owner alerts: your phone rings when an agent needs you</h3>
     <p>The hardest part of overnight runs isn't writing tasks — it's not knowing when something actually needs a human. Owner alerts solve this. When any agent hits a gate it can't pass (needs approval, finds a blocker, produces something critical), it fires an alert to your phone via push notification and iMessage:</p>
@@ -276,7 +305,7 @@ amux alert "Billing module throws TypeError on upgrade path" "blocking the payme
     <h2>Getting Started</h2>
     <p>If you've never run AI coding agents before, the fastest path is:</p>
     <ol>
-      <li>Clone amux and run <code>./install.sh</code> (5 minutes)</li>
+      <li>Install amux via Homebrew: <code>brew install mixpeek/amux/amux</code> (1 minute)</li>
       <li>Register your project: <code>amux register myapp --dir ~/Dev/myapp --yolo</code></li>
       <li>Start one agent and watch it work on a single task</li>
       <li>Scale to 5 agents once you understand the output quality and task description requirements</li>
@@ -286,11 +315,11 @@ amux alert "Billing module throws TypeError on upgrade path" "blocking the payme
     <div class="cta-box">
       <h3>Start running your AI engineering team</h3>
       <p>amux is free, open-source, and runs on your existing hardware. No SaaS subscription, no per-seat fees — just AI agents working while you sleep.</p>
-      <pre><code>git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh
+      <pre><code>brew install mixpeek/amux/amux
 amux register myapp --dir ~/Dev/myapp --yolo
 amux start myapp
 amux serve  # → https://localhost:8824</code></pre>
-      <a class="btn btn-primary" href="https://github.com/mixpeek/amux">View on GitHub</a>
+      <a class="btn btn-primary" href="https://github.com/mixpeek/amux">⭐ Star on GitHub</a>
       <a class="btn" href="/concierge/" style="margin-left:0.75rem;">Concierge setup →</a>
     </div>
 

@@ -4,13 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#1e2330">
-  <title>amux vs DIY tmux Scripts — amux</title>
-    <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <meta name="description" content="Why use amux instead of rolling your own tmux-based Claude Code management scripts?">
-  <meta name="keywords" content="amux vs tmux scripts, claude code tmux, manage claude code sessions, tmux automation">
+  <title>amux vs DIY tmux Scripts — Why Not Just Use tmux for Claude Code? (2026)</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="amux vs rolling your own tmux scripts for Claude Code: self-healing, web dashboard, mobile access, approval memory, and atomic task claiming vs bash scripts that break at 3am. September 2026.">
+  <meta name="keywords" content="amux vs tmux scripts, claude code tmux, manage claude code sessions tmux, why not diy tmux ai agents, tmux vs amux, ai agent orchestration tmux alternative 2026">
   <link rel="canonical" href="https://amux.io/compare/amux-vs-diy-tmux/">
-  <meta property="og:title" content="amux vs DIY tmux Scripts — amux">
-  <meta property="og:description" content="Why use amux instead of rolling your own tmux-based Claude Code management scripts?">
+  <meta property="og:title" content="amux vs DIY tmux Scripts — Why Not Just Use tmux for Claude Code? (2026)">
+  <meta property="og:description" content="Rolling your own tmux scripts for Claude Code works for 1-2 agents. At 5+ agents, overnight runs, and mobile access, amux pays for the migration immediately.">
   <meta property="og:url" content="https://amux.io/compare/amux-vs-diy-tmux/">
   <meta property="og:image" content="https://amux.io/og-image.png">
   <meta property="og:type" content="article">
@@ -22,8 +22,9 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/site.js"></script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Compare","item":"https://amux.io/compare/"},{"@type":"ListItem","position":3,"name":"amux vs DIY tmux Scripts","item":"https://amux.io/compare/amux-vs-diy-tmux/"}]}</script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"amux vs DIY tmux Scripts","description":"Why use amux instead of rolling your own tmux-based Claude Code management scripts?","url":"https://amux.io/compare/amux-vs-diy-tmux/","about":{"@type":"SoftwareApplication","name":"amux","url":"https://amux.io/","applicationCategory":"DeveloperApplication"}}</script>
-  </head>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"amux vs DIY tmux Scripts — Why Not Just Use tmux for Claude Code? (2026)","description":"amux vs rolling your own tmux scripts for Claude Code in 2026. Self-healing, web dashboard, approval memory, mobile access vs bash scripts.","url":"https://amux.io/compare/amux-vs-diy-tmux/","datePublished":"2026-04-01","dateModified":"2026-09-29","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Why use amux instead of DIY tmux scripts for Claude Code?","acceptedAnswer":{"@type":"Answer","text":"DIY tmux works for 1-2 agents in an interactive session. amux adds what scripts cannot: self-healing (auto-compact on context overflow, crash restart, stuck-prompt detection), a web dashboard with live peek output, a native iOS app for remote control, atomic SQLite task claiming across agents, approval memory that persists across sessions, and token spend tracking. The maintenance cost of custom scripts grows with each agent you add; amux's cost is constant."}},{"@type":"Question","name":"Can I run Claude Code in tmux without amux?","acceptedAnswer":{"@type":"Answer","text":"Yes. tmux new-session -d -s myagent 'claude' starts a session, tmux send-keys sends prompts, tmux capture-pane reads output. This works for 1-2 interactive sessions. Problems emerge at scale: sessions crash and stay down, you can't monitor from your phone, agents race on the same task, context overflows silently, and every approval interruption wakes you even if you approved the same action last week."}},{"@type":"Question","name":"How does amux install compared to custom tmux scripts?","acceptedAnswer":{"@type":"Answer","text":"amux installs in one command: brew install mixpeek/amux/amux (Homebrew) or pipx install amux (PyPI) or uvx amux serve (zero-install trial). Custom tmux scripts require writing and maintaining bash, wiring up restart logic, building a status parser for Claude Code's ANSI output, and debugging race conditions. amux ships all of that as a tested, MIT-licensed binary."}},{"@type":"Question","name":"Does amux still use tmux under the hood?","acceptedAnswer":{"@type":"Answer","text":"Yes. amux manages tmux sessions as its terminal backend. The Rust server controls tmux panes, sends prompts, captures output, and parses ANSI state. You get all of tmux's reliability as the terminal layer, with amux's fleet coordination, dashboard, and self-healing layer on top."}},{"@type":"Question","name":"What is the hardest part of rolling your own Claude Code session manager?","acceptedAnswer":{"@type":"Answer","text":"Self-healing is the hardest part. Claude Code sessions fail in at least four ways: context overflow (the session exits to a shell prompt silently), usage limit (the session waits for you to press Enter), stuck prompts (Claude is waiting for confirmation you never saw), and crashes (the process exits). Writing reliable detection and recovery for all four, across 10+ concurrent sessions, is weeks of work. amux ships this behavior tested and maintained."}}]}</script>
+</head>
 <body>
   <header class="site-header">
     <a class="logo" href="/">amux</a>
@@ -39,33 +40,153 @@
   </header>
   <main>
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <a href="/compare/">Compare</a> <span class="sep">›</span> <span>amux vs DIY tmux Scripts</span></div>
-    <h1>amux vs DIY tmux Scripts</h1>
-<p class="subtitle">You can manage Claude Code in tmux manually. Here's why amux exists anyway.</p>
 
-    <!-- EXP-007: compare pages GitHub CTA -->
-    <div style="display:flex;align-items:center;gap:1rem;background:var(--bg-2,#1a1f2e);border:1px solid var(--line,#2a3040);border-radius:8px;padding:0.875rem 1.125rem;margin:1.5rem 0;flex-wrap:wrap">
-      <span style="font-size:13px;color:var(--fg-mute,#8892a4);flex:1;min-width:180px">Considering amux? See it in action before deciding →</span>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="if(window.posthog) posthog.capture('exp007_compare_github_cta_click', {page: window.location.pathname})" style="display:inline-flex;align-items:center;gap:0.5rem;background:#24292e;color:#fff;text-decoration:none;padding:0.5rem 1rem;border-radius:6px;font-size:13px;font-weight:600;white-space:nowrap">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5 3.3 9.3 7.9 10.8.6.1.8-.2.8-.6v-2.2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.4-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.1.1 1.7 1.2 1.7 1.2 1 1.7 2.7 1.2 3.4.9.1-.7.4-1.2.7-1.5-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2.9-.3 1.9-.4 2.9-.4s2 .1 2.9.4c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.7.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.8C23.5 5.7 18.3.5 12 .5z"/></svg>
+    <div class="kicker">// compare</div>
+    <h1>amux vs DIY tmux Scripts</h1>
+    <p class="subtitle">You can manage Claude Code in tmux manually. Here's what happens when you try to scale it.</p>
+    <p style="color:var(--muted);font-size:0.85rem">Last updated: September 29, 2026</p>
+
+    <!-- EXP-106: amux-vs-diy-tmux full rebuild top-of-page CTA -->
+    <div style="display:flex;align-items:center;gap:1rem;background:linear-gradient(135deg,#0f2027,#1a2a1a);border:1px solid #2d5a2d;border-radius:8px;padding:0.875rem 1.125rem;margin:1.5rem 0;flex-wrap:wrap">
+      <span style="font-size:13px;color:#a8d8a8;flex:1;min-width:180px">Run a fleet of Claude Code agents — self-healing, web dashboard, iOS remote control →</span>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="if(window.posthog) posthog.capture('exp106_diy_tmux_compare_topofpage_cta_click', {page: window.location.pathname})" style="display:inline-flex;align-items:center;gap:0.5rem;background:#2d8a2d;color:#fff;text-decoration:none;padding:0.5rem 1rem;border-radius:6px;font-size:13px;font-weight:600;white-space:nowrap">
         ⭐ Star amux on GitHub
       </a>
     </div>
 
-<p>Many developers start by writing bash scripts to manage Claude Code in tmux. It works — until you need self-healing, a dashboard, or coordination between agents.</p>
-<h2>What you get with DIY scripts</h2>
-<ul>
-<li><code>tmux new-session -d -s agent1 "claude"</code> — starts a session</li>
-<li><code>tmux send-keys -t agent1 "fix the login bug" Enter</code> — sends a prompt</li>
-<li><code>tmux capture-pane -t agent1 -p</code> — reads output</li>
-</ul>
-<h2>What you're missing</h2>
-<table><thead><tr><th>Feature</th><th>amux</th><th>DIY tmux</th></tr></thead><tbody><tr><td>Self-healing</td><td>Auto-compact + restart + unstick</td><td>Manual monitoring</td></tr><tr><td>Dashboard</td><td>Web UI with live peek, search, files</td><td>Terminal only</td></tr><tr><td>Mobile access</td><td>PWA on any device</td><td>SSH + tmux attach</td></tr><tr><td>Task board</td><td>SQLite kanban with atomic claiming</td><td>External tool needed</td></tr><tr><td>Token tracking</td><td>Per-session spend dashboards</td><td>Manual calculation</td></tr><tr><td>Status detection</td><td>ANSI-parsed working/waiting/idle</td><td>Custom parsing needed</td></tr><tr><td>Conversation fork</td><td>Clone JSONL history to new branch</td><td>Manual copy</td></tr><tr><td>Agent coordination</td><td>REST API + global memory</td><td>Custom implementation</td></tr></tbody></table>
-<h2>Start simple, then upgrade</h2>
-<p>If you're running 1-2 agents, DIY tmux works fine. When you hit 5+ agents and need to monitor them from your phone at 2am, amux pays for itself immediately.</p>
-<div class="cta-box"><h3>Get started with amux</h3><p>Run dozens of Claude Code agents in parallel. Python 3 + tmux. Open source.</p><pre><code>git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh
+    <div style="background:var(--surface-2,#1a1f2e);border-left:3px solid var(--accent,#6ee7b7);padding:1rem 1.25rem;border-radius:0 8px 8px 0;margin:1.5rem 0">
+      <strong>Quick answer:</strong> DIY tmux scripts work fine for 1-2 interactive Claude Code sessions. When you want to run 5-10 agents unattended overnight and check in from your phone, you spend more time maintaining the scripts than shipping features. amux is what you'd build after six months of maintenance if you kept going — minus the six months.
+    </div>
+
+    <h2>The typical DIY path</h2>
+
+    <p>It starts simply. Three tmux commands:</p>
+
+    <pre><code># Start a session
+tmux new-session -d -s agent1 "claude"
+
+# Send a task
+tmux send-keys -t agent1 "implement the user auth flow" Enter
+
+# Read the output
+tmux capture-pane -t agent1 -p</code></pre>
+
+    <p>This works. For one session. Then you add a second, and write a loop. Then you want to see what both are doing at once, so you write a status checker. Then one crashes at 2am and you write a restart watcher. Then two agents race on the same task and corrupt a file, so you write a task-claiming mechanism. Then context overflows silently and neither agent is doing anything, so you add ANSI parsing. Then you can't check in from your phone without SSH.</p>
+
+    <p>Six months later you have a bash script that is 800 lines and still breaks in new ways. That is amux, but untested and maintained by you alone.</p>
+
+    <h2>What DIY tmux cannot realistically give you</h2>
+
+    <table>
+      <thead><tr><th>Capability</th><th>amux</th><th>DIY tmux scripts</th></tr></thead>
+      <tbody>
+        <tr><td>Self-healing: context overflow</td><td>Auto-compact, restart, context summarized automatically</td><td>Requires ANSI parse of "context full" message + restart logic</td></tr>
+        <tr><td>Self-healing: usage limit</td><td>Detects rate-limit modal, waits, resumes automatically</td><td>Requires parsing wait-screen message + sleep + retry</td></tr>
+        <tr><td>Self-healing: stuck prompt</td><td>Detects idle timeout, sends nudge or unsticks</td><td>Custom heuristics needed; hard to tune without false positives</td></tr>
+        <tr><td>Self-healing: crash restart</td><td>Watchdog restarts crashed sessions with message replay</td><td>Requires process monitoring + re-sending last task</td></tr>
+        <tr><td>Web dashboard</td><td>Built-in: live session list, peek panel, board, token spend</td><td>Build from scratch (tmux capture-pane piped to a web server)</td></tr>
+        <tr><td>Mobile access</td><td>iOS app + PWA — monitor and steer agents from your phone</td><td>SSH + tmux attach — no phone dashboard</td></tr>
+        <tr><td>Atomic task claiming</td><td>SQLite compare-and-swap: no two agents claim the same task</td><td>Custom file locking or Redis; race conditions likely</td></tr>
+        <tr><td>Approval memory</td><td>Every approval saved as a standing rule; persists across sessions</td><td>Not applicable; no inter-session state</td></tr>
+        <tr><td>Token spend tracking</td><td>Per-session cost dashboard; daily/weekly spend rollup</td><td>Manual Claude API invoice parsing</td></tr>
+        <tr><td>Inter-agent messaging</td><td>REST API + @mentions + Messages tab history</td><td>Shared files or ad-hoc conventions</td></tr>
+        <tr><td>Session fork</td><td>Clone JSONL conversation history to a new branch</td><td>Manual file copy + restart</td></tr>
+        <tr><td>Kanban coordination</td><td>Board with todo/doing/done/verified + evidence gates</td><td>External tool or text files</td></tr>
+        <tr><td>Installation</td><td>brew install mixpeek/amux/amux — single command, Homebrew-managed</td><td>Clone a repo and maintain it yourself</td></tr>
+        <tr><td>License</td><td>MIT + Commons Clause</td><td>Your own code (no license overhead)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The self-healing problem in detail</h2>
+
+    <p>The hardest part of DIY tmux is self-healing. Claude Code sessions fail in at least four distinct ways, each with different detection and recovery logic:</p>
+
+    <p><strong>Context overflow.</strong> Claude Code hits its context window and exits to a shell prompt. Your session is now running a shell, not Claude. Detection requires recognizing the shell prompt pattern in tmux output. Recovery requires restarting Claude and either summarizing the prior context or replaying the task from scratch. Getting this right — without false-firing on legitimate shell commands in the task — takes several iterations.</p>
+
+    <p><strong>Usage limit hit.</strong> Claude Code displays a "Usage limits reached" screen and waits. The session is alive but doing nothing. Detection requires parsing this specific screen. Recovery requires waiting for the reset window and then pressing Enter or sending a prompt.</p>
+
+    <p><strong>Stuck prompt.</strong> An agent is waiting for confirmation on a file deletion, database migration, or other action that requires approval. The output looks similar to normal idle — both are paused. Distinguishing "waiting for approval" from "thinking" requires understanding Claude Code's terminal output structure.</p>
+
+    <p><strong>Process crash.</strong> Claude exits with a non-zero status. The tmux pane shows a shell prompt or an error. Recovery requires restarting and, ideally, replaying the last message so the agent knows what it was doing.</p>
+
+    <p>amux handles all four. DIY scripts typically handle crash restart — the obvious one — and leave the rest as manual interventions.</p>
+
+    <h2>The race condition problem</h2>
+
+    <p>If you have 5 agents all reading from a shared task list and claiming work, you need atomic claiming. Two agents reading the same "todo" item and both starting it will corrupt the same file or submit conflicting commits.</p>
+
+    <p>amux uses SQLite with compare-and-swap semantics: an agent can only claim a task if it is still in <code>todo</code> state at the moment of the claim. The claim is atomic; two agents racing on the same task result in exactly one claim and one polite rejection. The other agent moves to the next item.</p>
+
+    <p>Implementing this with bash and file locks is possible but subtle: you need exclusive locks, timeout handling, and a recovery path when a lock holder crashes. Most DIY implementations skip the subtlety and get occasional duplicate work or corrupted files.</p>
+
+    <h2>What happens at 5+ agents</h2>
+
+    <p>A common pattern: you build a 2-agent setup with bash scripts, it works, you add more agents. By 5 agents the scripts are doing things like:</p>
+
+    <pre><code>for i in 1 2 3 4 5; do
+  status=$(tmux capture-pane -t agent$i -p | tail -5)
+  # is it working? is it stuck? is it done?
+  # each agent needs different handling...
+done</code></pre>
+
+    <p>The output parsing grows to handle every variation in Claude Code's terminal output. The restart logic grows to handle each failure mode. The task-claiming logic grows to handle races. Eventually you have something that mostly works but occasionally does something strange at 3am and you don't know why.</p>
+
+    <p>amux is the tested, maintained version of this. The same Rust binary used by everyone running amux handles the edge cases that emerge at scale — and the fixes go into every user's installation on the next <code>brew upgrade</code>.</p>
+
+    <h2>September 2026: what's new in amux</h2>
+
+    <p>Recent amux releases added capabilities that are essentially impossible to replicate in DIY scripts:</p>
+
+    <ul>
+      <li><strong>Approval memory.</strong> When you approve an action in the needs-input panel, amux saves it as a standing rule. The next agent requesting the same action type proceeds without pausing. One approval prevents 50 future interruptions. A DIY script would need a persistent approval store, a matching algorithm, and scope management across sessions.</li>
+      <li><strong>Vault checkout.</strong> <code>amux order --url</code> runs a full headless checkout flow — navigate, fill, confirm, return receipt. Useful for procurement and subscription management. Implementing this in bash requires a headless browser library, session management, and receipt parsing.</li>
+      <li><strong>Needs-input owner gating.</strong> Destructive actions stay with the owner; downstream agents cannot override them. Implementing this kind of role-based action routing in tmux scripts requires significant custom architecture.</li>
+      <li><strong>CUA computer-use sandboxes.</strong> amux runs a CUA desktop sandbox for native apps, OS dialogs, and bot-blocked flows. There is no equivalent DIY path for this.</li>
+    </ul>
+
+    <h2>When DIY tmux is still the right answer</h2>
+
+    <ul>
+      <li><strong>1-2 sessions, interactive.</strong> If you're running a single Claude Code session and watching it work, a few tmux commands are all you need. amux adds overhead you won't use.</li>
+      <li><strong>You want full control over every detail.</strong> Custom scripts give you full flexibility. amux is opinionated about how sessions are managed. If your workflow is unusual enough that amux's model doesn't fit, building custom tooling may be the right call.</li>
+      <li><strong>Minimizing dependencies.</strong> amux requires tmux and a Rust binary. If your environment is locked down and you can't install new software, bash scripts that only call tmux directly have lower requirements.</li>
+    </ul>
+
+    <h2>Migration path</h2>
+
+    <p>amux is not a replacement for your tmux sessions — it manages them. Your existing tmux workflow stays; amux adds the fleet coordination layer on top. You don't migrate your sessions; you register your project and amux wraps it:</p>
+
+    <pre><code># Install
+brew install mixpeek/amux/amux
+
+# Register your project (wraps existing sessions or creates new ones)
+amux register myproject --dir ~/Dev/myproject --yolo
+
+# Start the session
+amux start myproject
+
+# Open the dashboard
+amux serve  # → https://localhost:8824</code></pre>
+
+    <h2>See also</h2>
+    <ul>
+      <li><a href="/guides/ai-coding-agents-overnight/">Running AI coding agents overnight</a></li>
+      <li><a href="/guides/ai-agent-standing-approvals/">AI agent standing approvals</a></li>
+      <li><a href="/guides/agent-fleet-operations/">AI agent fleet operations</a></li>
+      <li><a href="/compare/amux-vs-aider/">amux vs Aider</a></li>
+      <li><a href="/compare/amux-vs-cursor/">amux vs Cursor</a></li>
+    </ul>
+
+    <div class="cta-box">
+      <h3>Stop maintaining scripts. Run amux.</h3>
+      <p>Self-healing fleet management, web dashboard, iOS app, approval memory. Single Rust binary, MIT licensed.</p>
+      <pre><code>brew install mixpeek/amux/amux
 amux register myproject --dir ~/Dev/myproject --yolo
 amux start myproject
-amux serve  # → https://localhost:8824</code></pre><a class="btn btn-primary" href="https://github.com/mixpeek/amux">View on GitHub</a></div>
+amux serve  # → https://localhost:8824</code></pre>
+      <a class="btn btn-primary" href="https://github.com/mixpeek/amux">⭐ Star on GitHub</a>
+      <a class="btn" href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" style="margin-left:0.5rem">Download iOS App</a>
+    </div>
   </main>
   <footer class="sub-footer">
     <div class="footer-inner">
@@ -112,7 +233,6 @@ amux serve  # → https://localhost:8824</code></pre><a class="btn btn-primary" 
       </div>
     </div>
   </footer>
-
-<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='\u2605 '+d.stargazers_count}).catch(function(){})</script>
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
 </body>
 </html>

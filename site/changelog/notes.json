@@ -1,5 +1,47 @@
 [
   {
+    "sha": "167c46df",
+    "date": "2026-09-29",
+    "title": "Vault checkout: amux order --url runs a full headless checkout flow unattended",
+    "body": "amux order --url <url> launches a sandboxed browser session, navigates to the checkout page, applies the configured profile (shipping address, payment method), confirms the order, and returns a structured receipt \u2014 all without a human present. Useful for procurement automation, subscription management, and any recurring purchase flow you currently do by hand. The headless flow is gated by the owner-approval layer: the first run requires confirmation; subsequent runs with the same merchant and amount range proceed automatically once approved.",
+    "type": "feat"
+  },
+  {
+    "sha": "7d47a821",
+    "date": "2026-09-29",
+    "title": "Approval memory: every owner approval is auto-saved as a standing approval",
+    "body": "When you approve an agent action in the needs-input panel, amux now automatically saves that approval as a standing rule. The next time any agent requests the same action (matched by category, tool name, and scope), it proceeds without pausing to ask. Approval memory is session-scoped by default; promote it to group or global scope from the Approvals tab. You can review, edit, and revoke any standing approval at any time. This means one approval today prevents 50 identical interruptions over the next month.",
+    "type": "feat"
+  },
+  {
+    "sha": "bc4b2166",
+    "date": "2026-09-29",
+    "title": "Fix: restored ~990 lines of app.js that a merge resolution dropped",
+    "body": "A conflict resolution during a recent merge accidentally dropped approximately 990 lines of client-side JavaScript, disabling roughly a third of the dashboard UI including the board tab, the peek panel's diff view, the token ledger, and the settings sync flow. This commit restores the full app.js. If you noticed portions of the dashboard stopping responding or rendering blank panels since the last update, this resolves it.",
+    "type": "fix"
+  },
+  {
+    "sha": "43d7ea08",
+    "date": "2026-09-29",
+    "title": "Fix: Nudges panel On and Off actually change nudging now",
+    "body": "The nudge toggle in the board panel was updating the UI state but not persisting the change \u2014 so turning nudges off would disable them for the current session but re-enable them on the next page load. The toggle now writes to the server-side preference store, so the setting survives refreshes and session restarts.",
+    "type": "fix"
+  },
+  {
+    "sha": "8f1bd33b",
+    "date": "2026-09-29",
+    "title": "Fix: long lines in the peek panel scroll horizontally instead of wrapping",
+    "body": "Long single-line outputs (JSON blobs, base64 strings, minified files, stack traces) were word-wrapping inside the peek panel, making them unreadable. The panel now applies horizontal scroll on overflow, preserving line structure so you can read or copy the full line without manually unwrapping it.",
+    "type": "fix"
+  },
+  {
+    "sha": "d071f794",
+    "date": "2026-09-29",
+    "title": "Fix: global member scope is an explicit host-access grant, not a default",
+    "body": "The security model now treats a \"global\" member scope as an intentional, explicit grant of host-level access \u2014 not as a fallback when no narrower scope is set. Previously, any session without a scope assignment was treated as implicitly global, which allowed broader access than intended. Sessions without an explicit scope now receive no elevated permissions and must be granted scope deliberately.",
+    "type": "fix"
+  },
+  {
     "hash": "d0121ef4",
     "short": "d0121ef",
     "title": "Auto-approve: scoped per-ask policies for unattended agent runs",
