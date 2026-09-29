@@ -2246,6 +2246,14 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         methods: &["GET"],
     },
     RouteEntry {
+        path: "/api/browser/complete-order",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/profile-access",
+        methods: &["GET"],
+    },
+    RouteEntry {
         path: "/api/browser/profile/create",
         methods: &["POST"],
     },
@@ -2944,6 +2952,10 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
     },
     RouteEntry {
         path: "/api/skills",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/skills/usage",
         methods: &["GET"],
     },
     RouteEntry {

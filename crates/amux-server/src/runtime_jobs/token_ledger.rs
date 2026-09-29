@@ -338,6 +338,67 @@ pub static LEDGER_DUPLICATE_MESSAGES: std::sync::atomic::AtomicU64 =
 /// preceding line (py:18133) — deliberately not a set, because two genuinely
 /// distinct turns can carry identical counts and a set would silently drop the
 /// second.
+/// One transcript's parse result awaiting the write: conversation, new offset,
+/// mtime, billed turns and skill events.
+type PendingFile = (String, u64, i64, Vec<Turn>, Vec<SkillUse>);
+
+/// A skill invocation seen in a transcript (AMUX-5340): the model's Skill tool
+/// call, or a slash command the user typed. Feeds "most used" on the Skills page.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SkillUse {
+    pub uuid: String,
+    pub skill: String,
+    pub source: &'static str,
+    pub session: String,
+    pub ts: i64,
+}
+
+/// The skills one transcript record invoked. Only TYPED text counts for slash
+/// commands: a tool result that quotes `<command-name>` (a file read, a grep)
+/// is not an invocation.
+pub(crate) fn skill_uses_in(e: &serde_json::Value, owner: &str, fallback_ts: i64) -> Vec<SkillUse> {
+    let Some(uuid) = e["uuid"].as_str().filter(|u| !u.is_empty()) else { return vec![] };
+    let ts = e["timestamp"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.timestamp())
+        .unwrap_or(fallback_ts);
+    let norm = |s: &str| s.trim().trim_start_matches('/').to_ascii_lowercase();
+    let mut out: Vec<SkillUse> = Vec::new();
+    let mut push = |skill: String, source: &'static str| {
+        if !skill.is_empty() && skill.len() <= 120 && !out.iter().any(|u| u.skill == skill) {
+            out.push(SkillUse { uuid: uuid.to_string(), skill, source, session: owner.to_string(), ts });
+        }
+    };
+    let content = &e["message"]["content"];
+    let mut typed = String::new();
+    match content {
+        serde_json::Value::String(t) => typed.push_str(t),
+        serde_json::Value::Array(parts) => {
+            for c in parts {
+                if c["type"] == "tool_use" && c["name"] == "Skill" {
+                    if let Some(sk) = c["input"]["skill"].as_str() {
+                        push(norm(sk), "model");
+                    }
+                } else if c["type"] == "text" {
+                    typed.push_str(c["text"].as_str().unwrap_or(""));
+                    typed.push('\n');
+                }
+            }
+        }
+        _ => {}
+    }
+    if e["type"] == "user" && typed.contains("<command-name>") {
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = RE.get_or_init(|| regex::Regex::new(r"<command-name>\s*(/[^<\s]+)\s*</command-name>").expect("command-name regex"));
+        for c in re.captures_iter(&typed) {
+            push(norm(&c[1]), "user");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 fn parse_from(
     path: &Path,
     offset: u64,
@@ -345,18 +406,30 @@ fn parse_from(
     owner: &str,
     table: &[(String, [f64; 4])],
 ) -> (u64, Vec<Turn>) {
+    let (off, turns, _) = parse_from_with_skills(path, offset, fallback_ts, owner, table);
+    (off, turns)
+}
+
+fn parse_from_with_skills(
+    path: &Path,
+    offset: u64,
+    fallback_ts: i64,
+    owner: &str,
+    table: &[(String, [f64; 4])],
+) -> (u64, Vec<Turn>, Vec<SkillUse>) {
     let conversation = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let Ok(mut f) = std::fs::File::open(path) else {
-        return (offset, vec![]);
+        return (offset, vec![], vec![]);
     };
     if offset > 0 && f.seek(SeekFrom::Start(offset)).is_err() {
-        return (offset, vec![]);
+        return (offset, vec![], vec![]);
     }
     let mut new_off = offset;
     let mut out = Vec::new();
+    let mut skills: Vec<SkillUse> = Vec::new();
     let mut prev_sig: Option<(i64, i64, i64)> = None;
     // AMUX-4580: responses already billed in this pass, by message id.
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -373,6 +446,8 @@ fn parse_from(
         let Ok(e) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             continue;
         };
+        // Before the usage check: a typed command carries no usage block.
+        skills.extend(skill_uses_in(&e, owner, fallback_ts));
         let msg = &e["message"];
         let u = &msg["usage"];
         if !u.is_object() {
@@ -435,7 +510,84 @@ fn parse_from(
                 .map(str::to_string),
         });
     }
-    (new_off, out)
+    (new_off, out, skills)
+}
+
+const SKILL_BACKFILL_PREF: &str = "skill_usage_backfill_v1";
+/// Transcripts older than this are not backfilled: "most used" is about now.
+const SKILL_BACKFILL_DAYS: u64 = 90;
+
+/// One-time (AMUX-5340): skill events in transcript bytes the incremental
+/// indexer passed before it learned to read them. Only lines that mention a
+/// Skill call or a typed command are parsed, so the 15G tree reads in minutes.
+/// Marked done in prefs; safe to repeat anyway (INSERT OR IGNORE by uuid).
+pub async fn backfill_skill_usage(store: &SharedStore, projects: &Path) -> anyhow::Result<Option<usize>> {
+    let done = {
+        let conn = store.read()?;
+        conn.query_row("SELECT 1 FROM prefs WHERE key=?1", [SKILL_BACKFILL_PREF], |_| Ok(())).is_ok()
+    };
+    if done {
+        return Ok(None);
+    }
+    let projects = projects.to_path_buf();
+    let (files, uses) = tokio::task::spawn_blocking(move || scan_skill_uses(&projects)).await?;
+    let n = uses.len();
+    store
+        .write_async(move |conn| {
+            let mut st = conn.prepare(
+                "INSERT OR IGNORE INTO skill_usage (record_uuid, skill, source, session, ts) VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for u in &uses {
+                st.execute(rusqlite::params![u.uuid, u.skill, u.source, u.session, u.ts])?;
+            }
+            conn.execute(
+                "INSERT INTO prefs (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![SKILL_BACKFILL_PREF, format!("{} events from {} files", n, files)],
+            )?;
+            Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+        })
+        .await?;
+    tracing::info!(verdict = "skill_usage_backfilled", measured = true, n_considered = files, events = n,
+        "skill usage: one-time backfill from existing transcripts");
+    Ok(Some(n))
+}
+
+/// (files read, skill events) under `projects`, including subagent transcripts.
+fn scan_skill_uses(projects: &Path) -> (usize, Vec<SkillUse>) {
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(SKILL_BACKFILL_DAYS * 86_400);
+    let mut files: Vec<PathBuf> = Vec::new();
+    for proj in std::fs::read_dir(projects).into_iter().flatten().flatten() {
+        for f in std::fs::read_dir(proj.path()).into_iter().flatten().flatten() {
+            let p = f.path();
+            if p.is_dir() {
+                for sf in std::fs::read_dir(p.join("subagents")).into_iter().flatten().flatten() {
+                    files.push(sf.path());
+                }
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    files.retain(|p| {
+        p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            && p.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= cutoff)
+    });
+    let mut out = Vec::new();
+    for p in &files {
+        let Ok(f) = std::fs::File::open(p) else { continue };
+        let mtime = p.metadata().ok().and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+        for line in BufReader::new(f).split(b'\n').flatten() {
+            let hit = line.windows(7).any(|w| w == b"\"Skill\"") || line.windows(13).any(|w| w == b"command-name>");
+            if !hit {
+                continue;
+            }
+            if let Ok(e) = serde_json::from_slice::<serde_json::Value>(&line) {
+                out.extend(skill_uses_in(&e, "", mtime));
+            }
+        }
+    }
+    (files.len(), out)
 }
 
 fn claude_projects_dir() -> PathBuf {
@@ -628,7 +780,7 @@ pub async fn index_once_at(
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(200);
     let mut skipped_for_cap = 0usize;
-    let mut pending: Vec<(String, u64, i64, Vec<Turn>)> = Vec::new();
+    let mut pending: Vec<PendingFile> = Vec::new();
     // Owner titles are read from a conversation's FIRST line; subagent files
     // all share one parent, so cache per parent rather than re-opening it once
     // per delegated transcript.
@@ -703,8 +855,8 @@ pub async fn index_once_at(
                         .or_insert_with(|| jsonl_owner_title(pp, claims))
                         .clone(),
                 };
-                let (new_off, turns) = parse_from(&jf, start, mtime, &owner, &table);
-                pending.push((conv, new_off, mtime, turns));
+                let (new_off, turns, skill_uses) = parse_from_with_skills(&jf, start, mtime, &owner, &table);
+                pending.push((conv, new_off, mtime, turns, skill_uses));
             }
         }
     }
@@ -719,7 +871,7 @@ pub async fn index_once_at(
     if pending.is_empty() {
         return Ok(0);
     }
-    let expected: usize = pending.iter().map(|(_, _, _, t)| t.len()).sum();
+    let expected: usize = pending.iter().map(|(_, _, _, t, _)| t.len()).sum();
 
     let inserted = store
         .write_async(move |conn| {
@@ -741,7 +893,13 @@ pub async fn index_once_at(
                     "INSERT INTO ledger_cursor (conversation, offset, mtime) VALUES (?1,?2,?3)
                      ON CONFLICT(conversation) DO UPDATE SET offset=?2, mtime=?3",
                 )?;
-                for (conv, off, mtime, turns) in &pending {
+                let mut sk = conn.prepare(
+                    "INSERT OR IGNORE INTO skill_usage (record_uuid, skill, source, session, ts) VALUES (?1,?2,?3,?4,?5)",
+                )?;
+                for (conv, off, mtime, turns, skill_uses) in &pending {
+                    for u in skill_uses {
+                        sk.execute(rusqlite::params![u.uuid, u.skill, u.source, u.session, u.ts])?;
+                    }
                     for t in turns {
                         ins.execute(rusqlite::params![
                             t.ts, t.session, t.conversation, t.model,
@@ -1038,6 +1196,9 @@ pub fn spawn(state: crate::api::AppState) -> Option<super::PeriodicTask> {
             let store = state.store.clone();
             let home = home.clone();
             async move {
+                if let Err(e) = backfill_skill_usage(&store, &claude_projects_dir()).await {
+                    tracing::warn!(error = %e, verdict = "skill_usage_backfill_failed", "skill usage backfill failed; retried next tick");
+                }
                 match index_once(&store, &home).await {
                     Ok(0) => {}
                     Ok(n) => tracing::info!(rows = n, "token-ledger indexed"),
@@ -1935,5 +2096,50 @@ mod tests {
 
         let missing = dir.path().join("nope.jsonl");
         assert_eq!(jsonl_owner_title(&missing, &BTreeMap::new()), "");
+    }
+}
+
+#[cfg(test)]
+mod skill_usage_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn skill_calls_and_typed_commands_count_and_quoted_tags_do_not() {
+        // The model invoking a skill (live shape, 2026-09-29).
+        let e = json!({"type":"assistant","uuid":"u1","timestamp":"2026-09-29T12:00:00Z","message":{"content":[
+            {"type":"text","text":"Loading it."},
+            {"type":"tool_use","name":"Skill","input":{"skill":"Chrome-CDP"}}]}});
+        let u = skill_uses_in(&e, "lane", 0);
+        assert_eq!((u.len(), u[0].skill.as_str(), u[0].source), (1, "chrome-cdp", "model"));
+        // A typed slash command.
+        let e = json!({"type":"user","uuid":"u2","message":{"content":"<command-name>/goal</command-name>\n<command-args>ship it</command-args>"}});
+        let u = skill_uses_in(&e, "lane", 5);
+        assert_eq!((u[0].skill.as_str(), u[0].source, u[0].ts), ("goal", "user", 5));
+        // A tool result that QUOTES the tag (a file read) is not an invocation.
+        let e = json!({"type":"user","uuid":"u3","message":{"content":[
+            {"type":"tool_result","content":"grep hit: <command-name>/compact</command-name>"}]}});
+        assert!(skill_uses_in(&e, "lane", 0).is_empty());
+        // No uuid, no event (it could not be deduplicated).
+        let e = json!({"type":"user","message":{"content":"<command-name>/goal</command-name>"}});
+        assert!(skill_uses_in(&e, "lane", 0).is_empty());
+    }
+
+    #[test]
+    fn the_backfill_scan_reads_subagent_transcripts_and_only_matching_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("-Users-x-proj");
+        std::fs::create_dir_all(proj.join("conv1").join("subagents")).unwrap();
+        std::fs::write(proj.join("conv1.jsonl"), concat!(
+            r#"{"type":"user","uuid":"a","message":{"content":"<command-name>/standup</command-name>"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"b","message":{"content":[{"type":"text","text":"nothing here"}]}}"#, "\n",
+        )).unwrap();
+        std::fs::write(proj.join("conv1").join("subagents").join("s.jsonl"),
+            r#"{"type":"assistant","uuid":"c","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"slop"}}]}}"#).unwrap();
+        let (files, uses) = scan_skill_uses(dir.path());
+        assert_eq!(files, 2);
+        let mut names: Vec<_> = uses.iter().map(|u| u.skill.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["slop", "standup"]);
     }
 }

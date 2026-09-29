@@ -13275,7 +13275,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1175';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1176';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -38675,7 +38675,32 @@ async function pingServer() {
   renderDebugInfo();
 }
 
-let _skillsData = { db: [], file: [], builtin: [] };
+let _skillsData = { db: [], file: [], builtin: [], usage: {} };
+// Sort and pins (Ethan, 2026-09-29: "order by name or most frequently used",
+// "let me pin skills"). Usage comes from /api/skills/usage (transcripts: the
+// model's Skill calls and typed slash commands). A pin IS a slash chip in the
+// composer's quick bar (ui_chips, synced server-side), so pinning shows the
+// skill first here and one tap away in every worker's composer.
+function _skillsSort() { try { return localStorage.getItem('skills_sort') || 'name'; } catch(e) { return 'name'; } }
+function _skillsSortSet(v) {
+  try { localStorage.setItem('skills_sort', v); } catch(e) {}
+  _skillsFilter((document.getElementById('skills-search') || {}).value || '');
+}
+function _skillKey(cmd) { return String(cmd || '').replace(/^\//, '').toLowerCase(); }
+function _skillPinned() {
+  return new Set(_getChips().filter(c => c.action === 'slash').map(c => _skillKey(c.value)));
+}
+function _skillPinToggle(cmd) {
+  const key = _skillKey(cmd);
+  const chips = _getChips();
+  const i = chips.findIndex(c => c.action === 'slash' && _skillKey(c.value) === key);
+  if (i >= 0) chips.splice(i, 1);
+  else chips.push({ id: 'sk-' + key, label: '/' + key, action: 'slash', value: '/' + key });
+  _saveChips(chips);
+  if (typeof refreshAllChipBars === 'function') refreshAllChipBars();
+  showToast(i >= 0 ? 'Unpinned /' + key : 'Pinned /' + key + ' to the quick bar');
+  _skillsFilter((document.getElementById('skills-search') || {}).value || '');
+}
 
 async function _skillsTabLoad() {
   const container = document.getElementById('skills-tab-sections');
@@ -38685,10 +38710,14 @@ async function _skillsTabLoad() {
   container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 0;">Loading...</div>';
   if (searchEl) searchEl.value = '';
   try {
-    const [cmds, dbSkills] = await Promise.all([
+    const [cmds, dbSkills, usage] = await Promise.all([
       fetch(API + '/api/slash-commands').then(r => r.json()),
       fetch(API + '/api/skills').then(r => r.json()),
+      fetch(API + '/api/skills/usage', { headers: _authHeaders() }).then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
+    _skillsData.usage = (usage && usage.skills) || {};
+    const sortEl = document.getElementById('skills-sort');
+    if (sortEl) sortEl.value = _skillsSort();
     const dbNames = new Set(dbSkills.map(s => '/' + s.name));
     _skillsData.db = dbSkills;
     _skillsData.file = cmds.filter(c => c.cmd && !dbNames.has(c.cmd) && !_isBuiltinCmd(c.cmd));
@@ -38713,10 +38742,24 @@ function _skillsRender(q, countEl, container) {
     const hint = (item.hint || '').toLowerCase();
     return name.includes(q) || desc.includes(q) || hint.includes(q);
   };
-  const db = _skillsData.db.filter(match);
-  const file = _skillsData.file.filter(match);
-  const builtin = _skillsData.builtin.filter(match);
-  const total = db.length + file.length;
+  const pinned = _skillPinned();
+  const use = cmd => _skillsData.usage[_skillKey(cmd)] || null;
+  const byUse = (a, b) => ((use(b) || {}).recent || 0) - ((use(a) || {}).recent || 0)
+    || ((use(b) || {}).n || 0) - ((use(a) || {}).n || 0);
+  const sortBy = (items, cmdOf) => items.slice().sort((a, b) =>
+    (_skillsSort() === 'used' ? byUse(cmdOf(a), cmdOf(b)) : 0) || cmdOf(a).localeCompare(cmdOf(b)));
+  const dbCmd = s => '/' + s.name, fileCmd = c => c.cmd;
+  const isPinned = cmd => pinned.has(_skillKey(cmd));
+  const allDb = _skillsData.db.filter(match), allFile = _skillsData.file.filter(match), allBuiltin = _skillsData.builtin.filter(match);
+  const db = sortBy(allDb.filter(s => !isPinned(dbCmd(s))), dbCmd);
+  const file = sortBy(allFile.filter(c => !isPinned(fileCmd(c))), fileCmd);
+  const builtin = sortBy(allBuiltin.filter(c => !isPinned(fileCmd(c))), fileCmd);
+  const pinnedItems = sortBy([
+    ...allDb.filter(s => isPinned(dbCmd(s))).map(s => ({ cmd: dbCmd(s), desc: s.description, hint: s.hint, editable: true, key: 'db:' + s.name })),
+    ...allFile.filter(c => isPinned(c.cmd)).map(c => ({ cmd: c.cmd, desc: c.desc, hint: c.hint || '', editable: false, key: 'file:' + c.cmd.replace(/^\//, '') })),
+    ...allBuiltin.filter(c => isPinned(c.cmd)).map(c => ({ cmd: c.cmd, desc: c.desc, hint: '', editable: false, key: '' })),
+  ], p => p.cmd);
+  const total = allDb.length + allFile.length;
   if (countEl) countEl.textContent = total + ' skill' + (total === 1 ? '' : 's');
 
   const section = (title, items, renderFn) => items.length === 0 ? '' :
@@ -38729,10 +38772,14 @@ function _skillsRender(q, countEl, container) {
     const id = 'sc-' + cmd.replace(/[^a-z0-9]/gi,'_');
     const safeCmd = cmd.replace(/'/g,"\\'");
     const usage = hint ? cmd + ' ' + hint : cmd;
+    const u = use(cmd);
+    const badge = u && u.n ? '<span class="skill-card-uses" title="' + esc(u.n + ' uses (model ' + u.model + ', typed ' + u.user + '); ' + u.recent + ' in the last 30 days') + '" style="font-size:0.68rem;color:var(--dim);margin-left:6px;">' + u.n + '\u00d7</span>' : '';
+    const pin = isPinned(cmd);
     return '<div class="skill-card" id="' + id + '">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
-        '<span class="skill-card-name" style="cursor:pointer;" onclick="_skillToggle(\'' + id + '\',\'' + esc(fetchKey || '') + '\')">' + esc(cmd) + '</span>' +
+        '<span><span class="skill-card-name" style="cursor:pointer;" onclick="_skillToggle(\'' + id + '\',\'' + esc(fetchKey || '') + '\')">' + esc(cmd) + '</span>' + badge + '</span>' +
         '<div style="display:flex;gap:4px;flex-shrink:0;">' +
+          '<button class="btn skill-pin' + (pin ? ' active' : '') + '" style="font-size:0.7rem;padding:2px 8px;' + (pin ? '' : 'opacity:0.55;') + '" aria-pressed="' + pin + '" title="' + (pin ? 'Unpin' : 'Pin to the quick bar') + '" onclick="event.stopPropagation();_skillPinToggle(\'' + safeCmd + '\')">\u{1F4CC}</button>' +
           (editable ? '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="event.stopPropagation();editSkill(\'' + esc(cmd.replace(/^\//,'')) + '\')">Edit</button>' : '') +
           '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="event.stopPropagation();navigator.clipboard.writeText(\'' + esc(usage) + '\');showToast(\'Copied!\')">Copy</button>' +
           '<button class="btn" style="font-size:0.65rem;padding:2px 6px;" onclick="_skillToggle(\'' + id + '\',\'' + esc(fetchKey || '') + '\')" title="Expand">▾</button>' +
@@ -38745,6 +38792,7 @@ function _skillsRender(q, countEl, container) {
   };
 
   const html =
+    section('Pinned', pinnedItems, p => card(p.cmd, p.desc, p.hint, p.editable, p.key)) +
     section('Custom skills', db, s => card('/' + s.name, s.description, s.hint, true, 'db:' + s.name)) +
     section('Project commands (.claude/commands)', file, c => card(c.cmd, c.desc, c.hint || '', false, 'file:' + c.cmd.replace(/^\//,''))) +
     section('Built-in', builtin, c => card(c.cmd, c.desc, '', false, ''));

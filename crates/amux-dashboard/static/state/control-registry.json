@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2325,
+  "n_considered": 2330,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -2740,6 +2740,42 @@
     },
     "_simplePlayEntry": {
       "kind": "command._simplePlayEntry",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_skillPinToggle": {
+      "kind": "command._skillPinToggle",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_skillPinned": {
+      "kind": "command._skillPinned",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_skillsFilter": {
+      "kind": "command._skillsFilter",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_skillsRender": {
+      "kind": "command._skillsRender",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_skillsSortSet": {
+      "kind": "command._skillsSortSet",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_skillsTabLoad": {
+      "kind": "command._skillsTabLoad",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

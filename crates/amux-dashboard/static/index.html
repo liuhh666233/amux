@@ -1888,6 +1888,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         oninput="_skillsFilter(this.value)">
     </div>
     <span style="font-size:0.78rem;color:var(--dim);white-space:nowrap;" id="skills-count"></span>
+    <select id="skills-sort" class="input" aria-label="Sort skills" onchange="_skillsSortSet(this.value)" style="font-size:0.78rem;padding:4px 8px;min-height:36px;width:auto;">
+      <option value="name">Name</option><option value="used">Most used</option>
+    </select>
     <button class="btn" onclick="editSkill()" style="font-size:0.75rem;padding:4px 12px;flex-shrink:0;">+ New</button>
   </div>
   <div id="skills-tab-sections" style="overflow-y:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch;"></div>

@@ -21,7 +21,7 @@ pub fn routes() -> Router<AppState> {
     // (app.js:23784, 23799) against a GET-only route, so Save toasted "Save
     // failed" and Delete did nothing — a dead editor, shipped and unnoticed
     // because a 405 in a fetch is silent unless someone reads the toast.
-    Router::new().route("/", get(list_skills)).route(
+    Router::new().route("/", get(list_skills)).route("/usage", get(skill_usage)).route(
         "/{name}",
         get(get_skill).post(save_skill).delete(delete_skill),
     )
@@ -56,6 +56,44 @@ fn frontmatter_fields(text: &str) -> (String, String) {
         }
     }
     (desc, hint)
+}
+
+/// GET /api/skills/usage[?days=N]: how often each skill was invoked, from
+/// Claude Code transcripts (the model's Skill calls and typed slash commands;
+/// AMUX-5340). `n` is all time, `recent` the last `days` (default 30). Keys are
+/// the bare name, lowercase, no leading slash.
+async fn skill_usage(State(state): State<AppState>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Response {
+    let days: i64 = q.get("days").and_then(|d| d.parse().ok()).filter(|d: &i64| *d > 0).unwrap_or(30);
+    let since = chrono::Utc::now().timestamp() - days * 86_400;
+    let read = state.store.read_async(move |conn| {
+        let backfill: Option<String> = conn
+            .query_row("SELECT value FROM prefs WHERE key='skill_usage_backfill_v1'", [], |r| r.get(0))
+            .ok();
+        let mut st = conn.prepare(
+            "SELECT skill, COUNT(*), SUM(ts >= ?1), SUM(source='model'), SUM(source='user'), MAX(ts) \
+             FROM skill_usage GROUP BY skill",
+        )?;
+        let rows = st
+            .query_map([since], |r| {
+                Ok((r.get::<_, String>(0)?, json!({
+                    "n": r.get::<_, i64>(1)?, "recent": r.get::<_, i64>(2)?,
+                    "model": r.get::<_, i64>(3)?, "user": r.get::<_, i64>(4)?, "last_ts": r.get::<_, i64>(5)?,
+                })))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((backfill, rows))
+    }).await;
+    match read {
+        Ok((backfill, rows)) => Json(json!({
+            "measured": true,
+            "n_considered": rows.len(),
+            "window_days": days,
+            "backfill": backfill,
+            "skills": rows.into_iter().collect::<serde_json::Map<String, serde_json::Value>>(),
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"measured": false, "why_unmeasured": e.to_string()}))).into_response(),
+    }
 }
 
 async fn list_skills(State(state): State<AppState>) -> Response {
