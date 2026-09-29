@@ -13261,7 +13261,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1172';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1173';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -14554,7 +14554,6 @@ function _savePeekState() {
 }
 
 function togglePeekSplit() {
-  // On mobile, open full-screen Files view instead of split pane
   if (window.innerWidth <= 600) {
     openExplore(peekSessionDir, peekSession);
     return;
@@ -14566,8 +14565,182 @@ function togglePeekSplit() {
   if (active) {
     _peekSplitPath = peekSessionDir || '/';
     _psfLoad(_peekSplitPath);
+    _initSplitResize();
+    _restoreSplitWidths();
+  } else {
+    const tp = document.getElementById('peek-terminal-panel');
+    const sf = document.getElementById('peek-split-files');
+    if (tp) tp.style.flex = '';
+    if (sf) sf.style.flex = '';
   }
   _savePeekState();
+}
+
+// --- Split pane drag resize ---
+let _splitResizeInit = false;
+function _initSplitResize() {
+  const handle = document.getElementById('peek-split-handle');
+  if (!handle || _splitResizeInit) return;
+  _splitResizeInit = true;
+  const start = (startX) => {
+    const wrap = document.getElementById('peek-split-wrap');
+    const tp = document.getElementById('peek-terminal-panel');
+    const sf = document.getElementById('peek-split-files');
+    if (!wrap || !tp || !sf) return null;
+    const wrapW = wrap.offsetWidth;
+    const tpW = tp.offsetWidth;
+    handle.classList.add('dragging');
+    return { wrapW, tpW, startX };
+  };
+  const move = (ctx, clientX) => {
+    if (!ctx) return;
+    const tp = document.getElementById('peek-terminal-panel');
+    const sf = document.getElementById('peek-split-files');
+    const delta = clientX - ctx.startX;
+    const newTpW = Math.max(150, Math.min(ctx.wrapW - 160, ctx.tpW + delta));
+    const ratio = newTpW / ctx.wrapW;
+    tp.style.flex = ratio + ' 1 0%';
+    sf.style.flex = (1 - ratio) + ' 1 0%';
+  };
+  const end = () => {
+    handle.classList.remove('dragging');
+    const tp = document.getElementById('peek-terminal-panel');
+    if (tp) localStorage.setItem('peekSplitRatio', tp.style.flex);
+  };
+  handle.addEventListener('mousedown', e => {
+    const ctx = start(e.clientX);
+    if (!ctx) return;
+    const onMove = ev => move(ctx, ev.clientX);
+    const onUp = () => { end(); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+  handle.addEventListener('touchstart', e => {
+    if (!e.touches.length) return;
+    const ctx = start(e.touches[0].clientX);
+    if (!ctx) return;
+    const onMove = ev => { if (ev.touches.length) move(ctx, ev.touches[0].clientX); };
+    const onEnd = () => { end(); handle.removeEventListener('touchmove', onMove); handle.removeEventListener('touchend', onEnd); };
+    handle.addEventListener('touchmove', onMove, { passive: true });
+    handle.addEventListener('touchend', onEnd);
+    e.preventDefault();
+  }, { passive: false });
+}
+function _restoreSplitWidths() {
+  const saved = localStorage.getItem('peekSplitRatio');
+  if (!saved) return;
+  const tp = document.getElementById('peek-terminal-panel');
+  const sf = document.getElementById('peek-split-files');
+  if (tp && sf) {
+    tp.style.flex = saved;
+    const ratio = parseFloat(saved);
+    if (!isNaN(ratio) && ratio > 0 && ratio < 1) sf.style.flex = (1 - ratio) + ' 1 0%';
+  }
+}
+
+// --- Per-pane zoom ---
+const _paneZoomLevels = { terminal: 100, psf: 100 };
+(function() {
+  try {
+    const s = JSON.parse(localStorage.getItem('paneZoomLevels'));
+    if (s) { if (s.terminal) _paneZoomLevels.terminal = s.terminal; if (s.psf) _paneZoomLevels.psf = s.psf; }
+  } catch(e) {}
+})();
+function _paneZoom(pane, dir) {
+  const steps = [50, 60, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 150, 175, 200];
+  let cur = _paneZoomLevels[pane] || 100;
+  let idx = steps.indexOf(cur);
+  if (idx === -1) { idx = steps.findIndex(s => s >= cur); if (idx === -1) idx = steps.length - 1; }
+  idx += dir;
+  if (idx < 0 || idx >= steps.length) return;
+  _paneZoomLevels[pane] = steps[idx];
+  _applyPaneZoom(pane);
+  try { localStorage.setItem('paneZoomLevels', JSON.stringify(_paneZoomLevels)); } catch(e) {}
+}
+function _applyPaneZoom(pane) {
+  const level = _paneZoomLevels[pane] || 100;
+  let el, label;
+  if (pane === 'terminal') {
+    el = document.getElementById('peek-body');
+    label = document.getElementById('terminal-zoom-level');
+  } else {
+    el = document.getElementById('psf-body');
+    label = document.getElementById('psf-zoom-level');
+  }
+  if (el) el.style.zoom = level === 100 ? '' : (level / 100);
+  if (label) label.textContent = level + '%';
+}
+_applyPaneZoom('terminal');
+_applyPaneZoom('psf');
+
+// --- Split pane sorting ---
+let _psfSort = { col: 'modified', dir: -1 };
+let _psfLastData = null;
+function _psfSortEntries(entries) {
+  return [...entries].sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+    const { col, dir } = _psfSort;
+    if (col === 'name') return dir * a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    if (col === 'size') return dir * ((a.size || 0) - (b.size || 0));
+    if (col === 'modified') return dir * ((a.modified || 0) - (b.modified || 0));
+    return 0;
+  });
+}
+function _psfSetSort(col) {
+  if (_psfSort.col === col) _psfSort.dir *= -1;
+  else { _psfSort.col = col; _psfSort.dir = 1; }
+  _psfUpdateSortHeaders();
+  if (_psfLastData) _psfRenderEntries(_psfLastData.dirPath, _psfLastData.data);
+}
+function _psfUpdateSortHeaders() {
+  const arrow = _psfSort.dir === 1 ? '↑' : '↓';
+  const hdrs = document.getElementById('psf-col-headers');
+  if (!hdrs) return;
+  hdrs.querySelectorAll('.fe-col-hdr').forEach(el => {
+    const col = (el.onclick + '').match(/'(\w+)'/);
+    if (!col) return;
+    const sorted = _psfSort.col === col[1];
+    el.classList.toggle('sorted', sorted);
+    const existing = el.querySelector('.fe-sort-arrow');
+    if (existing) existing.remove();
+    if (sorted) { const s = document.createElement('span'); s.className = 'fe-sort-arrow'; s.textContent = arrow; el.appendChild(s); }
+  });
+}
+
+function _psfRenderEntries(dirPath, data) {
+  const body = document.getElementById('psf-body');
+  const hdrs = document.getElementById('psf-col-headers');
+  if (hdrs) hdrs.style.display = '';
+  body.innerHTML = '';
+  if (data.parent && data.parent !== data.path) {
+    const back = document.createElement('div');
+    back.className = 'fe-back-row';
+    back.innerHTML = `<div class="fe-cell-name"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M9 11 5 7l4-4" stroke="var(--dim)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span style="color:var(--dim);font-size:0.83rem;">.. (parent)</span></div><div></div><div></div><div></div>`;
+    back.onclick = () => _psfLoad(data.parent);
+    body.appendChild(back);
+  }
+  const sorted = _psfSortEntries(data.entries);
+  for (const entry of sorted) {
+    const entryPath = dirPath.replace(/\/$/, '') + '/' + entry.name;
+    const row = document.createElement('div');
+    row.className = 'fe-row' + (entry.type === 'dir' ? ' fe-dir' : '');
+    const icon = _fileTypeIcon(entry.name, entry.type);
+    const sizeStr = entry.type === 'dir' ? '' : _fmtSize(entry.size);
+    const dateStr = entry.modified ? timeAgo(entry.modified) : '';
+    const slash = entry.type === 'dir' ? '<span style="color:var(--dim)">/</span>' : '';
+    const ep = entryPath.replace(/'/g, "\\'");
+    row.innerHTML =
+      `<div class="fe-cell-name">${icon}<span>${esc(entry.name)}${slash}</span></div>` +
+      `<div class="fe-cell-size">${sizeStr}</div>` +
+      `<div class="fe-cell-date">${dateStr}</div>` +
+      `<div class="fe-cell-actions"><button class="fe-menu-btn" title="Options" onclick="event.stopPropagation();_showFilesMenu('${ep}',this,'${entry.type}')">&#x22EF;</button></div>`;
+    row.onclick = entry.type === 'dir' ? () => _psfLoad(entryPath) : () => _psfViewFile(entryPath);
+    body.appendChild(row);
+  }
+  if (!data.entries.length) {
+    body.innerHTML = '<div style="padding:16px;color:var(--dim);text-align:center;font-size:0.82rem;">Empty folder</div>';
+  }
 }
 
 async function _psfLoad(dirPath) {
@@ -14575,7 +14748,7 @@ async function _psfLoad(dirPath) {
   _savePeekState();
   const body = document.getElementById('psf-body');
   const bc = document.getElementById('psf-breadcrumb');
-  // Breadcrumb
+  const hdrs = document.getElementById('psf-col-headers');
   const parts = dirPath.split('/').filter(Boolean);
   let crumbHtml = '<span class="psf-crumb" onclick="_psfLoad(\'/\')">/</span>';
   let cum = '';
@@ -14586,51 +14759,26 @@ async function _psfLoad(dirPath) {
   }
   bc.innerHTML = crumbHtml;
   body.innerHTML = '<div style="padding:12px;color:var(--dim)">Loading...</div>';
+  if (hdrs) hdrs.style.display = 'none';
   try {
     const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(dirPath));
     const data = await r.json();
     if (data.error) { body.innerHTML = '<div style="padding:12px;color:var(--dim)">' + esc(data.error) + '</div>'; return; }
-    body.innerHTML = '';
-    // Parent row — uses same fe-back-row class as Files tab
-    if (data.parent && data.parent !== data.path) {
-      const back = document.createElement('div');
-      back.className = 'fe-back-row';
-      back.innerHTML = `<div class="fe-cell-name"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M9 11 5 7l4-4" stroke="var(--dim)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span style="color:var(--dim);font-size:0.83rem;">.. (parent)</span></div><div></div><div></div><div></div>`;
-      back.onclick = () => _psfLoad(data.parent);
-      body.appendChild(back);
-    }
-    for (const entry of data.entries) {
-      const entryPath = dirPath.replace(/\/$/, '') + '/' + entry.name;
-      const row = document.createElement('div');
-      row.className = 'fe-row' + (entry.type === 'dir' ? ' fe-dir' : '');
-      const icon = _fileTypeIcon(entry.name, entry.type);
-      const sizeStr = entry.type === 'dir' ? '' : _fmtSize(entry.size);
-      const dateStr = entry.modified ? timeAgo(entry.modified) : '';
-      const slash = entry.type === 'dir' ? '<span style="color:var(--dim)">/</span>' : '';
-      const ep = entryPath.replace(/'/g, "\\'");
-      row.innerHTML =
-        `<div class="fe-cell-name">${icon}<span>${esc(entry.name)}${slash}</span></div>` +
-        `<div class="fe-cell-size">${sizeStr}</div>` +
-        `<div class="fe-cell-date">${dateStr}</div>` +
-        `<div class="fe-cell-actions"><button class="fe-menu-btn" title="Options" onclick="event.stopPropagation();_showFilesMenu('${ep}',this,'${entry.type}')">⋯</button></div>`;
-      row.onclick = entry.type === 'dir' ? () => _psfLoad(entryPath) : () => _psfViewFile(entryPath);
-      body.appendChild(row);
-    }
-    if (!data.entries.length) {
-      body.innerHTML = '<div style="padding:16px;color:var(--dim);text-align:center;font-size:0.82rem;">Empty folder</div>';
-    }
+    _psfLastData = { dirPath, data };
+    _psfUpdateSortHeaders();
+    _psfRenderEntries(dirPath, data);
   } catch(e) {
     body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(e.message) + '</div>';
   }
 }
 
 async function _psfViewFile(filePath) {
-  // .mdai opens in the dedicated MDAI viewer (metadata + version scroll +
-  // runs the chain on open), same as the main file browser (AMUX-3317).
   if (/\.mdai$/i.test(filePath || '')) { openMdaiNode(filePath); return; }
   if (/\.(xlsx|xls|ods)$/i.test(filePath || '')) { _openXlsxPreview(filePath); return; }
   const body = document.getElementById('psf-body');
   const bc = document.getElementById('psf-breadcrumb');
+  const hdrs = document.getElementById('psf-col-headers');
+  if (hdrs) hdrs.style.display = 'none';
   const dir = filePath.substring(0, filePath.lastIndexOf('/')) || '/';
   const fname = filePath.split('/').pop();
   bc.innerHTML = '<span class="psf-crumb" onclick="_psfLoad(\'' + dir.replace(/'/g, "\\'") + '\')">← back</span><span style="color:var(--dim)"> / </span><span style="color:var(--text)">' + esc(fname) + '</span>';
@@ -14643,24 +14791,53 @@ async function _psfViewFile(filePath) {
     if (data.error) { body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(data.error) + '</div>'; return; }
     body.innerHTML = '';
     const content = document.createElement('div');
-    content.className = 'file-overlay-body';
-    content.style.cssText = 'flex:1;min-height:0;margin:0;border-radius:0;';
+    content.style.cssText = 'flex:1;min-height:0;margin:0;border-radius:0;overflow:auto;';
     if (data.is_image) {
       content.className = 'file-overlay-body file-image';
+      const wrap = document.createElement('div');
+      wrap.className = 'img-zoom-wrap';
       const img = document.createElement('img');
       img.src = data.data_url || (data.blob ? URL.createObjectURL(data.blob) : _authUrl(API + (data.raw_url || '')));
-      img.style.cssText = 'max-width:100%;height:auto;border-radius:4px;display:block;margin:auto;';
-      content.appendChild(img);
+      img.alt = fname;
+      img.className = 'img-zoomable';
+      img.style.cssText = 'max-width:100%;height:auto;';
+      wrap.appendChild(img);
+      content.appendChild(wrap);
+      if (typeof _attachImageZoom === 'function') _attachImageZoom(wrap, img);
+    } else if (data.is_pdf) {
+      content.className = 'file-overlay-body file-pdf';
+      content.innerHTML = '<div class="pdf-note">Loading PDF…</div>';
+      body.appendChild(content);
+      if (typeof _renderPdf === 'function') _renderPdf(data, content);
+      return;
+    } else if (data.is_video) {
+      content.className = 'file-overlay-body file-video';
+      const rawUrl = API + '/api/file/raw?path=' + encodeURIComponent(data.path || filePath);
+      content.innerHTML = '<div class="file-video-wrap"><video class="file-video" controls playsinline preload="metadata" style="max-width:100%;">'
+        + '<source src="' + esc(rawUrl) + '" type="' + esc(_vpMimeFromUrl(rawUrl)) + '"></video></div>';
     } else if (data.is_markdown) {
       content.className = 'file-overlay-body markdown md-content';
-      content.innerHTML = renderMarkdown(data.content);
+      const fm = typeof _parseFrontmatter === 'function' ? _parseFrontmatter(data.content) : { meta: null, body: data.content };
+      content.innerHTML = (fm.meta && typeof _renderFrontmatterBlock === 'function' ? _renderFrontmatterBlock(fm.meta) : '') + renderMarkdown(fm.body, data.path);
+      if (typeof _bindMdFileLinks === 'function') _bindMdFileLinks(content);
     } else if (data.is_csv) {
       content.className = 'file-overlay-body file-csv';
       content.innerHTML = renderCsvTable(data.content);
+    } else if (data.is_html) {
+      content.className = 'file-overlay-body file-html-preview';
+      const iframe = document.createElement('iframe');
+      iframe.sandbox = 'allow-scripts allow-popups allow-forms allow-popups-to-escape-sandbox';
+      iframe.setAttribute('scrolling', 'yes');
+      iframe.style.cssText = 'width:100%;flex:1;min-height:300px;border:none;background:#fff;';
+      content.appendChild(iframe);
+      iframe.srcdoc = data.content;
     } else if (data.content != null) {
-      content.textContent = data.content;
+      content.className = 'file-overlay-body file-code';
+      content.innerHTML = typeof _fileHighlightHTML === 'function' ? _fileHighlightHTML(data) : '<pre>' + esc(data.content) + '</pre>';
     } else {
-      content.textContent = '(binary file)';
+      content.className = 'file-overlay-body file-image';
+      const sizeMB = data.size ? (typeof _fmtBytes === 'function' ? _fmtBytes(data.size) : Math.round(data.size / 1024) + ' KB') : '';
+      content.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px;"><div style="font-size:2.5rem;">📦</div><div style="font-size:0.95rem;color:var(--muted);">' + esc(fname) + (sizeMB ? ' · ' + sizeMB : '') + '</div></div>';
     }
     body.appendChild(content);
   } catch(e) {

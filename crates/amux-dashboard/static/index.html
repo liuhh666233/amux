@@ -2424,6 +2424,11 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       </nav>
       </div>
       <div id="peek-body" class="overlay-body"></div>
+      <div class="pane-zoom-float" id="terminal-zoom-float">
+        <button class="pane-zoom-btn" onclick="_paneZoom('terminal',-1)" title="Zoom out">&#x2212;</button>
+        <span class="pane-zoom-level" id="terminal-zoom-level">100%</span>
+        <button class="pane-zoom-btn" onclick="_paneZoom('terminal',1)" title="Zoom in">+</button>
+      </div>
     </div>
     <div id="peek-status" class="overlay-status" onclick="_peekGeoDebug()" title="Tap for layout debug"></div>
     <div class="peek-cmd-bar">
@@ -2501,11 +2506,24 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       </div>
     </div>
   </div>
+  <!-- Split drag handle (visible only when split-active) -->
+  <div id="peek-split-handle" class="peek-split-handle"></div>
   <!-- Split files panel -->
   <div id="peek-split-files" class="peek-split-files">
     <div class="peek-split-files-header">
       <div id="psf-breadcrumb" style="flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;"></div>
+      <span class="pane-zoom-controls" id="psf-zoom-controls">
+        <button class="pane-zoom-btn" onclick="_paneZoom('psf',-1)" title="Zoom out">&#x2212;</button>
+        <span class="pane-zoom-level" id="psf-zoom-level">100%</span>
+        <button class="pane-zoom-btn" onclick="_paneZoom('psf',1)" title="Zoom in">+</button>
+      </span>
       <button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="togglePeekSplit()">&#x2715;</button>
+    </div>
+    <div class="fe-col-headers psf-col-headers" id="psf-col-headers">
+      <div class="fe-col-hdr" onclick="_psfSetSort('name')">Name</div>
+      <div class="fe-col-hdr" onclick="_psfSetSort('size')">Size</div>
+      <div class="fe-col-hdr" onclick="_psfSetSort('modified')">Modified</div>
+      <div class="fe-col-hdr-actions"></div>
     </div>
     <div id="psf-body" class="peek-split-files-body"></div>
   </div>

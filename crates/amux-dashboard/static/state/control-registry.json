@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2317,
+  "n_considered": 2325,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -2260,6 +2260,18 @@
     },
     "_psfLoad": {
       "kind": "command._psfLoad",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_psfRenderEntries": {
+      "kind": "command._psfRenderEntries",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_psfSetSort": {
+      "kind": "command._psfSetSort",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
