@@ -188,7 +188,7 @@ platform :ios do
       end
       avail_id = asc.call(:get, "/v1/apps/#{app.id}/appAvailabilityV2")["data"]["id"]
       rows = []
-      path = "/v2/appAvailabilities/#{avail_id}/territoryAvailabilities?limit=200"
+      path = "/v2/appAvailabilities/#{avail_id}/territoryAvailabilities?limit=200&include=territory"
       while path
         page = asc.call(:get, path)
         rows.concat(page["data"])
@@ -198,7 +198,7 @@ platform :ios do
       territory_of = lambda { |r| r.dig("relationships", "territory", "data", "id") }
       ENV["EXCLUDE_TERRITORIES"].split(",").map(&:strip).reject(&:empty?).each do |t|
         row = rows.find { |r| territory_of.call(r) == t }
-        UI.user_error!("territory #{t} not in this app's availability (#{rows.size} territories)") unless row
+        UI.user_error!("territory #{t} not in this app's availability (#{rows.size} rows; first ids: #{rows.first(5).map { |r| territory_of.call(r) }.inspect})") unless row
         if row["attributes"]["available"] == false
           UI.message("AVAILABILITY #{t} already unavailable")
           next
