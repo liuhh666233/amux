@@ -146,7 +146,10 @@ platform :ios do
       bundle_id = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
       app = Spaceship::ConnectAPI::App.find(bundle_id)
       UI.user_error!("app #{bundle_id} not found on App Store Connect") unless app
-      pending = app.get_review_submissions(filter: { state: "WAITING_FOR_REVIEW,READY_FOR_REVIEW,UNRESOLVED_ISSUES" })
+      # READY_FOR_REVIEW is an unsent draft, which Apple refuses to cancel
+      # ("Resource is not in cancellable state", run 36596392841); deliver
+      # reuses a draft, so leave it.
+      pending = app.get_review_submissions(filter: { state: "WAITING_FOR_REVIEW,UNRESOLVED_ISSUES" })
       UI.message("#{pending.size} pending review submission(s)")
       pending.each do |sub|
         UI.important("Cancelling review submission #{sub.id} (#{sub.state}) so the listing can be edited")
