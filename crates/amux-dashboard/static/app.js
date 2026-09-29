@@ -13353,7 +13353,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1178';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1179';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -13866,6 +13866,15 @@ function _chatOnEvent(name, m) {
   _chatScheduleLive();
 }
 
+// Is the mounted chat the one on screen? The worker's own chat view, or a
+// coding worker's Chat tab showing its companion (AMUX-5350): there
+// peekSession is the coding worker and _chat.name the companion, and a
+// peekSession-only check left the tab on "Loading chat..." forever.
+function _chatShowing() {
+  return !!_chat.name && (_chat.name === peekSession
+    || (typeof _peekChatTarget === 'function' && _peekChatTarget() === _chat.name));
+}
+
 function _chatMount(name) {
   if (_chat.name === name && _chat.es) return;
   _chatUnmount();
@@ -14009,7 +14018,7 @@ function _chatMessageHtml(m) {
 // through here; they go to _chatPaintLive.
 function _chatRender(errorText) {
   const body = document.getElementById('peek-body');
-  if (!body || peekSession !== _chat.name) return;
+  if (!body || !_chatShowing()) return;
   const s = sessions.find(x => x.name === _chat.name) || {};
   let html = '';
   if (_chat.offlineNote) html += '<div class="chat-offline-note" role="status">' + esc(_chat.offlineNote) + '</div>';
@@ -14121,7 +14130,7 @@ function _chatHoldPartialTable(t) {
 function _chatPaintLive() {
   const body = document.getElementById('peek-body');
   const st = _chat.streaming;
-  if (!body || peekSession !== _chat.name) return;
+  if (!body || !_chatShowing()) return;
   const slot = body.querySelector('.chat-live-slot');
   if (!slot) return;
   if (!st) { slot.innerHTML = ''; _chat.live = null; return; }
@@ -18248,6 +18257,9 @@ async function sendPeekCmd() {
     }
     cmdHistoryAdd(text || message, { session, type: queued ? 'steering' : 'direct', msg_id:identity.msg_id });
     _composerAcceptLocal(session, original, draftRevision);
+    // Chat tab: the send went to the companion, so the draft bookkeeping above
+    // keyed on it cannot reach this worker's composer. Clear it here.
+    if (session !== peekSession) { inp.value = ''; inp.style.height = 'auto'; _refreshPeekSoon(); }
     // Remove only the acknowledged files, never a new attachment added while
     // waiting, or attachments belonging to a different worker's composer.
     const sent = new Set();
@@ -21383,8 +21395,8 @@ async function _pendingCancel(id) {
 // need a notice above the composer; do not flash a queued pill on every Send.
 function _updatePendingPill() {
   // A mounted chat shows pending sends as bubbles; repaint when the queue moves.
-  if (peekSession && _chat.name === peekSession && _workerRenderer(peekSession) === 'chat') {
-    const n = _pendingSendsFor(peekSession).length;
+  if (_chat.name && _chatShowing() && _workerRenderer(_chat.name) === 'chat') {
+    const n = _pendingSendsFor(_chat.name).length;
     if (n !== _chat.pendingShown) { _chat.pendingShown = n; _chatRender(); }
   }
   const pill = document.getElementById('peek-pending-pill');
