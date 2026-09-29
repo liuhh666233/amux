@@ -10155,7 +10155,10 @@ async function doSend(name, text, identity = {}) {
   const isSlashCmd = /^\/[a-z]/.test(text.trim());
   amuxTrack('message_sent', { session: name, is_slash: isSlashCmd, cmd: isSlashCmd ? text.trim().split(/\s+/)[0] : null, length: text.length });
   const isolated = sessions.find(s => s.name === name)?.isolated;
-  const payload = isSlashCmd || isolated ? text : _stampSendTime(text, new Date(), _cloudEmail || _localMemberEmail);
+  // A chat worker shows the message as a bubble with its own time; the
+  // terminal's "[06:25 PM]" prefix only cluttered it.
+  const chatTarget = _workerRenderer(name) === 'chat';
+  const payload = isSlashCmd || isolated || chatTarget ? text : _stampSendTime(text, new Date(), _cloudEmail || _localMemberEmail);
   // One msg_id per logical send, reused verbatim by the offline-queue replay:
   // the server dedups on it, so a retry after a lost response (e.g. the
   // server restarted mid-request AFTER the keys landed) can't deliver twice.
@@ -10300,7 +10303,7 @@ function _draftSave(session, text) {
   return record.rev;
 }
 function _liveComposerValue(session) {
-  if (typeof peekSession !== 'undefined' && peekSession === session) {
+  if (typeof peekSession !== 'undefined' && _peekComposerTarget() === session) {
     const fs = document.getElementById('peek-input-fs');
     const pk = document.getElementById(fs && fs.classList.contains('open') ? 'peek-input-fs-ta' : 'peek-cmd-input');
     if (pk) return pk.value;
@@ -10327,7 +10330,7 @@ function _composerAcceptLocal(session, original, revision) {
 }
 function _draftSyncInputs(session, text) {
   const inputs = [document.getElementById('input-' + session)];
-  if (typeof peekSession !== 'undefined' && peekSession === session) {
+  if (typeof peekSession !== 'undefined' && _peekComposerTarget() === session) {
     inputs.push(document.getElementById('peek-cmd-input'));
     inputs.push(document.getElementById('peek-input-fs-ta'));
   }
@@ -10347,7 +10350,7 @@ function _draftRestore(inp, session) {
 function _draftInputChanged(input) {
   if (!input) return;
   const id = input.id || '';
-  if (id === 'peek-cmd-input' || id === 'peek-input-fs-ta') _draftSave(peekSession, input.value);
+  if (id === 'peek-cmd-input' || id === 'peek-input-fs-ta') _draftSave(_peekComposerTarget(), input.value);
   else if (id.startsWith('input-')) _draftSave(id.slice(6), input.value);
 }
 document.addEventListener('input', event => _draftInputChanged(event.target));
@@ -11512,6 +11515,23 @@ async function _simpleRender(gen) {
 // Each of its turns gets a fresh [context] block about this worker from the
 // server (chat_worker::companion_prompt), and it directs the worker with
 // `amux send`. Built from existing primitives: a worker, env and messages.
+// The worker the peek composer writes to: this worker, or its chat companion
+// while the Chat tab shows one. Drafts are keyed on it, so text typed in the
+// Chat tab is the companion's draft and a send there clears it (it used to
+// stay saved under the coding worker and reappear on every reopen).
+let _peekComposerShown = null;
+function _peekComposerTarget() {
+  return (typeof _peekChatTarget === 'function' && _peekChatTarget()) || peekSession;
+}
+function _peekComposerSwap() {
+  const t = _peekComposerTarget();
+  if (t === _peekComposerShown) return;
+  _peekComposerShown = t;
+  const inp = document.getElementById('peek-cmd-input');
+  if (!inp) return;
+  inp.value = _draftGet(t) || '';
+  if (typeof autoGrow === 'function') autoGrow(inp);
+}
 function _peekChatTarget() {
   if (_peekTab !== 'chat' || !peekSession) return null;
   const s = sessions.find(x => x.name === peekSession);
@@ -11630,6 +11650,7 @@ function setPeekTab(tab) {
   }
   if (chatTarget) _chatMount(chatTarget);
   else if (typeof _chat !== 'undefined' && _chat.name && _chat.name !== peekSession) _chatUnmount();
+  _peekComposerSwap();
   const bodyShown = tab === 'terminal' || !!chatTarget;
   document.getElementById('peek-terminal-panel').style.display = bodyShown ? '' : 'none';
   document.getElementById('peek-split-wrap').style.display = bodyShown ? '' : 'none';
@@ -13355,7 +13376,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1183';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1184';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -14343,6 +14364,7 @@ function openPeek(name, opts) {
   document.getElementById('peek-input-fs').classList.remove('open');
   _draftSyncInputs(name, draft);
   cmdInp.value = draft;
+  _peekComposerShown = name;
   autoGrow(cmdInp);
   peekCmdOpen = true;
   document.getElementById('peek-cmd-row').classList.add('open');
@@ -17627,7 +17649,7 @@ function _peekClearInput() {
   if (!hadText && !nFiles) { showToast('Composer is already empty'); return; }
   inp.value = '';
   inp.style.height = 'auto';
-  _draftClear(peekSession);
+  _draftClear(_peekComposerTarget());
   if (nFiles) clearPeekFiles();
   if (peekFiles.length) { showToast('Text cleared; attachment removal was not saved. Retry removal.'); return; }
   try { inp.focus(); } catch (e) {}
