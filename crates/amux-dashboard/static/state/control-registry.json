@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2330,
+  "n_considered": 2335,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -1840,6 +1840,18 @@
     },
     "_peekAgentsLog": {
       "kind": "command._peekAgentsLog",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_peekChatScope": {
+      "kind": "command._peekChatScope",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_peekChatSet": {
+      "kind": "command._peekChatSet",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

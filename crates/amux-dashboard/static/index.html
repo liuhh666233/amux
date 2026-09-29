@@ -2377,6 +2377,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <div class="peek-tabs" onwheel="_peekTabsWheel(event)">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')"><span class="tab-ico">⮞</span><span class="tab-lbl">Terminal</span></button>
     <button class="peek-tab" id="peek-tab-simple" onclick="setPeekTab('simple')" title="Translate this worker's output — plain English by default, or your own prompt"><span class="tab-ico">◍</span><span class="tab-lbl">Translate</span></button>
+    <button class="peek-tab" id="peek-tab-chat" onclick="setPeekTab('chat')" title="Chat about this worker's work: ask its status in plain language and direct it"><span class="tab-ico">&#128172;</span><span class="tab-lbl">Chat</span></button>
     <button class="peek-tab" id="peek-tab-steering" onclick="setPeekTab('steering')"><span class="tab-ico">⇉</span><span class="tab-lbl">Steering</span><span class="peek-tab-count" id="peek-tab-steering-count"></span></button>
     <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')"><span class="tab-ico">⏱</span><span class="tab-lbl">Schedules</span><span class="peek-tab-count" id="peek-tab-schedules-count"></span></button>
     <button class="peek-tab" id="peek-tab-shell" onclick="setPeekTab('shell')" title="This worker's shell schedules: what runs on this machine for it, live and past output"><span class="tab-ico">$</span><span class="tab-lbl">Shell</span></button>
@@ -2408,6 +2409,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <div id="peek-split-wrap" class="peek-split-wrap">
   <!-- Terminal panel -->
   <div id="peek-terminal-panel" class="peek-terminal-panel">
+    <div id="peek-chat-bar" class="peek-chat-bar" style="display:none;align-items:center;justify-content:space-between;gap:8px;padding:6px 12px;font-size:0.75rem;color:var(--dim);border-bottom:1px solid var(--border);"></div>
     <div id="peek-plan" class="peek-plan" style="display:none;">
       <button class="peek-plan-hdr" id="peek-plan-hdr" onclick="_peekTogglePlan()">
         <span class="pp-caret" id="peek-plan-caret">&#9656;</span>
@@ -2529,6 +2531,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <div id="peek-transcript-status" class="overlay-status"></div>
   </div>
   <!-- Steering queue panel -->
+  <div id="peek-chat-panel" class="peek-tasks-panel"></div>
   <div id="peek-steering-panel" class="peek-tasks-panel">
     <div style="flex-shrink:0;border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:rgba(255,255,255,0.02);">
       <div onclick="var b=document.getElementById('peek-instructions-body');var c=document.getElementById('peek-instructions-caret');var v=b.style.display==='none';b.style.display=v?'':'none';c.textContent=v?'▾':'▸';" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;-webkit-user-select:none;">

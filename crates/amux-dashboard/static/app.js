@@ -11505,6 +11505,65 @@ async function _simpleRender(gen) {
   }
 }
 
+// CHAT TAB (AMUX-5350, Ethan 2026-09-29): off by default per worker. When on,
+// a companion chat worker (`<worker>-chat`, worker_type chat, CC_COMPANION_OF)
+// renders here with the existing chat UI and the peek composer talks to it.
+// Each of its turns gets a fresh [context] block about this worker from the
+// server (chat_worker::companion_prompt), and it directs the worker with
+// `amux send`. Built from existing primitives: a worker, env and messages.
+function _peekChatTarget() {
+  if (_peekTab !== 'chat' || !peekSession) return null;
+  const s = sessions.find(x => x.name === peekSession);
+  if (!s || !s.chat_companion) return null;
+  const c = sessions.find(x => x.name === peekSession + '-chat' && x.companion_of === peekSession);
+  return c ? c.name : null;
+}
+async function _peekChatScope(name, kv) {
+  const r = await fetch(API + '/api/scope', { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ level: 'worker', name, capability: 'env', value: kv }), _skipOutbox: true });
+  if (!r.ok) throw new Error('scope ' + name + ': HTTP ' + r.status + ' ' + (await r.text()).slice(0, 160));
+}
+async function _peekChatSet(on) {
+  const w = peekSession;
+  if (!w) return;
+  const c = w + '-chat';
+  try {
+    if (on) {
+      const existing = sessions.find(x => x.name === c);
+      if (existing && existing.companion_of !== w) { showToast('A worker named ' + c + ' already exists and is not this chat'); return; }
+      if (!existing) {
+        const src = sessions.find(x => x.name === w) || {};
+        let r = await fetch(API + '/api/sessions', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ name: c, dir: src.dir || '', start: false }), _skipOutbox: true });
+        if (!r.ok) throw new Error('create ' + c + ': ' + (await r.text()).slice(0, 160));
+        r = await fetch(API + '/api/sessions/' + encodeURIComponent(c) + '/config', { method: 'PATCH',
+          headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ worker_type: 'chat', desc: 'Chat about ' + w + ' (its Chat tab)' }), _skipOutbox: true });
+        if (!r.ok) throw new Error('make ' + c + ' a chat worker: ' + (await r.text()).slice(0, 160));
+      }
+      await _peekChatScope(c, { CC_COMPANION_OF: w });
+    }
+    await _peekChatScope(w, { AMUX_CHAT_COMPANION: on ? '1' : null });
+    if (typeof fetchSessions === 'function') await fetchSessions();
+    showToast(on ? 'Chat is on for ' + w : 'Chat is off for ' + w + ' (its history is kept)');
+    setPeekTab('chat');
+  } catch (e) { showToast('Chat: ' + (e.message || e)); }
+}
+function _peekChatPanelRender() {
+  const p = document.getElementById('peek-chat-panel');
+  if (!p) return;
+  p.innerHTML = '<div style="padding:24px 16px;max-width:520px;">'
+    + '<div style="font-weight:600;margin-bottom:8px;">Chat is off for ' + esc(peekSession || '') + '</div>'
+    + '<p style="color:var(--dim);font-size:0.85rem;line-height:1.5;margin:0 0 14px;">Turn it on to talk about this worker\u2019s work in plain language. The chat knows its current card, what waits on you, its board, git state and last reply, can look deeper with the amux CLI, and can direct the worker for you. Its history is saved like a coding transcript.</p>'
+    + '<button class="btn primary" onclick="_peekChatSet(true)">Turn on chat</button></div>';
+}
+function _peekChatBarRender(target) {
+  const bar = document.getElementById('peek-chat-bar');
+  if (!bar) return;
+  bar.style.display = target ? 'flex' : 'none';
+  if (target) bar.innerHTML = '<span>Chat about <strong>' + esc(peekSession) + '</strong>. It can direct the worker for you.</span>'
+    + '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="_peekChatSet(false)">Turn off</button>';
+}
+
 function setPeekTab(tab) {
   _peekTab = tab;
   // Persist so an app-switch away and back lands on this tab, not the default.
@@ -11551,8 +11610,19 @@ function setPeekTab(tab) {
     if (tab === 'simple') { simpleP.classList.add('active'); _simpleRender(); }
     else { simpleP.classList.remove('active'); }
   }
-  document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
-  document.getElementById('peek-split-wrap').style.display = tab === 'terminal' ? '' : 'none';
+  document.getElementById('peek-tab-chat')?.classList.toggle('active', tab === 'chat');
+  const chatTarget = _peekChatTarget();
+  const chatPanel = document.getElementById('peek-chat-panel');
+  if (chatPanel) {
+    if (tab === 'chat' && !chatTarget) { chatPanel.classList.add('active'); _peekChatPanelRender(); }
+    else chatPanel.classList.remove('active');
+  }
+  _peekChatBarRender(chatTarget);
+  if (chatTarget) _chatMount(chatTarget);
+  else if (typeof _chat !== 'undefined' && _chat.name && _chat.name !== peekSession) _chatUnmount();
+  const bodyShown = tab === 'terminal' || !!chatTarget;
+  document.getElementById('peek-terminal-panel').style.display = bodyShown ? '' : 'none';
+  document.getElementById('peek-split-wrap').style.display = bodyShown ? '' : 'none';
   const transcript = document.getElementById('peek-transcript-panel');
   if (tab === 'transcript') {
     transcript.classList.add('active');
@@ -13275,7 +13345,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1176';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1177';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -16505,6 +16575,9 @@ function refreshPeek(liveOnly) {
 async function _refreshPeekFrame(liveOnly, request) {
   if (_peekAgents.selected) return _peekAgentRefresh();
   const name = peekSession;
+  // The Chat tab shows this worker's companion, not its terminal (AMUX-5350).
+  const _chatTarget = _peekChatTarget();
+  if (_chatTarget) return _chatRefresh(_chatTarget);
   // The primary panel is the worker type's renderer; only 'terminal' reads frames.
   if (name && _workerRenderer(name) === 'chat') return _chatRefresh(name);
   const identity = _peekIdentity(name);
@@ -18127,7 +18200,7 @@ function _syncComposerPending() {
 }
 
 async function sendPeekCmd() {
-  const session = peekSession;
+  const session = _peekChatTarget() || peekSession;
   if (!session || _composerPendingSends.has(session)) return;
   if (_blockedByAttachment(peekFiles)) return;
   const inp = document.getElementById('peek-cmd-input');

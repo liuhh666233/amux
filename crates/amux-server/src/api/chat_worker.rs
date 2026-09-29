@@ -657,6 +657,126 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
     crate::api::sessions_legacy::invalidate_sessions_cache();
 }
 
+/// What a companion is told before the owner's message (AMUX-5350, Ethan
+/// 2026-09-29: "a chat with core context from the worker (not the full logs
+/// but anything that u think would be valuable)"; "I want to be able to ask in
+/// plain text the status of work ... still be able to direct work"). Computed,
+/// not summarised by a model: status, the card it is on, what waits on the
+/// owner, board counts and trend, git state and its last reply. The companion
+/// reaches deeper with the amux CLI and directs the worker with `amux send`.
+pub(crate) async fn companion_prompt(state: &AppState, worker: &str, fresh: bool, text: &str) -> String {
+    let wenv = parse_env(worker);
+    let dir = wenv.get_or("CC_DIR", "").to_string();
+    let mut out = String::new();
+    if fresh {
+        out.push_str(&format!(
+            "You are the chat companion for the amux worker `{worker}` (working directory {dir}). \
+             The owner talks to you in plain language about that worker's work. Answer conversationally \
+             and briefly unless asked for detail. Each message starts with a [context] block amux computed \
+             just now; trust it over your memory of earlier turns. For more, use the amux CLI: \
+             `amux peek {worker}` shows its terminal, `amux info {worker}` its configuration, `amux board ls` \
+             the board, and you can read files in its directory. To direct the work, send the worker an \
+             instruction with `amux send {worker} --stdin` and tell the owner what you sent. Leave edits in \
+             its checkout to the worker unless the owner asks you to make them.\n\n"
+        ));
+    }
+    let running = super::session_verbs::is_running(worker).await;
+    let paused = super::session_verbs::lane_is_paused(worker);
+    let w = worker.to_string();
+    let board = state
+        .store
+        .read_async(move |c| {
+            let mut counts: Vec<(String, i64)> = Vec::new();
+            let mut st = c.prepare(
+                "SELECT status, COUNT(*) FROM issues WHERE session=?1 AND deleted IS NULL AND COALESCE(archived,0)=0 \
+                 AND status IN ('doing','todo','backlog','needsyou','review','blocked') GROUP BY status",
+            )?;
+            for r in st.query_map([&w], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.flatten() {
+                counts.push(r);
+            }
+            let mut st = c.prepare(
+                "SELECT id, title, status, COALESCE(ask_question,'') FROM issues WHERE session=?1 AND deleted IS NULL \
+                 AND COALESCE(archived,0)=0 AND status IN ('doing','needsyou') ORDER BY status, updated DESC LIMIT 6",
+            )?;
+            let cards = st
+                .query_map([&w], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?
+                .flatten()
+                .collect::<Vec<_>>();
+            let trend = crate::runtime_jobs::board_drain::lane_trend(c, &w, chrono::Utc::now().timestamp());
+            Ok((counts, cards, trend))
+        })
+        .await
+        .ok();
+    let git = |args: &[&str]| {
+        let mut a: Vec<String> = vec!["-C".into(), dir.clone()];
+        a.extend(args.iter().map(|s| s.to_string()));
+        a
+    };
+    let run = |a: Vec<String>| async move {
+        tokio::time::timeout(std::time::Duration::from_secs(5), tokio::process::Command::new("git").args(&a).output())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let (branch, dirty, last_commit) = if dir.is_empty() {
+        (None, None, None)
+    } else {
+        (
+            run(git(&["rev-parse", "--abbrev-ref", "HEAD"])).await,
+            run(git(&["status", "--porcelain", "--untracked-files=no"])).await.map(|s| s.lines().count()),
+            run(git(&["log", "-1", "--format=%h %s (%cr)"])).await,
+        )
+    };
+    let last = super::session_verbs::last_assistant_message(worker, 1500);
+    out.push_str(&format!("[context: {worker}, {}]\n", chrono::Local::now().format("%Y-%m-%d %H:%M")));
+    out.push_str(&format!(
+        "- process: {}\n",
+        if paused { "paused by the owner" } else if running { "running" } else { "not running" }
+    ));
+    if let Some((counts, cards, trend)) = &board {
+        let c = |k: &str| counts.iter().find(|(s, _)| s == k).map(|(_, n)| *n).unwrap_or(0);
+        out.push_str(&format!(
+            "- board: {} doing, {} todo, {} backlog, {} waiting on the owner, {} in review, {} blocked\n",
+            c("doing"), c("todo"), c("backlog"), c("needsyou"), c("review"), c("blocked")
+        ));
+        for (id, title, status, ask) in cards {
+            if status == "doing" {
+                out.push_str(&format!("- working on {id}: {}\n", clip(title, 160)));
+            } else {
+                out.push_str(&format!("- waiting on the owner, {id}: {}\n", clip(if ask.is_empty() { title } else { ask }, 200)));
+            }
+        }
+        if trend.measured && trend.opened_7d + trend.closed_7d > 0 {
+            out.push_str(&format!(
+                "- last 7 days: {} cards opened, {} closed; {} closed in the last 24h\n",
+                trend.opened_7d, trend.closed_7d, trend.closed_24h
+            ));
+        }
+    } else {
+        out.push_str("- board: could not be read\n");
+    }
+    if let Some(b) = branch {
+        out.push_str(&format!("- git: branch {b}, {} changed file(s) uncommitted", dirty.unwrap_or(0)));
+        if let Some(l) = last_commit {
+            out.push_str(&format!(", last commit {l}"));
+        }
+        out.push('\n');
+    }
+    if !last.trim().is_empty() {
+        out.push_str(&format!("- its last reply (may be cut): {}\n", clip(last.trim(), 1500)));
+    }
+    out.push_str("\n[owner]\n");
+    out.push_str(text);
+    out
+}
+
+fn clip(s: &str, n: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= n { s } else { s.chars().take(n).collect::<String>() + "…" }
+}
+
 /// Spawn one provider turn and stream its output.
 async fn execute(
     state: &AppState,
@@ -736,6 +856,15 @@ async fn execute(
     let mut out = TurnOutcome::new(turn_id);
     let mut parser = Parser::new(provider);
     *lane.pid.lock().unwrap() = child.id();
+    // A companion (the worker page's Chat tab) is told, every turn, the
+    // current state of the worker it talks about. The stored chat history
+    // keeps the owner's plain message; only the provider sees the context.
+    let companion_of = cfg.get_or("CC_COMPANION_OF", "").trim().to_string();
+    let text: String = if companion_of.is_empty() {
+        text.to_string()
+    } else {
+        companion_prompt(state, &companion_of, fresh, text).await
+    };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(text.as_bytes()).await;
         drop(stdin);
@@ -1293,5 +1422,40 @@ mod tests {
         // (`sessions_legacy.rs`) treats blank as "nothing to show", not as a
         // worker that failed to answer.
         assert_eq!(preview_raw(&conn, "no-such-worker"), "");
+    }
+}
+
+#[cfg(test)]
+mod companion_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_companion_turn_carries_the_workers_state_and_the_owners_words_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::db::Store::open(&dir.path().join("companion.db")).unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(store),
+            started: std::time::Instant::now(),
+            build_hash: "t".into(),
+            auth_token: None,
+            reconciled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+        let w = "companion-test-worker-zz";
+        state.store.write(move |c| {
+            c.execute("INSERT INTO issues (id,title,desc,status,session,created,updated,type,archived,owner_type) VALUES ('CT-1','Ship the widget','', 'doing',?1,1,1,'code',0,'agent')", [w])?;
+            c.execute("INSERT INTO issues (id,title,desc,status,session,created,updated,type,archived,owner_type,ask_question) VALUES ('CT-2','Key','', 'needsyou',?1,1,1,'code',0,'agent','Can you mint the API key?')", [w])?;
+            Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+        }).unwrap();
+        let p = companion_prompt(&state, w, true, "how is it going?").await;
+        assert!(p.starts_with("You are the chat companion for the amux worker `companion-test-worker-zz`"), "{p}");
+        assert!(p.contains("amux send companion-test-worker-zz --stdin"), "{p}");
+        assert!(p.contains("- board: 1 doing, 0 todo, 0 backlog, 1 waiting on the owner"), "{p}");
+        assert!(p.contains("- working on CT-1: Ship the widget"), "{p}");
+        assert!(p.contains("- waiting on the owner, CT-2: Can you mint the API key?"), "{p}");
+        assert!(p.ends_with("[owner]\nhow is it going?"), "{p}");
+        assert!(!p.contains('\u{2014}'), "no em dashes in what the model reads back to the owner");
+        // Later turns carry the context but not the role preamble again.
+        let p2 = companion_prompt(&state, w, false, "and now?").await;
+        assert!(p2.starts_with("[context: companion-test-worker-zz"), "{p2}");
     }
 }

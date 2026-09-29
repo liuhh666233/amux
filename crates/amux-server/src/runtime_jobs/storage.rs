@@ -494,6 +494,11 @@ fn iso_utc(secs: i64) -> String {
 fn retention_eligible(spec: &SweepSpec) -> &'static str {
     if spec.table == "cmd_history" {
         "capture_pending=0"
+    } else if spec.table == "session_events" {
+        // Chat history is the conversation itself, kept like a coding
+        // transcript, not telemetry (AMUX-5350: "it maintains chat history
+        // which should have the full logs/backups/restore/saving to db").
+        "COALESCE(type,'') <> 'chat.message'"
     } else {
         "1=1"
     }
@@ -1983,7 +1988,7 @@ mod tests {
     #[test]
     fn a_cutoff_that_would_empty_the_table_is_refused() {
         let c = mem();
-        c.execute_batch("CREATE TABLE session_events (id INTEGER PRIMARY KEY, ts REAL)")
+        c.execute_batch("CREATE TABLE session_events (id INTEGER PRIMARY KEY, ts REAL, type TEXT)")
             .unwrap();
         let now = unix_now();
         for i in 0..10 {
@@ -2081,7 +2086,7 @@ mod tests {
     #[test]
     fn old_rows_go_and_new_rows_stay() {
         let c = mem();
-        c.execute_batch("CREATE TABLE session_events (id INTEGER PRIMARY KEY, ts REAL)")
+        c.execute_batch("CREATE TABLE session_events (id INTEGER PRIMARY KEY, ts REAL, type TEXT)")
             .unwrap();
         let now = unix_now();
         for d in [200.0, 150.0, 100.0, 5.0, 1.0] {
@@ -2357,5 +2362,22 @@ mod tests {
                 "{func} must use fixed maintenance on the sole writer, never a pooled reader"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_retention_tests {
+    use super::*;
+    #[test]
+    fn chat_history_is_never_swept_with_telemetry() {
+        let spec = SPECS.iter().find(|s| s.table == "session_events").unwrap();
+        assert_eq!(retention_eligible(spec), "COALESCE(type,'') <> 'chat.message'");
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE session_events (ts INTEGER, type TEXT); \
+            INSERT INTO session_events VALUES (1,'chat.message'),(1,'status'),(9999999999,'status');").unwrap();
+        conn.execute(&format!("DELETE FROM session_events WHERE ts < 100 AND {}", retention_eligible(spec)), []).unwrap();
+        let left: Vec<String> = conn.prepare("SELECT type FROM session_events ORDER BY ts").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert_eq!(left, ["chat.message", "status"]);
     }
 }

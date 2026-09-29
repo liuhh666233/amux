@@ -4472,7 +4472,7 @@ fn tool_result_text(content: &Value) -> String {
 /// be read aloud). Reuses the same `session_jsonl_path` + `iter_jsonl_tail` the
 /// transcript renderer uses, so it cannot disagree with it about where the
 /// transcript is or how it is parsed (D1: a real interface, not a scrape).
-fn last_assistant_message(name: &str, max_chars: usize) -> String {
+pub(crate) fn last_assistant_message(name: &str, max_chars: usize) -> String {
     let Some(path) = session_jsonl_path(name) else {
         return String::new();
     };

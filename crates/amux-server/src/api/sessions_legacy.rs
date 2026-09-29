@@ -4812,6 +4812,13 @@ fn python_fleet_sessions(signals: &FleetSignals) -> Vec<serde_json::Value> {
                 env.get("CC_BACKEND").map(String::as_str),
             ),
         }));
+        // The worker page's Chat tab (AMUX-5350): off unless switched on; the
+        // companion chat worker names the worker it talks about. Set here, not
+        // in the literal above, which is at json!'s recursion limit.
+        if let Some(v) = out.last_mut() {
+            v["chat_companion"] = json!(env.get("AMUX_CHAT_COMPANION").is_some_and(|x| x == "1"));
+            v["companion_of"] = json!(env.get("CC_COMPANION_OF").cloned().unwrap_or_default());
+        }
         // The projection is set outside the literal above, which is at the
         // json! macro's recursion limit.
         if let Some(last) = out.last_mut() {
