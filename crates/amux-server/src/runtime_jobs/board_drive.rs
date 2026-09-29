@@ -6687,6 +6687,9 @@ pub async fn drive_tick<F: Fleet>(state: &AppState, fleet: &F) -> DriveReport {
         }
         report.lanes.push(trace);
     }
+    if let Ok(conn) = state.store.read() {
+        crate::runtime_jobs::board_drain::warn_losing_lanes(&conn, now_f64() as i64);
+    }
     report.finished_at = now_f64();
     // THE FLEET NUMBER, IN THE LOGS, EVERY TICK (AMUX-3758). A lane going idle
     // on a full board produces a different local reason per lane — wip-cap,

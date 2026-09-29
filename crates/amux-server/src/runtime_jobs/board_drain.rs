@@ -42,7 +42,7 @@ pub struct RunningCard {
     pub lease_expires_in_s: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct DrainState {
     pub lane: String,
     /// False when the board could not be read. Every count below is then 0 and
@@ -64,6 +64,123 @@ pub struct DrainState {
     /// block is gone and nothing has moved them. The driver unblocks these.
     pub unblockable: Vec<String>,
     pub verdict: &'static str,
+    /// Is the lane getting closer to empty, and how fast? The counts above
+    /// are a snapshot; this is the rate.
+    pub trend: Trend,
+}
+
+/// Intake against closes for one lane. mixpeek-general, 2026-09-29: a lane
+/// closed 1,544 cards in 7 days and still grew, because 1,696 arrived, and its
+/// closes fell from ~220 a day to 44 when it hit its weekly model limit.
+/// Nothing reported either; both were found by board arithmetic. Closed means
+/// done, verified or discarded (all take the card off the lane).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Trend {
+    pub measured: bool,
+    pub opened_24h: i64,
+    pub closed_24h: i64,
+    pub opened_7d: i64,
+    pub closed_7d: i64,
+    /// opened_7d - closed_7d: positive means the lane is falling behind.
+    pub net_7d: i64,
+    /// Open cards / net daily close rate, when the lane is gaining; null when
+    /// it is not, because "never" is not a number.
+    pub days_to_empty: Option<f64>,
+    /// The last 24h closed under half the 7-day daily average, on a lane that
+    /// averages at least 10 closes a day: a rate limit, a stall, a stuck tool.
+    pub slowdown: bool,
+    /// `falling_behind`, `gaining`, `idle` (nothing opened or closed in 7d),
+    /// `empty`, or `unmeasured`.
+    pub verdict: &'static str,
+}
+
+impl Trend {
+    pub fn unmeasured() -> Self {
+        Trend { measured: false, opened_24h: 0, closed_24h: 0, opened_7d: 0, closed_7d: 0, net_7d: 0,
+            days_to_empty: None, slowdown: false, verdict: "unmeasured" }
+    }
+}
+
+/// Pure: the trend from its four counts and the lane's open count.
+pub fn trend_from(open: i64, opened_24h: i64, closed_24h: i64, opened_7d: i64, closed_7d: i64) -> Trend {
+    let net_7d = opened_7d - closed_7d;
+    let net_daily_close = (closed_7d - opened_7d) as f64 / 7.0;
+    let days_to_empty = (open > 0 && net_daily_close > 0.0).then(|| ((open as f64 / net_daily_close) * 10.0).round() / 10.0);
+    let avg = closed_7d as f64 / 7.0;
+    let slowdown = avg >= 10.0 && (closed_24h as f64) < avg * 0.5;
+    let verdict = if open == 0 {
+        "empty"
+    } else if opened_7d == 0 && closed_7d == 0 {
+        "idle"
+    } else if net_7d > 0 {
+        "falling_behind"
+    } else {
+        "gaining"
+    };
+    Trend { measured: true, opened_24h, closed_24h, opened_7d, closed_7d, net_7d, days_to_empty, slowdown, verdict }
+}
+
+const CLOSED: &str = "status IN ('done','verified','discarded')";
+
+/// Say which lanes are losing ground, at most once per lane per 6 hours, so
+/// a lane growing faster than it closes, or suddenly closing far less (a
+/// weekly model limit), shows in the log a sweep reads instead of only in
+/// board arithmetic. Every WARN carries the counts it judged on.
+pub fn warn_losing_lanes(conn: &Connection, now: i64) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    let Ok(trends) = lane_trends(conn, now) else {
+        tracing::warn!(verdict = "lane_trend_unmeasured", measured = false, "board drain: lane trends could not be read");
+        return;
+    };
+    let mut last = LAST.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    for (lane, t) in trends {
+        let behind = t.verdict == "falling_behind" && t.net_7d >= 20;
+        if !(behind || t.slowdown) || now - last.get(&lane).copied().unwrap_or(0) < 6 * 3600 {
+            continue;
+        }
+        last.insert(lane.clone(), now);
+        tracing::warn!(
+            target: "amux::board_drive", lane = %lane,
+            verdict = if t.slowdown { "lane_close_rate_dropped" } else { "lane_falling_behind" },
+            opened_7d = t.opened_7d, closed_7d = t.closed_7d, net_7d = t.net_7d,
+            closed_24h = t.closed_24h, avg_closed_per_day = t.closed_7d / 7,
+            "board drain: {lane} is losing ground ({} opened vs {} closed in 7d; {} closed in the last 24h)",
+            t.opened_7d, t.closed_7d, t.closed_24h
+        );
+    }
+}
+
+/// Every lane's trend from one grouped read: (lane, trend).
+pub fn lane_trends(conn: &Connection, now: i64) -> rusqlite::Result<Vec<(String, Trend)>> {
+    trends_where(conn, now, None)
+}
+
+/// One lane's trend (unmeasured when the board cannot be read).
+pub fn lane_trend(conn: &Connection, lane: &str, now: i64) -> Trend {
+    match trends_where(conn, now, Some(lane)) {
+        Ok(mut v) => v.pop().map(|(_, t)| t).unwrap_or_else(|| trend_from(0, 0, 0, 0, 0)),
+        Err(_) => Trend::unmeasured(),
+    }
+}
+
+fn trends_where(conn: &Connection, now: i64, lane: Option<&str>) -> rusqlite::Result<Vec<(String, Trend)>> {
+    let (d1, d7) = (now - 86_400, now - 7 * 86_400);
+    let sql = format!(
+        "SELECT session, \
+           SUM(status IN ('todo','doing','backlog','blocked','review','needsyou') AND COALESCE(archived,0)=0), \
+           SUM(created >= ?1), SUM({CLOSED} AND closed_at >= ?1), \
+           SUM(created >= ?2), SUM({CLOSED} AND closed_at >= ?2) \
+         FROM issues WHERE deleted IS NULL AND session IS NOT NULL AND session <> '' \
+           AND COALESCE(owner_type,'agent') = 'agent' AND (?3 IS NULL OR session = ?3) GROUP BY session"
+    );
+    let mut st = conn.prepare(&sql)?;
+    let rows = st.query_map(rusqlite::params![d1, d7, lane], |r| {
+        let g = |i: usize| r.get::<_, Option<i64>>(i).map(|v| v.unwrap_or(0));
+        Ok((r.get::<_, String>(0)?, trend_from(g(1)?, g(2)?, g(3)?, g(4)?, g(5)?)))
+    })?;
+    rows.collect()
 }
 
 /// The verdict, from counts alone. Pure so every arm has a test.
@@ -130,6 +247,7 @@ pub fn drain_state_unmeasured(lane: &str) -> DrainState {
         parked: 0,
         unblockable: vec![],
         verdict: "unmeasured",
+        trend: Trend::unmeasured(),
     }
 }
 
@@ -202,6 +320,7 @@ pub fn drain_state(conn: &Connection, lane: &str, now: i64) -> DrainState {
         }
     }
     st.measured = true;
+    st.trend = lane_trend(conn, lane, now);
     st.verdict = verdict(
         st.ready,
         st.running.len(),
@@ -311,5 +430,54 @@ mod tests {
         let st = drain_state(&conn, "lane", 100);
         assert_eq!(st.ready, 1, "a verified dependency frees its successor");
         assert_eq!(st.verdict, "draining");
+    }
+}
+
+#[cfg(test)]
+mod trend_tests {
+    use super::*;
+
+    #[test]
+    fn the_lane_that_closed_1544_and_still_grew_is_falling_behind_and_slowing() {
+        // Live, mixpeek-frustrations 2026-09-29: 1,010 open, 1,696 opened and
+        // 1,544 closed in 7d, 44 closed in the last 24h.
+        let t = trend_from(1010, 50, 44, 1696, 1544);
+        assert_eq!((t.verdict, t.net_7d, t.slowdown), ("falling_behind", 152, true));
+        assert_eq!(t.days_to_empty, None, "a lane losing ground has no ETA");
+        // Gaining: 70 opened, 210 closed in 7d, 60 open -> 3 days to empty.
+        let t = trend_from(60, 10, 30, 70, 210);
+        assert_eq!((t.verdict, t.days_to_empty, t.slowdown), ("gaining", Some(3.0), false));
+        // Small lanes do not flap: under 10 closes a day is never a "slowdown".
+        assert!(!trend_from(5, 0, 0, 3, 20).slowdown);
+        assert_eq!(trend_from(4, 0, 0, 0, 0).verdict, "idle");
+        assert_eq!(trend_from(0, 0, 0, 5, 5).verdict, "empty");
+    }
+
+    #[test]
+    fn the_grouped_read_counts_opens_and_closes_by_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::db::Store::open(&dir.path().join("trend.db")).unwrap();
+        let now = 1_790_000_000i64;
+        store
+            .write(move |conn| {
+                let ins = |id: &str, status: &str, created: i64, closed: Option<i64>| {
+                    conn.execute(
+                        "INSERT INTO issues (id,title,desc,status,session,created,updated,type,archived,owner_type,closed_at) \
+                         VALUES (?1,'t','',?2,'lane-a',?3,?3,'code',0,'agent',?4)",
+                        rusqlite::params![id, status, created, closed],
+                    )
+                };
+                ins("A-1", "todo", now - 3600, None)?;          // opened 24h
+                ins("A-2", "done", now - 3 * 86_400, Some(now - 1800))?; // closed 24h, opened 7d
+                ins("A-3", "discarded", now - 10 * 86_400, Some(now - 2 * 86_400))?; // closed 7d
+                ins("A-4", "backlog", now - 20 * 86_400, None)?; // old open
+                Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+            })
+            .unwrap();
+        let conn = store.read().unwrap();
+        let t = lane_trend(&conn, "lane-a", now);
+        assert_eq!((t.opened_24h, t.closed_24h, t.opened_7d, t.closed_7d), (1, 1, 2, 2), "{t:?}");
+        assert_eq!(t.verdict, "gaining");
+        assert_eq!(lane_trends(&conn, now).unwrap().len(), 1);
     }
 }
