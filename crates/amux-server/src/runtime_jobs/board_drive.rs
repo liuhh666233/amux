@@ -5173,7 +5173,10 @@ fn resume_prompt(conn: &Connection, session: &str, row: &bs::IssueRow) -> String
     if let Some(prompt) =
         crate::api::session_verbs::generation_resume_prompt(conn, session, &row.id)
     {
-        return prompt;
+        // A lane holding one long card is reached here, not at pickup, so the
+        // trend rides along (mixpeek-frustrations held MF-2225 for hours after
+        // 1c340f60 shipped and never saw it).
+        return prompt + &trend_note(&crate::runtime_jobs::board_drain::lane_trend(conn, session, now_f64() as i64));
     }
     pickup_prompt(conn, session, row).replacen(
         " — work it now.",
