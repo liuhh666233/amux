@@ -2406,7 +2406,8 @@
   .peek-more-wrap { position: relative; }
   .peek-more-dropdown { display: none; position: absolute; top: calc(100% + 4px); right: 0; background: var(--card); border: 1px solid var(--border); border-radius: 8px; min-width: 260px; max-width:min(340px,calc(100vw - 16px)); max-height:min(500px,calc(100dvh - 120px)); overflow-x:hidden; overflow-y:auto; z-index: 60; box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
   .peek-more-dropdown.open { display: block; }
-  .peek-more-item { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; font-size: 0.85rem; color: var(--text); border-bottom: 1px solid var(--border); -webkit-tap-highlight-color: transparent; }
+  .peek-more-item { display: flex; align-items: center; gap: 8px; padding: 10px 14px; min-height: 44px; box-sizing: border-box; cursor: pointer; font-size: 0.85rem; color: var(--text); border-bottom: 1px solid var(--border); -webkit-tap-highlight-color: transparent; }
+  /* 44px touch targets (css-mobile rule): items measured 42px on a phone. */
   .peek-more-item:last-child { border-bottom: none; }
   .peek-more-item:active { background: var(--border); }
   .peek-more-item .mi { width: 18px; text-align: center; flex-shrink: 0; }
