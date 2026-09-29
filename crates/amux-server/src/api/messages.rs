@@ -810,7 +810,11 @@ pub(crate) async fn accountability_tick(state: &AppState) {
         // has no session/URL to open a card, so the accountability nudge would be
         // both impossible to satisfy and harness noise inside a lane meant to run
         // untouched. Skip it, reading the same source of truth the spawn path reads.
-        if crate::api::session_verbs::session_is_isolated(&worker) {
+        if crate::api::session_verbs::session_is_isolated(&worker)
+            || crate::api::session_verbs::is_chat_companion(&worker)
+        {
+            // A Chat-tab companion is the owner's conversation: a nudge typed
+            // into it lands as a chat message (AMHC-1 was opened that way).
             continue;
         }
         let last = nudged.get(&worker).copied().unwrap_or(0);

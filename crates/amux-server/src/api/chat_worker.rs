@@ -550,7 +550,16 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
         "type": "user", "turn_id": turn_id, "text": q.text, "origin": q.origin,
         "ts": crate::config::now_f64(), "waiting": waiting,
     }));
-    update_meta(name, &[("chat_inflight_turn", json!(turn_id))]);
+    update_meta(
+        name,
+        &[
+            ("chat_inflight_turn", json!(turn_id)),
+            // Who started this turn, and with what words: a companion's send
+            // during an owner turn is delivered as the owner's (owner_relay_quote).
+            ("chat_inflight_origin", json!(q.origin)),
+            ("chat_inflight_text", json!(q.text.chars().take(300).collect::<String>())),
+        ],
+    );
     report_state(state, name, "active", "UserPromptSubmit", &turn_id).await;
     update_meta(name, &[("last_send", json!(crate::config::now_f64() as i64))]);
 
@@ -631,7 +640,10 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
         SOURCE,
     )
     .await;
-    update_meta(name, &[("chat_inflight_turn", json!(""))]);
+    update_meta(
+        name,
+        &[("chat_inflight_turn", json!("")), ("chat_inflight_origin", json!("")), ("chat_inflight_text", json!(""))],
+    );
     lane.publish(json!({"type": "done", "turn_id": turn_id, "message": msg}));
     match &error {
         None => tracing::info!(session = %name, turn = %turn_id, duration_ms,
@@ -1005,7 +1017,10 @@ pub async fn recover(state: &AppState, name: &str) -> (usize, usize) {
         });
         emit_event(state, name, CHAT_EVENT, Some(msg), Some(format!("chat:{turn}:assistant")), SOURCE)
             .await;
-        update_meta(name, &[("chat_inflight_turn", json!(""))]);
+        update_meta(
+        name,
+        &[("chat_inflight_turn", json!("")), ("chat_inflight_origin", json!("")), ("chat_inflight_text", json!(""))],
+    );
         report_state(state, name, "idle", "StopFailure", &turn).await;
         tracing::warn!(session = %name, turn = %turn, measured = true, n_considered = 1,
             verdict = "chat_turn_interrupted",

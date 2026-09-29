@@ -892,10 +892,12 @@ impl Fleet for LiveFleet {
         crate::api::session_verbs::all_lane_names()
     }
     fn auto_pickup_enabled(&self, lane: &str) -> bool {
-        crate::api::session_verbs::standing_orders_on(lane, "CC_AUTO_PICKUP")
+        // A Chat-tab companion is the owner's conversation, not a work lane.
+        !crate::api::session_verbs::is_chat_companion(lane)
+            && crate::api::session_verbs::standing_orders_on(lane, "CC_AUTO_PICKUP")
     }
     fn board_adherence(&self, lane: &str) -> bool {
-        board_reminders_wanted(lane)
+        !crate::api::session_verbs::is_chat_companion(lane) && board_reminders_wanted(lane)
     }
     fn tags(&self, lane: &str) -> Vec<String> {
         let cfg = crate::api::session_verbs::parse_env(lane);

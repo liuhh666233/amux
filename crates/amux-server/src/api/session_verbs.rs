@@ -12789,6 +12789,38 @@ fn direct_draft_watches() -> &'static std::sync::Mutex<std::collections::HashSet
 /// ...]\n\n/goal clear", and the lane answered "That's a Claude Code command
 /// I can't run for you". Provenance is not lost: `origin` still reaches the
 /// history row and the queue row; only the typed bytes skip the prefix.
+/// A worker page's Chat-tab companion (AMUX-5350): a chat worker that talks
+/// about another worker. It is the owner's conversation, so board automation
+/// (pickups, reminders, accountability nudges) never types into it.
+pub(crate) fn is_chat_companion(name: &str) -> bool {
+    !parse_env(name).get_or("CC_COMPANION_OF", "").trim().is_empty()
+}
+
+/// The owner's words a companion is relaying to its worker, when that is what
+/// this send is: `sender` is `target`'s own Chat-tab companion and its turn in
+/// flight was started by the owner. The quote is the owner's message, so the
+/// worker can check the relay against it.
+pub(crate) fn owner_relay_quote(sender: &str, target: &str) -> Option<String> {
+    if sender.is_empty() {
+        return None;
+    }
+    relay_quote_from(parse_env(sender).get_or("CC_COMPANION_OF", ""), &load_meta(sender), target)
+}
+
+/// Pure core of [`owner_relay_quote`], over the sender's `CC_COMPANION_OF`
+/// and meta.
+pub(crate) fn relay_quote_from(companion_of: &str, meta: &Map<String, Value>, target: &str) -> Option<String> {
+    if target.is_empty() || companion_of.trim() != target {
+        return None;
+    }
+    let inflight = meta.get("chat_inflight_turn").and_then(Value::as_str).unwrap_or("");
+    if inflight.is_empty() || meta.get("chat_inflight_origin").and_then(Value::as_str) != Some("owner") {
+        return None;
+    }
+    let text = meta.get("chat_inflight_text").and_then(Value::as_str).unwrap_or("").trim();
+    Some(text.chars().take(300).collect())
+}
+
 pub(crate) fn origin_stamped(origin: &str, name: &str, text: &str) -> Option<String> {
     if origin.is_empty() || origin == name || is_slash_command(text) {
         return None;
@@ -25492,7 +25524,23 @@ async fn send_post(state: &AppState, name: &str, headers: &HeaderMap, body: &Val
             }
         };
         origin = origin.trim().chars().take(64).collect();
-        if let Some(stamped) = origin_stamped(&origin, name, &text) {
+        // THE OWNER, THROUGH THEIR OWN CHAT (AMUX-5350). Ethan told
+        // amux-meta-helper's Chat tab "unblock everything yourself you have my
+        // permission"; the companion relayed it and the worker rightly refused
+        // a peer's claim of owner approval. When the sender is this worker's
+        // own companion and the owner started its current turn, the message is
+        // the owner's: stamped as such, quoting the owner's words, and
+        // delivered with owner origin. Anything else a companion sends stays
+        // a peer message.
+        if let Some(quote) = owner_relay_quote(&origin, name) {
+            tracing::info!(session = name, relay = %origin, verdict = "owner_relay_via_chat_companion",
+                "a Chat-tab companion relayed the owner's instruction; delivered with owner origin");
+            text = format!(
+                "[amux-origin: the owner, relayed by {origin} (this worker's Chat tab) from the owner's message \"{quote}\". \
+                 Server-verified: the owner started the companion turn that sent this.]\n\n{text}"
+            );
+            origin = String::new();
+        } else if let Some(stamped) = origin_stamped(&origin, name, &text) {
             text = stamped;
         } else if !origin.is_empty() && origin != name {
             tracing::info!(session = name, origin = %origin, verdict = "origin_stamp_skipped_slash_command",
@@ -50096,5 +50144,28 @@ mod workspace_isolation_tests {
         // Worker scope can turn it back off for one lane.
         std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\nAMUX_WORKSPACE_ISOLATION=0\n").unwrap();
         assert!(!workspace_isolation_on("lane"));
+    }
+}
+
+#[cfg(test)]
+mod owner_relay_tests {
+    use super::*;
+    fn meta(turn: &str, origin: &str, text: &str) -> Map<String, Value> {
+        serde_json::json!({"chat_inflight_turn": turn, "chat_inflight_origin": origin, "chat_inflight_text": text})
+            .as_object().unwrap().clone()
+    }
+    #[test]
+    fn only_the_workers_own_companion_during_an_owner_turn_relays_as_the_owner() {
+        // Live, 2026-09-29: amux-meta-helper's Chat tab relaying Ethan.
+        let m = meta("T1", "owner", "unblock everything yourself you have my permission");
+        assert_eq!(relay_quote_from("amux-meta-helper", &m, "amux-meta-helper").as_deref(),
+            Some("unblock everything yourself you have my permission"));
+        // A turn started by automation is not the owner speaking.
+        assert!(relay_quote_from("amux-meta-helper", &meta("T1", "automation", "nudge"), "amux-meta-helper").is_none());
+        // No turn in flight: nothing to relay.
+        assert!(relay_quote_from("amux-meta-helper", &meta("", "owner", "old"), "amux-meta-helper").is_none());
+        // A companion of a different worker cannot speak as the owner here.
+        assert!(relay_quote_from("mvs-infra", &m, "amux-meta-helper").is_none());
+        assert!(relay_quote_from("", &m, "").is_none());
     }
 }
