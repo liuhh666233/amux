@@ -12465,7 +12465,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1166';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1169';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -14983,6 +14983,11 @@ function wrapBoxBlocks(html) {
   try { EMOJI = /(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}|[\u{1F3FB}-\u{1F3FF}])*)/gu; } catch (e) {}
   const fixEmojiWidth = block => EMOJI ? block.split(/(<[^>]+>)/).map((seg, k) =>
     k % 2 === 0 ? seg.replace(EMOJI, '<span class="pemoji">$1</span>') : seg).join('') : block;
+  const LONG_LINE_THRESHOLD = 200;
+  const isLongLine = raw => {
+    const t = stripTags(raw).replace(/&(?:[a-z]+|#\d+);/gi, 'x');
+    return t.length > LONG_LINE_THRESHOLD;
+  };
   const lines = html.split('\n');
   const out = [];
   for (let i = 0; i < lines.length; ) {
@@ -14990,6 +14995,11 @@ function wrapBoxBlocks(html) {
       let j = i;
       while (j < lines.length && isBoxLine(lines[j])) j++;
       out.push('<div class="peek-box">' + fixEmojiWidth(lines.slice(i, j).join('\n')) + '</div>');
+      i = j;
+    } else if (isLongLine(lines[i])) {
+      let j = i;
+      while (j < lines.length && isLongLine(lines[j])) j++;
+      out.push('<div class="peek-box">' + lines.slice(i, j).join('\n') + '</div>');
       i = j;
     } else { out.push(lines[i]); i++; }
   }
