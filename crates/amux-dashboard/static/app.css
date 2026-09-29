@@ -1136,7 +1136,10 @@
      what the cap above protected); tables and code blocks break out of it to
      the full width of the peek body (--peek-body-w, measured per render). */
   #pk-earlier, #pk-hist { max-width: calc(max(var(--peek-cols, 220), 120) * 1ch); }
-  #pk-earlier .peek-box, #pk-hist .peek-box { width: max-content; max-width: var(--peek-body-w, 100%); }
+  /* Never wider than the box's own container: a table inside an indented turn
+     card (.ptc-body, overflow hidden) sized to the whole body width lost its
+     rightmost ~57px with nothing to scroll to (2026-09-29, mixpeek-override). */
+  #pk-earlier .peek-box, #pk-hist .peek-box { width: max-content; max-width: min(var(--peek-body-w, 100%), 100%); }
   .peek-rule {
     display: inline-flex; width: 100%; align-items: center; gap: 6px;
     height: 1.15em; vertical-align: middle;
