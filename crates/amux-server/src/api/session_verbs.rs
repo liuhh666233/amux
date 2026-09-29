@@ -13915,9 +13915,16 @@ pub(crate) async fn start_session(
             )
             .await;
             if verify.as_ref().is_some_and(|o| o.status.success()) {
-                tracing::info!(session = name, worktree = %wt_path,
+                // Two ways here: the worktree was kept on purpose (valid, see
+                // keep_existing), or reclaim failed on a large tree. Say which.
+                let why = if keep_existing {
+                    "kept on purpose: it is the worker's valid workspace"
+                } else {
+                    "reclaim could not remove it"
+                };
+                tracing::info!(session = name, worktree = %wt_path, why,
                     measured = true, n_considered = 1, verdict = "worktree_reused",
-                    "reused existing worktree from a previous run; reclaim could not remove it");
+                    "reused existing worktree from a previous run");
                 added = verify;
             }
         }
