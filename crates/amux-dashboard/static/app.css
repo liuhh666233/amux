@@ -606,6 +606,14 @@
     white-space: normal; font-size: 0.92rem; line-height: 1.5;
     padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
   }
+  /* A chat body is not terminal output: in light mode it gets the light palette
+     back. body.light .overlay-body keeps the dark palette for ANSI output, so
+     the chat inherited --text #e6edf3 on a white --bg and assistant replies were
+     near-white on white (2026-09-29, the worker page's Chat tab). */
+  body.light #peek-body.peek-chat {
+    --text: #1f2328; --dim: #656d76; --accent: #0969da; --border: #d0d7de;
+    --green: #1a7f37; --red: #cf222e; --yellow: #9a6700; --cyan: #0550ae;
+  }
   .chat-log { display: flex; flex-direction: column; gap: 12px; max-width: 860px; margin: 0 auto; }
   .chat-msg { display: flex; flex-direction: column; max-width: 88%; min-width: 0; }
   .chat-msg.chat-user { align-self: flex-end; align-items: flex-end; }
