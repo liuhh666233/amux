@@ -6795,8 +6795,8 @@ function _renderPeekWorkerActions(s) {
   const html = _renderWorkerActionMenu(s, 'peek')
     + '<div class="peek-more-sep"></div>'
     + '<div class="peek-more-item" id="peek-file-browser-btn" data-peek-action="file-browser" role="menuitem" '
-    + 'onclick="event.stopPropagation();_closePeekMore();_browseWorkerFiles(peekSession,\'peek-file-browser\')">'
-    + '<span class="mi">&#x1F4C2;</span>File browser</div>'
+    + 'onclick="event.stopPropagation();_closePeekMore();togglePeekSplit()">'
+    + '<span class="mi">&#x1F4C2;</span>File browser (split)</div>'
     + '<div class="peek-more-item" id="peek-focus-btn" role="menuitem" '
     + 'onclick="event.stopPropagation();_closePeekMore();togglePeekFocus()">'
     + '<span class="mi">&#x25B4;</span>Focus mode</div>';
@@ -13261,7 +13261,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1171';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1172';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.

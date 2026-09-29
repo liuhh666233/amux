@@ -2854,7 +2854,7 @@
   .peek-split-files-header .psf-crumb { color: var(--accent); cursor: pointer; white-space: nowrap; }
   .peek-split-files-header .psf-crumb:hover { text-decoration: underline; }
   .peek-split-files-body { flex: 1; min-height: 0; overflow-y: auto; }
-  .peek-split-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  .peek-split-btn.active, #peek-split-toggle.active { background: var(--accent); color: #000; border-color: var(--accent); }
   /* Split pane file content — match the file preview overlay styles */
   #peek-split-files .file-overlay-body.markdown { background: var(--bg); color: var(--text); }
   #peek-split-files .file-overlay-body.file-image { background: var(--bg); }
