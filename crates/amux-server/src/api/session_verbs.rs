@@ -158,6 +158,28 @@ pub(crate) fn workspace_isolation_exports(name: &str) -> String {
     out
 }
 
+/// What a SURVIVING tmux shell needs on restart to match a fresh start: undo
+/// the values an earlier workspace-isolation start exported (so turning the
+/// switch off works too), re-source the scope layers, then re-apply the
+/// isolation exports. Found 2026-09-29 (iso-e2e2): a restart that reuses the
+/// tmux session sent only `cd`, so a scope setting changed after the shell was
+/// created (any setting, not only isolation) never reached the new process.
+pub(crate) fn surviving_shell_scope_rc(name: &str) -> String {
+    let tmpd = home().join("tmp").join(name);
+    let kc = home().join("kube").join(format!("{name}.config"));
+    let mut rc = format!(
+        "case \"${{TMPDIR:-}}\" in {}*) export TMPDIR=\"$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp/)\";; esac; \
+         [ \"${{KUBECONFIG:-}}\" = {} ] && unset KUBECONFIG; unset AMUX_PUSH_STRATEGY; ",
+        sh_quote(&tmpd.to_string_lossy()),
+        sh_quote(&kc.to_string_lossy())
+    );
+    for f in scope_env_layers(&home(), name) {
+        rc.push_str(&format!("set -a; source {} 2>/dev/null; set +a; ", sh_quote(&f.to_string_lossy())));
+    }
+    rc.push_str(&workspace_isolation_exports(name));
+    rc
+}
+
 /// AMUX_KUBE_IMPERSONATE=1 (AH-223): copy `src` to `dst` with every user set to
 /// impersonate `amux:worker:<name>` in group `amux:workers`. The worker still
 /// authenticates as the shared identity (amux-ops), which may impersonate, and
@@ -14661,6 +14683,8 @@ pub(crate) async fn start_session(
         // the same user profile used by fresh startup, then discard shell caches.
         // No provider flags, sandbox permissions, or trust settings change.
         shell_step!(&profile_rc, false);
+        // Scope settings and workspace isolation, as a fresh start applies them.
+        shell_step!(&surviving_shell_scope_rc(name), false);
         // The surviving shell skips shell_rc, so give it the same isolated
         // server CLI priority as a fresh shell after the environment import.
         if local_cli_dir.join("amux").is_file() {
@@ -50043,6 +50067,31 @@ mod workspace_isolation_tests {
             assert_eq!(std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777, 0o600);
         }
         assert!(impersonating_kubeconfig(&home.path().join("missing"), &dst, "lane").is_err());
+
+        // A SURVIVING shell gets the same result on restart, run through bash:
+        // stale isolation values go when the switch is off, and come back on.
+        let run = |rc: &str, tmpdir: &str| -> String {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{rc} printf '%s|%s|%s' \"$TMPDIR\" \"${{AMUX_PUSH_STRATEGY:-}}\" \"${{KUBECONFIG:-none}}\""))
+                .env("TMPDIR", tmpdir)
+                .env("AMUX_PUSH_STRATEGY", "rebase")
+                .env("KUBECONFIG", home.path().join("kube").join("lane.config"))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let stale = format!("{}/", home.path().join("tmp").join("lane").display());
+        std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\nAMUX_WORKSPACE_ISOLATION=0\n").unwrap();
+        let off = run(&surviving_shell_scope_rc("lane"), &stale);
+        let parts: Vec<&str> = off.split('|').collect();
+        assert!(!parts[0].starts_with(&stale), "stale TMPDIR survived: {off}");
+        assert_eq!(parts[1], "", "stale push strategy survived: {off}");
+        assert_eq!(parts[2], "none", "stale KUBECONFIG survived: {off}");
+        std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\n").unwrap();
+        let on = run(&surviving_shell_scope_rc("lane"), "/var/tmp/");
+        assert!(on.starts_with(&home.path().join("tmp").join("lane").display().to_string()), "{on}");
+        assert!(on.contains("|rebase|"), "{on}");
 
         // Worker scope can turn it back off for one lane.
         std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\nAMUX_WORKSPACE_ISOLATION=0\n").unwrap();
