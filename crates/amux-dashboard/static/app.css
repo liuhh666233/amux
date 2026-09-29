@@ -2852,23 +2852,16 @@
   /* Drag handle between terminal and file browser */
   .peek-split-handle { display: none; }
   .peek-split-wrap.split-active > .peek-split-handle {
-    display: block; width: 5px; flex-shrink: 0; cursor: col-resize;
+    display: block; width: 6px; flex-shrink: 0; cursor: col-resize;
     background: var(--border); transition: background 0.15s;
+    position: relative; z-index: 2;
+  }
+  .peek-split-wrap.split-active > .peek-split-handle::before {
+    content: ''; position: absolute; inset: 0 -6px; cursor: col-resize;
   }
   .peek-split-wrap.split-active > .peek-split-handle:hover,
   .peek-split-handle.dragging { background: var(--accent); }
-  /* Per-pane zoom controls */
-  .pane-zoom-controls { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
-  .pane-zoom-btn { background: none; border: 1px solid var(--border); color: var(--dim); cursor: pointer;
-    font-size: 0.7rem; padding: 1px 5px; border-radius: 3px; line-height: 1; }
-  .pane-zoom-btn:hover { background: var(--accent); color: #000; border-color: var(--accent); }
-  .pane-zoom-level { font-size: 0.65rem; color: var(--dim); min-width: 28px; text-align: center; }
-  /* Floating zoom for terminal pane (only visible in split mode) */
-  .pane-zoom-float { display: none; position: absolute; bottom: 4px; right: 8px;
-    background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
-    padding: 2px 4px; gap: 2px; align-items: center; z-index: 2; opacity: 0.7; transition: opacity 0.15s; }
-  .pane-zoom-float:hover { opacity: 1; }
-  .peek-split-wrap.split-active .pane-zoom-float { display: inline-flex; }
+  body.split-dragging, body.split-dragging * { cursor: col-resize !important; user-select: none !important; -webkit-user-select: none !important; }
   .peek-split-files-header { display: flex; align-items: center; gap: 6px; padding: 6px 10px;
     border-bottom: 1px solid var(--border); flex-shrink: 0; font-size: 0.8rem; min-width: 0; }
   .peek-split-files-header .psf-crumb { color: var(--accent); cursor: pointer; white-space: nowrap; }

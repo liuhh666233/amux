@@ -1053,11 +1053,25 @@ function zoomOut() {
 }
 function resetZoom() { _zoomLevel = 100; _applyZoom(); }
 if (_zoomLevel !== 100) _applyZoom();
-// Keyboard shortcuts: Cmd/Ctrl +/- for zoom
+// Keyboard shortcuts: Cmd/Ctrl +/- for zoom.
+// In split mode, zooms whichever pane the cursor is over independently.
 document.addEventListener('keydown', function(e) {
-  if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomIn(); }
-  else if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomOut(); }
-  else if ((e.metaKey || e.ctrlKey) && e.key === '0') { e.preventDefault(); resetZoom(); }
+  if (!(e.metaKey || e.ctrlKey)) return;
+  const isPlus = e.key === '=' || e.key === '+';
+  const isMinus = e.key === '-';
+  const isZero = e.key === '0';
+  if (!isPlus && !isMinus && !isZero) return;
+  e.preventDefault();
+  var wrap = document.getElementById('peek-split-wrap');
+  if (wrap && wrap.classList.contains('split-active') && _paneHover) {
+    if (isPlus) _paneZoom(_paneHover, 1);
+    else if (isMinus) _paneZoom(_paneHover, -1);
+    else { _paneZoomLevels[_paneHover] = 100; _applyPaneZoom(_paneHover); try { localStorage.setItem('paneZoomLevels', JSON.stringify(_paneZoomLevels)); } catch(ex) {} }
+    return;
+  }
+  if (isPlus) zoomIn();
+  else if (isMinus) zoomOut();
+  else resetZoom();
 });
 
 // Connection & offline state
@@ -13261,7 +13275,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1173';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1174';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -14590,6 +14604,7 @@ function _initSplitResize() {
     const wrapW = wrap.offsetWidth;
     const tpW = tp.offsetWidth;
     handle.classList.add('dragging');
+    document.body.classList.add('split-dragging');
     return { wrapW, tpW, startX };
   };
   const move = (ctx, clientX) => {
@@ -14604,6 +14619,7 @@ function _initSplitResize() {
   };
   const end = () => {
     handle.classList.remove('dragging');
+    document.body.classList.remove('split-dragging');
     const tp = document.getElementById('peek-terminal-panel');
     if (tp) localStorage.setItem('peekSplitRatio', tp.style.flex);
   };
@@ -14639,8 +14655,9 @@ function _restoreSplitWidths() {
   }
 }
 
-// --- Per-pane zoom ---
+// --- Per-pane zoom (Cmd+/- when hovering a pane in split mode) ---
 const _paneZoomLevels = { terminal: 100, psf: 100 };
+let _paneHover = null;
 (function() {
   try {
     const s = JSON.parse(localStorage.getItem('paneZoomLevels'));
@@ -14660,19 +14677,17 @@ function _paneZoom(pane, dir) {
 }
 function _applyPaneZoom(pane) {
   const level = _paneZoomLevels[pane] || 100;
-  let el, label;
-  if (pane === 'terminal') {
-    el = document.getElementById('peek-body');
-    label = document.getElementById('terminal-zoom-level');
-  } else {
-    el = document.getElementById('psf-body');
-    label = document.getElementById('psf-zoom-level');
-  }
+  const el = pane === 'terminal' ? document.getElementById('peek-body') : document.getElementById('psf-body');
   if (el) el.style.zoom = level === 100 ? '' : (level / 100);
-  if (label) label.textContent = level + '%';
 }
 _applyPaneZoom('terminal');
 _applyPaneZoom('psf');
+document.addEventListener('mouseover', function(e) {
+  const wrap = document.getElementById('peek-split-wrap');
+  if (!wrap || !wrap.classList.contains('split-active')) { _paneHover = null; return; }
+  if (e.target.closest('#peek-split-files')) _paneHover = 'psf';
+  else if (e.target.closest('#peek-terminal-panel')) _paneHover = 'terminal';
+});
 
 // --- Split pane sorting ---
 let _psfSort = { col: 'modified', dir: -1 };
