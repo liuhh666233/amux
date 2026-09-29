@@ -13261,7 +13261,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1167';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1168';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -40058,6 +40058,27 @@ function _workspaceTeamScope(team) {
   return (team.scope_level === 'group' ? 'Group · ' : 'Worker · ') + (team.scope_name || 'not set');
 }
 
+// GLOBAL SCOPE IS HOST-LEVEL ACCESS (AMUX-5334, private security report
+// 2026-09-19). A Global member can prompt every worker, which runs with this
+// machine's permissions, and read, write and delete files anywhere on it. The
+// server refuses a Global grant without `grant_host_access: true`; these
+// dialogs say what that means and only send it when the box is ticked.
+const _HOST_ACCESS_TEXT = 'Global is host-level access: this person can prompt every worker (they run with this machine\u2019s permissions) and read, write and delete files anywhere on this machine. Grant it only to someone you would give your own login.';
+function _hostAccessBoxHtml() {
+  return `<label id="host-access-wrap" style="display:none;gap:8px;align-items:flex-start;margin-top:12px;padding:10px;border:1px solid var(--red,#f66);border-radius:6px;font-size:0.75rem;line-height:1.4;">`
+    + `<input type="checkbox" id="host-access-ack" style="margin-top:2px;min-width:16px;min-height:16px;"><span>${esc(_HOST_ACCESS_TEXT)} I understand and grant it.</span></label>`;
+}
+function _wireHostAccess(modal, isGlobal, ...controls) {
+  const wrap = modal.querySelector('#host-access-wrap');
+  const update = () => { if (wrap) wrap.style.display = isGlobal() ? 'flex' : 'none'; };
+  controls.filter(Boolean).forEach(c => c.addEventListener('change', update));
+  update();
+  return () => !!modal.querySelector('#host-access-ack')?.checked && isGlobal();
+}
+function _teamIsGlobal(id) {
+  return (_workspaceTeams.find(t => t.id === id) || {}).scope_level === 'global';
+}
+
 function _workspaceTeamOptions(selected) {
   return _workspaceTeams.map(team => `<option value="${esc(team.id)}"${team.id === selected ? ' selected' : ''}>${esc(team.name)} — ${esc(_workspaceTeamScope(team))}</option>`).join('');
 }
@@ -40196,18 +40217,22 @@ async function openTeamInvite() {
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Email (optional)</label>
     <input id="team-invite-email" type="email" placeholder="person@example.com" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;margin-bottom:13px;">
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Team</label>
-    <select id="invite-team-id" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;">${_workspaceTeamOptions('team_global')}</select>
+    <select id="invite-team-id" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;"><option value="" disabled selected>Choose a team</option>${_workspaceTeamOptions('')}</select>
+    ${_hostAccessBoxHtml()}
     <div id="team-scope-error" style="color:var(--red,#f66);font-size:0.75rem;margin-top:10px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;"><button class="btn" data-modal-cancel>Cancel</button><button id="team-scope-submit" class="btn primary">Create invite</button></div>`);
   const submit = modal.querySelector('#team-scope-submit');
+  const teamSel = modal.querySelector('#invite-team-id');
+  const hostAck = _wireHostAccess(modal, () => _teamIsGlobal(teamSel.value), teamSel);
   submit.addEventListener('click', async () => {
     const email = (modal.querySelector('#team-invite-email')?.value || '').trim();
-    const team_id = modal.querySelector('#invite-team-id').value;
+    const team_id = teamSel.value;
+    if (!team_id) { _teamScopeError(modal, 'Choose a team'); return; }
     submit.disabled = true;
     submit.textContent = 'Creating…';
     let res;
     try {
-      res = await fetch('/api/org/invites', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, team_id})});
+      res = await fetch('/api/org/invites', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, team_id, grant_host_access: hostAck()})});
     } catch (e) {
       _teamScopeError(modal, 'Network error');
       submit.disabled = false;
@@ -40239,7 +40264,7 @@ function _workspaceAccessModal(html) {
 function openTeamEditor(teamId) {
   closeSettings();
   const team = _workspaceTeams.find(value => value.id === teamId) || null;
-  const modal = _teamScopeDialog(team ? 'Edit team' : 'Create team', '', team ? team.scope_level : 'global', team ? team.scope_name : '', 'Save team', true);
+  const modal = _teamScopeDialog(team ? 'Edit team' : 'Create team', '', team ? team.scope_level : 'worker', team ? team.scope_name : '', 'Save team', true);
   const heading = modal.querySelector('h3');
   if (heading) heading.insertAdjacentHTML('afterend', `<label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Team name</label><input id="team-name" value="${esc(team ? team.name : '')}" placeholder="e.g. TubeScience" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;margin-bottom:13px;">`);
   if (team) {
@@ -40252,12 +40277,14 @@ function openTeamEditor(teamId) {
       modal.remove(); showToast('Team deleted'); toggleSettings(); loadTeamSection();
     };
   }
+  const levelSel = modal.querySelector('#team-scope-level');
+  const teamAck = _wireHostAccess(modal, () => levelSel.value === 'global', levelSel);
   modal.querySelector('#team-scope-submit').onclick = async () => {
-    const scope_level = modal.querySelector('#team-scope-level').value;
+    const scope_level = levelSel.value;
     const scope_name = scope_level === 'global' ? '' : modal.querySelector('#team-scope-name').value;
     const name = modal.querySelector('#team-name').value.trim();
     const response = await fetch(team ? '/api/org/teams/' + encodeURIComponent(team.id) : '/api/org/teams', {
-      method:team ? 'PATCH' : 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,scope_level,scope_name})
+      method:team ? 'PATCH' : 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,scope_level,scope_name,grant_host_access:teamAck()})
     }).catch(() => null);
     const data = response ? await response.json().catch(() => ({})) : {};
     if (!response || !response.ok) { _teamScopeError(modal, data.error || 'Could not save team'); return; }
@@ -40285,8 +40312,9 @@ function _teamScopeDialog(title, email, level, name, submitLabel, hideEmail) {
     ${hideEmail ? '' : email ? `<p style="color:var(--dim);font-size:0.82rem;margin:0 0 14px;">${esc(email)}</p>` : `<label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Email (optional)</label><input id="team-invite-email" type="email" placeholder="person@example.com" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;margin-bottom:13px;">`}
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Access level</label>
     <select id="team-scope-level" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;">
-      <option value="global">Global — every worker and card</option><option value="group">Group — workers tagged in one group</option><option value="worker">Worker — one worker only</option>
+      <option value="global">Global — host-level: every worker and the host filesystem</option><option value="group">Group — workers tagged in one group</option><option value="worker">Worker — one worker only</option>
     </select>
+    ${_hostAccessBoxHtml()}
     <div id="team-scope-target-wrap" style="margin-top:13px;display:none;"><label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Target</label><select id="team-scope-name" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;"></select></div>
     <div id="team-scope-error" style="color:var(--red,#f66);font-size:0.75rem;margin-top:10px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
@@ -40342,14 +40370,17 @@ async function openMemberScope(id, email, teamId) {
     <p style="color:var(--dim);font-size:0.82rem;margin:0 0 14px;">${esc(email)}</p>
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Team</label>
     <select id="member-team-id" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;">${_workspaceTeamOptions(teamId)}</select>
+    ${_hostAccessBoxHtml()}
     <div id="team-scope-error" style="color:var(--red,#f66);font-size:0.75rem;margin-top:10px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;"><button class="btn" data-modal-cancel>Cancel</button><button id="team-scope-submit" class="btn primary">Save team</button></div>`);
   const submit = modal.querySelector('#team-scope-submit');
+  const memberSel = modal.querySelector('#member-team-id');
+  const memberAck = _wireHostAccess(modal, () => _teamIsGlobal(memberSel.value), memberSel);
   submit.addEventListener('click', async () => {
-    const team_id = modal.querySelector('#member-team-id').value;
+    const team_id = memberSel.value;
     submit.disabled = true;
     const response = await fetch('/api/org/members/' + encodeURIComponent(id), {
-      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({team_id})
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({team_id, grant_host_access: memberAck()})
     }).catch(() => null);
     const data = response ? await response.json().catch(() => ({})) : {};
     if (!response || !response.ok) {

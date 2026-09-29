@@ -256,6 +256,14 @@ pub(crate) fn authorize_local_member_request(
         return Some(forbidden(&scope, "organization administration"));
     }
     if scope.is_global() {
+        // Global members created before AMUX-5334 got host-level access by
+        // default. Say so once per process, where an operator will see it.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(verdict = "global_member_active",
+                "a Global-scope member is using this instance: Global includes every worker and /api/fs/* \
+                 on the host filesystem. Review members in Settings > Workspace access (AMUX-5334)");
+        }
         return None;
     }
 
@@ -595,11 +603,39 @@ fn valid_email(email: &str) -> bool {
             .is_some_and(|(local, domain)| !local.is_empty() && !domain.is_empty())
 }
 
+/// Global membership is host-level access, not "sees every card": a Global
+/// member passes the per-route guard (`authorize_local_member_request`), so
+/// they can drive every worker (which run with this machine's permissions)
+/// and use /api/fs/* on the whole host filesystem. So it is granted only on
+/// an explicit acknowledgment, never as a default.
+///
+/// Private security report to info@, 2026-09-19 (AMUX-5334): an invite with no
+/// scope silently became Global, and the dashboard preselected the Global
+/// "Everyone" team, so the ordinary invite flow handed a collaborator
+/// read/write/delete over the owner's filesystem.
+pub(crate) const HOST_ACCESS_ACK: &str = "grant_host_access";
+
+fn host_access_refusal(what: &str) -> Value {
+    json!({
+        "error": format!("{what} is Global scope, which grants host-level access; confirm it explicitly"),
+        "code": "global_scope_requires_host_access_ack",
+        "grants": "every worker (sending prompts, which run with this machine's permissions) and /api/fs/* on the whole host filesystem",
+        "how": format!("send \"{HOST_ACCESS_ACK}\": true to grant it, or choose a worker or group scope"),
+    })
+}
+
+fn host_access_acknowledged(body: &Value) -> bool {
+    body.get(HOST_ACCESS_ACK).and_then(Value::as_bool) == Some(true)
+}
+
 fn requested_scope(body: &Value) -> Result<MemberScope, Value> {
-    let level = body
-        .get("scope_level")
-        .and_then(Value::as_str)
-        .unwrap_or("global");
+    let Some(level) = body.get("scope_level").and_then(Value::as_str) else {
+        return Err(json!({
+            "error": "scope_level is required",
+            "valid_levels": ["worker", "group", "global"],
+            "why": "an access grant is never inferred: a missing scope used to default to global (host-level access)",
+        }));
+    };
     let name = body.get("scope_name").and_then(Value::as_str).unwrap_or("");
     let Some(scope) = parse_member_scope(level, name) else {
         return Err(json!({
@@ -610,6 +646,9 @@ fn requested_scope(body: &Value) -> Result<MemberScope, Value> {
             "why": "group and worker scopes require a target; global must not carry one",
         }));
     };
+    if scope.is_global() && !host_access_acknowledged(body) {
+        return Err(host_access_refusal("this grant"));
+    }
     if matches!(scope, MemberScope::Worker(ref worker) if !super::session_verbs::valid_session_name(worker))
     {
         return Err(json!({"error": "worker scope target is not a valid worker name"}));
@@ -693,9 +732,13 @@ fn assignment_from_body(
         if id.is_empty() {
             return Err(json!({"error":"team_id must not be empty"}));
         }
-        return team_by_id(conn, id)
+        let team = team_by_id(conn, id)
             .map_err(|e| json!({"error":e.to_string()}))?
-            .ok_or_else(|| json!({"error":"team not found","team_id":id}));
+            .ok_or_else(|| json!({"error":"team not found","team_id":id}))?;
+        if team.scope.is_global() && !host_access_acknowledged(body) {
+            return Err(host_access_refusal(&format!("team \"{}\"", team.name)));
+        }
+        return Ok(team);
     }
 
     // Compatibility for pre-team API callers: resolve their direct scope and
@@ -1381,6 +1424,14 @@ pub async fn patch_team(
         Ok(conn) => conn,
         Err(e) => return internal(e),
     };
+    // Editing a team that is ALREADY Global grants nothing new; only a change
+    // to Global needs the host-access acknowledgment.
+    let mut body = body;
+    if team_by_id(&conn, &id).ok().flatten().is_some_and(|t| t.scope.is_global()) {
+        if let Some(m) = body.as_object_mut() {
+            m.entry(HOST_ACCESS_ACK).or_insert(json!(true));
+        }
+    }
     let (name, scope) = match team_definition(&conn, &body) {
         Ok(value) => value,
         Err(body) => return err(StatusCode::BAD_REQUEST, body),
@@ -1890,6 +1941,30 @@ mod tests {
         assert!(url.starts_with(&want), "{url} should start with {want}");
     }
 
+    // AMUX-5334, private report 2026-09-19: the default invite granted host
+    // filesystem access. No grant is inferred, and Global needs an explicit ack.
+    #[tokio::test]
+    async fn global_scope_is_never_a_default_and_needs_an_explicit_host_access_ack() {
+        let (app, _dir) = app();
+        let post = |body: Value| send(&app, "POST", "/api/org/invites", Some(body), &[]);
+        // The reported path: no scope at all.
+        let (st, r) = post(json!({"email": "contractor@example.com"})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert_eq!(r["error"], "scope_level is required");
+        // Global without the acknowledgment, directly or through the Everyone team.
+        let (st, r) = post(json!({"email": "c@example.com", "scope_level": "global"})).await;
+        assert_eq!((st, r["code"].as_str()), (StatusCode::BAD_REQUEST, Some("global_scope_requires_host_access_ack")), "{r}");
+        let (st, r) = post(json!({"email": "c@example.com", "team_id": "team_global"})).await;
+        assert_eq!((st, r["code"].as_str()), (StatusCode::BAD_REQUEST, Some("global_scope_requires_host_access_ack")), "{r}");
+        // A team cannot be made Global without it either.
+        let (st, r) = send(&app, "POST", "/api/org/teams", Some(json!({"name": "Ops", "scope_level": "global", "scope_name": ""})), &[]).await;
+        assert_eq!((st, r["code"].as_str()), (StatusCode::BAD_REQUEST, Some("global_scope_requires_host_access_ack")), "{r}");
+        // An explicit grant still works, and says what it is.
+        let (st, r) = post(json!({"email": "c@example.com", "team_id": "team_global", "grant_host_access": true})).await;
+        assert_eq!(st, StatusCode::CREATED, "{r}");
+        assert_eq!(r["scope_level"], "global");
+    }
+
     #[tokio::test]
     async fn create_invite_mints_python_shaped_token_and_expiry() {
         let (app, dir) = app();
@@ -1898,7 +1973,7 @@ mod tests {
             &app,
             "POST",
             "/api/org/invites",
-            Some(json!({ "email": "  NewHire@X.Co " })),
+            Some(json!({ "email": "  NewHire@X.Co ", "scope_level": "global", "grant_host_access": true })),
             &[("Host", "myhost:9"), ("X-Forwarded-Proto", "https")],
         )
         .await;
@@ -1926,7 +2001,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(email.as_deref(), Some("newhire@x.co"));
-        let (st, r2) = send(&app, "POST", "/api/org/invites", Some(json!({})), &[]).await;
+        let (st, r2) = send(&app, "POST", "/api/org/invites", Some(json!({"scope_level": "global", "grant_host_access": true})), &[]).await;
         assert_eq!(st, StatusCode::CREATED);
         let email2: Option<String> = conn
             .query_row(
@@ -1983,7 +2058,7 @@ mod tests {
             &app,
             "POST",
             "/api/org/invites",
-            r#"{"email":"guest@example.com"}"#,
+            r#"{"email":"guest@example.com","scope_level":"global","grant_host_access":true}"#,
             &[
                 ("authorization", "Bearer owner-token"),
                 ("content-type", "application/json"),
@@ -2302,7 +2377,7 @@ mod tests {
             &app,
             "PATCH",
             &format!("/api/org/members/{member_id}"),
-            r#"{"team_id":"team_global"}"#,
+            r#"{"team_id":"team_global","grant_host_access":true}"#,
             &[
                 ("authorization", "Bearer owner-token"),
                 ("content-type", "application/json"),
@@ -2453,7 +2528,7 @@ mod tests {
             &app,
             "POST",
             "/api/org/teams",
-            r#"{"name":"Temporary","scope_level":"global","scope_name":""}"#,
+            r#"{"name":"Temporary","scope_level":"global","scope_name":"","grant_host_access":true}"#,
             &[
                 ("authorization", "Bearer owner-token"),
                 ("content-type", "application/json"),
@@ -2464,7 +2539,7 @@ mod tests {
         let team: Value = serde_json::from_str(&body).unwrap();
         let team_id = team["id"].as_str().unwrap();
 
-        let payload = json!({"team_id":team_id}).to_string();
+        let payload = json!({"team_id":team_id,"grant_host_access":true}).to_string();
         let (invited, _, body) = raw_send(
             &app,
             "POST",
@@ -2546,7 +2621,7 @@ mod tests {
             &app,
             "POST",
             "/api/org/invites",
-            r#"{"email":"right@example.com"}"#,
+            r#"{"email":"right@example.com","scope_level":"global","grant_host_access":true}"#,
             &[
                 ("authorization", "Bearer owner-token"),
                 ("content-type", "application/json"),

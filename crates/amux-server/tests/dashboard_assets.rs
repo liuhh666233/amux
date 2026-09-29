@@ -1524,12 +1524,20 @@ fn workspace_invites_and_members_are_assigned_through_scoped_teams() {
     for needle in [
         "function openTeamEditor",
         "fetch('/api/org/teams')",
-        "JSON.stringify({email, team_id})",
-        "JSON.stringify({team_id})",
+        "JSON.stringify({email, team_id, grant_host_access: hostAck()})",
+        "JSON.stringify({team_id, grant_host_access: memberAck()})",
+        "grant_host_access:teamAck()",
         "_workspaceTeamScope",
     ] {
         assert!(app.contains(needle), "workspace team UI lost `{needle}`");
     }
+    // AMUX-5334: Global is host-level access, so the invite never preselects
+    // the Global "Everyone" team and the dialogs say what Global grants.
+    assert!(
+        !app.contains("_workspaceTeamOptions('team_global')"),
+        "the invite dialog preselects the Global team again (host-level access by default)"
+    );
+    assert!(app.contains("_HOST_ACCESS_TEXT") && app.contains("function _wireHostAccess"));
     for needle in [
         "Workspace access",
         "settings-teams-list",
