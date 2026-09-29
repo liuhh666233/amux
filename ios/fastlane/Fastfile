@@ -205,8 +205,11 @@ platform :ios do
         end
         asc.call(:patch, "/v1/territoryAvailabilities/#{row['id']}",
           { data: { type: "territoryAvailabilities", id: row["id"], attributes: { available: false } } })
-        back = asc.call(:get, "/v1/territoryAvailabilities/#{row['id']}")
-        UI.user_error!("#{t} still available after PATCH") unless back["data"]["attributes"]["available"] == false
+        # A territoryAvailability allows UPDATE only (GET on one id is 403), so
+        # verify by listing the collection again.
+        again = asc.call(:get, "/v2/appAvailabilities/#{avail_id}/territoryAvailabilities?limit=200&include=territory")["data"]
+        now = again.find { |r| territory_of.call(r) == t }
+        UI.user_error!("#{t} still available after PATCH") unless now && now["attributes"]["available"] == false
         UI.message("AVAILABILITY #{t} set unavailable (verified)")
       end
     end
