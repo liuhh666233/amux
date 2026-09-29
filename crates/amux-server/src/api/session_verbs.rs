@@ -110,6 +110,34 @@ pub(crate) fn home() -> PathBuf {
 /// harness routing vars (suppressed for an isolated worker), and the Claude
 /// OAuth/API-key rule. One definition of "a worker's environment", so scope
 /// settings and connectors reach every worker type identically.
+/// WORKSPACE ISOLATION (celery-retirement for Ethan, 2026-09-29). One scoped
+/// switch, AMUX_WORKSPACE_ISOLATION=1 at worker, group or global scope,
+/// default off. When on, the worker gets its own durable worktree at
+/// origin/main (see start), its own TMPDIR, and AMUX_PUSH_STRATEGY=rebase,
+/// which the repo's push script reads to refuse whole-file graft pushes.
+///
+/// Named "workspace" isolation on purpose: CC_ISOLATED already means an
+/// owner-only raw CLI with no harness automation, a different thing.
+pub(crate) fn workspace_isolation_on(name: &str) -> bool {
+    auto_continue_on(scoped_setting_in(&home(), name, "AMUX_WORKSPACE_ISOLATION").as_deref())
+}
+
+/// The shell exports workspace isolation adds to a worker's launch, or "".
+/// TMPDIR is per worker because /tmp is shared by every lane (CLAUDE.md,
+/// "SNAPSHOT TO A UNIQUE PATH"). An explicit AMUX_PUSH_STRATEGY at any scope
+/// wins over the rebase default.
+pub(crate) fn workspace_isolation_exports(name: &str) -> String {
+    if !workspace_isolation_on(name) {
+        return String::new();
+    }
+    let tmp = home().join("tmp").join(name);
+    let _ = std::fs::create_dir_all(&tmp);
+    format!(
+        "export TMPDIR={}; export AMUX_PUSH_STRATEGY=\"${{AMUX_PUSH_STRATEGY:-rebase}}\"; ",
+        sh_quote(&tmp.to_string_lossy())
+    )
+}
+
 pub(crate) fn headless_turn_prelude(name: &str, provider: &str, work_dir: &str) -> String {
     let cfg = parse_env(name);
     let isolated = env_flag_on(cfg.get("CC_ISOLATED"));
@@ -134,6 +162,7 @@ pub(crate) fn headless_turn_prelude(name: &str, provider: &str, work_dir: &str) 
             sh_quote(&f.to_string_lossy())
         ));
     }
+    rc.push_str(&workspace_isolation_exports(name));
     let local_cli_dir = home().join("bin");
     if local_cli_dir.join("amux").is_file() {
         rc.push_str(&format!(
@@ -13719,7 +13748,15 @@ pub(crate) async fn start_session(
     let project_shared_checkout =
         cfg.get("CC_PROJECT").is_some() && cfg.get("CC_WORKTREE") == Some("0");
     let fanout = cfg.get("CC_EPHEMERAL") == Some("1") && !project_shared_checkout;
-    let worktree_enabled = fanout || cfg.get_or("CC_WORKTREE", "") == "1";
+    // Workspace isolation implies an own worktree, except for project workers,
+    // whose project already owns one checkout for all of them.
+    let isolation_worktree = cfg.get("CC_PROJECT").is_none() && workspace_isolation_on(name);
+    let worktree_enabled = fanout || cfg.get_or("CC_WORKTREE", "") == "1" || isolation_worktree;
+    if isolation_worktree {
+        tracing::info!(session = name, measured = true, n_considered = 1,
+            verdict = "workspace_isolation_on",
+            "workspace isolation: own worktree, TMPDIR and rebase push strategy");
+    }
     if fanout {
         let workspace = if let Some(project) = cfg.get("CC_PROJECT").filter(|_| !isolated) {
             // The lead is also the checkout owner. start_session already holds
@@ -13757,7 +13794,24 @@ pub(crate) async fn start_session(
         // Without this the leftover registration survives every cleanup, and
         // since the creation below is now fatal rather than silently falling
         // back, one leaked lock would wedge every later start for that name.
-        let _ = reclaim_worktree(&work_dir, &wt_path).await;
+        //
+        // BUT KEEP A VALID ONE (2026-09-29, workspace isolation). This used to
+        // reclaim unconditionally, so every restart of a CC_WORKTREE worker
+        // force-removed its worktree and deleted whatever it had not committed.
+        // A worktree that is still registered and answers rev-parse is the
+        // worker's workspace, not debris: reuse it as-is. Only a broken or
+        // half-materialised one is reclaimed.
+        let keep_existing = wt_dir.join(".git").exists()
+            && worktree_is_registered(&work_dir, &wt_path).await
+            && run_cmd("git", &["-C", &wt_path, "rev-parse", "--git-dir"], OP_TIMEOUT)
+                .await
+                .is_some_and(|o| o.status.success());
+        if keep_existing {
+            tracing::info!(session = name, worktree = %wt_path, measured = true, n_considered = 1,
+                verdict = "worktree_kept", "kept the worker's existing worktree across restart");
+        } else {
+            let _ = reclaim_worktree(&work_dir, &wt_path).await;
+        }
         if let Some(parent) = wt_dir.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
@@ -13811,7 +13865,7 @@ pub(crate) async fn start_session(
             (!b.is_empty() && b != "none" && b != "HEAD").then_some(b)
         };
         let mut added = None;
-        if let Some(branch) = requested_branch.as_deref() {
+        if let Some(branch) = requested_branch.as_deref().filter(|_| !keep_existing) {
             let ref_name = format!("refs/heads/{branch}");
             let exists = run_cmd(
                 "git",
@@ -14293,6 +14347,7 @@ pub(crate) async fn start_session(
             sh_quote(&f.to_string_lossy())
         ));
     }
+    shell_rc.push_str(&workspace_isolation_exports(name));
     // Profiles often prepend ~/.local/bin again. An isolated server with its
     // own installed CLI must put that CLI first AFTER profile/scope sourcing;
     // otherwise its workers silently call the unrelated main-server binary.
@@ -49878,5 +49933,33 @@ mod stale_draft_tests {
         let tool_result = user(json!([{"type": "tool_result", "content": SENT}]));
         assert!(!draft_matches_delivered_turn(DRAFT, &[tool_result]));
         assert!(!draft_matches_delivered_turn("yes", &[user(json!("yes"))]));
+    }
+}
+
+#[cfg(test)]
+mod workspace_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_isolation_is_off_by_default_and_one_scoped_switch_turns_it_on() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        std::fs::create_dir_all(home.path().join("sessions")).unwrap();
+        std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\n").unwrap();
+        assert!(!workspace_isolation_on("lane"));
+        assert_eq!(workspace_isolation_exports("lane"), "");
+
+        // Global scope reaches the worker; nothing else is needed.
+        std::fs::write(home.path().join("amux.env"), "AMUX_WORKSPACE_ISOLATION=1\n").unwrap();
+        assert!(workspace_isolation_on("lane"));
+        let ex = workspace_isolation_exports("lane");
+        let tmp = home.path().join("tmp").join("lane");
+        assert!(ex.contains(&format!("export TMPDIR={}", sh_quote(&tmp.to_string_lossy()))), "{ex}");
+        assert!(tmp.is_dir(), "the worker's TMPDIR is created");
+        assert!(ex.contains("AMUX_PUSH_STRATEGY=\"${AMUX_PUSH_STRATEGY:-rebase}\""), "{ex}");
+
+        // Worker scope can turn it back off for one lane.
+        std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\nAMUX_WORKSPACE_ISOLATION=0\n").unwrap();
+        assert!(!workspace_isolation_on("lane"));
     }
 }
