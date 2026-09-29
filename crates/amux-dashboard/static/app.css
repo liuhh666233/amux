@@ -7641,6 +7641,12 @@ select.input { height:var(--control-height); }
 .chat-bubble :not(pre) > code { background: rgba(127,127,127,0.14); border-radius: 4px; padding: 1px 4px; font-size: 0.88em; }
 .chat-bubble table { border-collapse: collapse; margin: 6px 0; font-size: 0.85rem; }
 .chat-bubble th, .chat-bubble td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+/* The bubble wraps with overflow-wrap:anywhere, which lets a table cell's
+   minimum width fall to one character: on a phone a table's first column came
+   out one letter wide ("W o r k er", 2026-09-29). Cells break only between
+   words; a table wider than the bubble scrolls sideways in .table-scroll. */
+.chat-bubble th, .chat-bubble td { overflow-wrap: normal; word-break: normal; min-width: 4ch; }
+.chat-bubble .table-scroll { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .chat-bubble th { background: rgba(127,127,127,0.08); }
 .chat-bubble h1, .chat-bubble h2, .chat-bubble h3 { margin: 4px 0 6px; line-height: 1.25; }
 .chat-bubble h1 { font-size: 1.15rem; } .chat-bubble h2 { font-size: 1.05rem; } .chat-bubble h3 { font-size: 0.98rem; }
