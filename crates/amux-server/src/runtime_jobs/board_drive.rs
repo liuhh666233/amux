@@ -5006,11 +5006,12 @@ pub(crate) fn trend_note(t: &crate::runtime_jobs::board_drain::Trend) -> String 
         facts.push(format!("last 24h {} closed against a {}/day average", t.closed_24h, t.closed_7d / 7));
     }
     format!(
-        "\n\n[your board's trend] {}. At this rate your board does not empty. How to cut it \
+        "\n\n[your board's trend] {}.{} How to cut it \
          down is your call. Tools you have: retire duplicates and cards that are not a unit of \
          work with `amux board discard <ID>`, and set AMUX_DISPATCH_BACKLOG_WHEN_IDLE=1 in your \
          scope so backlog is dispatched when todo empties.",
-        facts.join("; ")
+        facts.join("; "),
+        if behind { " At this rate your board does not empty." } else { " Your close rate dropped sharply." }
     )
 }
 
@@ -15678,6 +15679,10 @@ mod tests {
         let n = trend_note(&trend_from(1007, 50, 46, 1696, 1546));
         assert!(n.contains("1696 cards opened and 1546 closed (net +150)") && n.contains("46 closed against a 220/day average"), "{n}");
         assert!(n.contains("your call") && n.contains("amux board discard") && !n.contains('\u{2014}'), "{n}");
+        assert!(n.contains("does not empty"), "{n}");
+        // Live, mvs-infra: gaining overall (88 opened, 134 closed) but only 9 closed in 24h.
+        let m = trend_note(&trend_from(120, 5, 9, 88, 134));
+        assert!(m.contains("close rate dropped") && !m.contains("does not empty"), "{m}");
         assert!(trend_note(&trend_from(60, 10, 30, 70, 210)).is_empty());
         assert!(trend_note(&trend_from(30, 2, 2, 25, 10)).is_empty(), "net +15 is under the 20 floor");
         assert!(trend_note(&crate::runtime_jobs::board_drain::Trend::unmeasured()).is_empty());

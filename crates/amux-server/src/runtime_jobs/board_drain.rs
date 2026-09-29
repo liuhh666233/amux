@@ -146,8 +146,9 @@ pub fn warn_losing_lanes(conn: &Connection, now: i64) {
             verdict = if t.slowdown { "lane_close_rate_dropped" } else { "lane_falling_behind" },
             opened_7d = t.opened_7d, closed_7d = t.closed_7d, net_7d = t.net_7d,
             closed_24h = t.closed_24h, avg_closed_per_day = t.closed_7d / 7,
-            "board drain: {lane} is losing ground ({} opened vs {} closed in 7d; {} closed in the last 24h)",
-            t.opened_7d, t.closed_7d, t.closed_24h
+            "board drain: {lane} {} ({} opened vs {} closed in 7d; {} closed in the last 24h against {}/day)",
+            if behind { "is falling behind" } else { "closed far fewer cards than usual in the last 24h" },
+            t.opened_7d, t.closed_7d, t.closed_24h, t.closed_7d / 7
         );
     }
 }
