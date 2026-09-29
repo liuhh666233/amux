@@ -355,9 +355,28 @@ fn candidates(
     Ok((
         rows.into_iter()
             .filter(|(c, _)| {
-                c.session == session
-                    || text.contains(&c.id)
+                // A same-session candidate used to qualify unconditionally,
+                // regardless of topic (AF-963). `stale_terminal_project_candidate`
+                // above only ever fires for a `project:`-scoped session (it needs
+                // `current_contract_refs`, populated only from a project policy),
+                // so for an ordinary board_decompose worker every one of its own
+                // past DONE/verified cards stayed a candidate for EVERY future
+                // request forever. Reproduced live: mixpeek-homepage-claude's
+                // Sep-26 homepage work (hero CTAs, templates reorder, demo video,
+                // file-type row, RTSP stills — MHC-947/948/967) got re-proposed as
+                // fresh children three times in two days under two unrelated
+                // epics (an AEO citation probe, a changelog-authoring pass), each
+                // time blocking the new epic's depends_on until cleaned up by hand.
+                //
+                // Same-session still matters without a topic match — it is how a
+                // still-OPEN duplicate gets caught — so this only narrows the
+                // unconditional case to non-terminal candidates; a terminal one
+                // still qualifies via the token-overlap arm below when it is
+                // actually relevant (the "existing completed outcome, verify
+                // instead of redo" path this function's own doc comment names).
+                text.contains(&c.id)
                     || !words(&format!("{} {}", c.title, c.description)).is_disjoint(&tokens)
+                    || (c.session == session && !bs::is_terminal_status(&c.status))
             })
             .take(limit)
             .map(|(mut c, _)| {
@@ -2460,6 +2479,50 @@ mod tests {
         assert!(
             explicit.iter().any(|row| row.id == "OLD"),
             "explicit task IDs remain reviewable/reopenable"
+        );
+    }
+
+    /// AF-963, reproduced live on mixpeek-homepage-claude: an ordinary
+    /// (non-project) session's own past DONE cards used to qualify as
+    /// decomposition candidates for EVERY future request on that session,
+    /// topic or not — `stale_terminal_project_candidate` only ever fires for
+    /// a `project:`-scoped session, so nothing protected a plain worker. Two
+    /// unrelated new epics (an AEO citation probe, a changelog-authoring
+    /// pass) both got the same three-week-old homepage task re-proposed as a
+    /// fresh child, three times in two days.
+    #[test]
+    fn session_candidates_hide_terminal_unrelated_cards_but_keep_open_or_matching_ones() {
+        let c = crate::db::migrate::test_memdb();
+        c.execute(
+            "INSERT INTO issues(id,title,desc,status,type,project_group,session,owner_type,created,updated,acceptance_criteria) VALUES
+             ('OLDDONE','Update hero CTAs and add file-type search section','Homepage hero CTA refactor',
+              'done','code',NULL,'mixpeek-homepage-claude','agent',1,1,'[]'),
+             ('OPENSAME','Fix a typo in the pricing page footer','Unrelated open task, same session',
+              'todo','code',NULL,'mixpeek-homepage-claude','agent',1,1,'[]'),
+             ('DONEMATCH','AEO citation probe: prior weekly run','citation rate scorecard aeo probe',
+              'done','doc',NULL,'mixpeek-homepage-claude','agent',1,1,'[]')",
+            [],
+        )
+        .unwrap();
+        let (rows, _) = candidates(
+            &c,
+            "mixpeek-homepage-claude",
+            "AEO citation probe (weekly cadence): run the scorecard and flag regressions",
+            24,
+        )
+        .unwrap();
+        assert!(
+            !rows.iter().any(|row| row.id == "OLDDONE"),
+            "a DONE, topically unrelated same-session card must not keep qualifying forever: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.id == "OPENSAME"),
+            "a still-open same-session card stays a candidate regardless of topic: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.id == "DONEMATCH"),
+            "a DONE card that actually shares vocabulary with the request still qualifies \
+             (the 'verify instead of redo' path this function exists for): {rows:?}"
         );
     }
 

@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2257,
+  "n_considered": 2317,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -1592,6 +1592,72 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_niAct": {
+      "kind": "command._niAct",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niApproveAllRun": {
+      "kind": "command._niApproveAllRun",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niAutoSet": {
+      "kind": "command._niAutoSet",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niAutoSweep": {
+      "kind": "command._niAutoSweep",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niCard": {
+      "kind": "command._niCard",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niChip": {
+      "kind": "command._niChip",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niEmail": {
+      "kind": "command._niEmail",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niLog": {
+      "kind": "command._niLog",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niOpenTarget": {
+      "kind": "command._niOpenTarget",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niSend": {
+      "kind": "command._niSend",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niSnooze": {
+      "kind": "command._niSnooze",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_notifFireNative": {
       "kind": "command._notifFireNative",
       "feedback_required": true,
@@ -2584,6 +2650,12 @@
     },
     "_scheduleSyncRetry": {
       "kind": "command._scheduleSyncRetry",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_scopeBpSave": {
+      "kind": "command._scopeBpSave",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
@@ -3586,12 +3658,6 @@
     },
     "openFilePreview": {
       "kind": "command.openFilePreview",
-      "feedback_required": true,
-      "target": "control-or-request",
-      "queue_policy": "transport-declared"
-    },
-    "openFirstNeedsInput": {
-      "kind": "command.openFirstNeedsInput",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

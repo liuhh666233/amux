@@ -1524,12 +1524,20 @@ fn workspace_invites_and_members_are_assigned_through_scoped_teams() {
     for needle in [
         "function openTeamEditor",
         "fetch('/api/org/teams')",
-        "JSON.stringify({email, team_id})",
-        "JSON.stringify({team_id})",
+        "JSON.stringify({email, team_id, grant_host_access: hostAck()})",
+        "JSON.stringify({team_id, grant_host_access: memberAck()})",
+        "grant_host_access:teamAck()",
         "_workspaceTeamScope",
     ] {
         assert!(app.contains(needle), "workspace team UI lost `{needle}`");
     }
+    // AMUX-5334: Global is host-level access, so the invite never preselects
+    // the Global "Everyone" team and the dialogs say what Global grants.
+    assert!(
+        !app.contains("_workspaceTeamOptions('team_global')"),
+        "the invite dialog preselects the Global team again (host-level access by default)"
+    );
+    assert!(app.contains("_HOST_ACCESS_TEXT") && app.contains("function _wireHostAccess"));
     for needle in [
         "Workspace access",
         "settings-teams-list",
@@ -2221,4 +2229,46 @@ fn no_python_style_unicode_escapes_in_client_js() {
             .collect();
         assert!(bad.is_empty(), "Python-style \\U escapes render as literal text in JS:\n{}", bad.join("\n"));
     }
+}
+
+/// Every function an inline handler in index.html calls must be defined by a
+/// script the page loads. On 2026-09-28 a merge (8418e2fc) resolved an app.js
+/// conflict by taking an older file, and the Needs input pill's
+/// `onclick="...openNeedsInput()"` pointed at a function that no longer
+/// existed: Safari showed "Can't find variable: openNeedsInput" and the
+/// triage sheet never opened. spa-lint's no-undef covers app.js, not the
+/// handlers written into index.html, so nothing caught it.
+#[test]
+fn every_inline_handler_in_index_html_calls_a_defined_function() {
+    let html = asset("index.html");
+    let defined_in = [asset("app.js"), asset("state/kernel.js")].join("\n");
+    let attr = regex::Regex::new(r#"\son[a-z]+="([^"]*)""#).unwrap();
+    let call = regex::Regex::new(r"(^|[^.\w$])([A-Za-z_$][\w$]*)\s*\(").unwrap();
+    // Language keywords and browser globals an inline handler may call.
+    let builtin = [
+        "if", "else", "for", "while", "switch", "return", "typeof", "function", "new", "try", "catch", "void",
+        "alert", "confirm", "prompt", "setTimeout", "clearTimeout", "fetch",
+        "encodeURIComponent", "decodeURIComponent", "parseInt", "parseFloat",
+        "Number", "String", "Boolean", "Array", "Object", "Promise", "open",
+    ];
+    let mut missing: Vec<String> = Vec::new();
+    for a in attr.captures_iter(&html) {
+        for c in call.captures_iter(&a[1]) {
+            let name = &c[2];
+            if builtin.contains(&name) {
+                continue;
+            }
+            let defined = defined_in.contains(&format!("function {name}("))
+                || defined_in.contains(&format!("function {name} ("))
+                || defined_in.contains(&format!("{name} = "))
+                || defined_in.contains(&format!("window.{name}="));
+            if !defined && !missing.iter().any(|m| m == name) {
+                missing.push(name.to_string());
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "index.html inline handlers call functions no loaded script defines: {missing:?}"
+    );
 }

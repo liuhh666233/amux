@@ -4847,7 +4847,7 @@ function _needsYouRenderPanel() {
 })();
 
 function _fireSessionNotif(name, title, body) {
-  let icon = '\U0001f535';
+  let icon = '\u{1f535}';
   if (title.includes('needs input')) icon = '⚠️';
   else if (title.includes('stopped')) icon = '⏹';
   else if (title.includes('started')) icon = '▶️';
@@ -4857,12 +4857,12 @@ function _fireSessionNotif(name, title, body) {
 
 const _ALERT_LABELS = {
   scheduler:      (a) => ({ icon: '⏰', title: 'Scheduler ran', body: a.message.replace(/^Ran schedule: /, '') + (a.session ? ' \xb7 ' + a.session : '') }),
-  auto_compact:   (a) => ({ icon: '\U0001f4e6', title: 'Context compacted', body: a.session }),
-  auto_restart:   (a) => ({ icon: '\U0001f504', title: 'Agent restarted', body: a.session + ' — ' + a.message }),
-  thinking_reset: (a) => ({ icon: '\U0001f504', title: 'Thinking reset', body: a.session }),
+  auto_compact:   (a) => ({ icon: '\u{1f4e6}', title: 'Context compacted', body: a.session }),
+  auto_restart:   (a) => ({ icon: '\u{1f504}', title: 'Agent restarted', body: a.session + ' — ' + a.message }),
+  thinking_reset: (a) => ({ icon: '\u{1f504}', title: 'Thinking reset', body: a.session }),
   auto_continue:  (a) => ({ icon: '▶️', title: 'Agent continued', body: a.session }),
-  steering_delivered: (a) => ({ icon: '\U0001f4e8', title: 'Steering delivered', body: a.session }),
-  task_pickup:      (a) => ({ icon: '\U0001f4cb', title: 'Task assigned', body: a.session + (a.message ? ' — ' + a.message : '') }),
+  steering_delivered: (a) => ({ icon: '\u{1f4e8}', title: 'Steering delivered', body: a.session }),
+  task_pickup:      (a) => ({ icon: '\u{1f4cb}', title: 'Task assigned', body: a.session + (a.message ? ' — ' + a.message : '') }),
 };
 
 function _fireAmuxAlert(a) {
@@ -5200,25 +5200,690 @@ function _needsInputBadge(s) {
 function _needsInputSessions() {
   return sessions.filter(s => s.running && s.status === 'waiting' && s.waiting_reason === 'owner');
 }
-// Header chip, same pattern as updateRateLimitPill: a count, tap jumps to the
-// first worker that needs input.
+// Header chip, same pattern as updateRateLimitPill. Since AMUX-5286 the count
+// is the triage queue (cards, email approvals and blocked workers, minus
+// snoozed), and tapping it opens the one-at-a-time triage sheet.
 function updateNeedsInputPill() {
   const pill = document.getElementById('needs-input-pill');
   const txt = document.getElementById('needs-input-pill-text');
   if (!pill || !txt) return;
-  const list = _needsInputSessions();
+  const list = _niItems(false);
   const n = list.length;
+  try { if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {}); } catch (_) {}
+  if (_niOpen) _niRenderCounter();
   if (!n) { pill.classList.remove('show'); return; }
   txt.textContent = n + (n === 1 ? ' needs input' : ' need input');
   document.getElementById('needs-input-pill-count').textContent = n;
-  pill.setAttribute('aria-label', n + (n === 1 ? ' worker needs' : ' workers need') + ' your input. Open ' + list[0].name);
-  pill.title = list.map(s => s.name + ((s.owner_block || {}).card ? ' (' + s.owner_block.card + ')' : '')).join(', ') + ' (tap to jump)';
+  pill.setAttribute('aria-label', n + (n === 1 ? ' item needs' : ' items need') + ' your input. Open the triage queue');
+  pill.title = list.slice(0, 8).map(i => (i.worker || 'owner') + (i.card ? ' (' + i.card + ')' : i.kind === 'email' ? ' (email)' : '')).join(', ')
+    + (n > 8 ? ', +' + (n - 8) + ' more' : '') + ' (tap to triage)';
   pill.classList.add('show');
 }
-function openFirstNeedsInput() {
-  const s = _needsInputSessions()[0];
-  if (s) openPeek(s.name);
+function openFirstNeedsInput() { openNeedsInput(); }
+
+// ═══════ NEEDS INPUT TRIAGE (AMUX-5286) ═══════
+// Ethan, 2026-09-27, pointing at the orange "17" pill: "this should open a
+// modal where i can go thru one by one quickly. the entire point of amux is to
+// set this shit up to be set and forget and then very quickly or automatically
+// plow thru blockers".
+//
+// The queue is GET /api/needs-input (needsyou + decision cards, pending email
+// approvals, server-side snoozes), merged with the workers the session list
+// already reports as blocked on the owner (`owner_block`), deduped by card.
+// Every action goes through the existing write path (board PATCH, owner send,
+// email approve/reject, standing approvals), reads the card back, and reports
+// to /api/needs-input/log so a sweep sees verdict=triage_action.
+let _niQueue = null;          // server items, null until the first fetch
+let _niServerSnoozed = new Set();
+let _niIdx = 0;
+let _niOpen = false;
+let _niBusy = false;
+const _niHandled = new Map(); // key -> expiry ms: acted on here, hidden until the next fetch confirms
+let _niPanel = '';            // '', 'reply', 'always'
+
+async function _niFetch() {
+  try {
+    const r = await fetch(API + '/api/needs-input', { headers: _authHeaders() });
+    if (!r.ok) return false;
+    const d = await r.json();
+    _niQueue = Array.isArray(d.items) ? d.items : [];
+    _niServerSnoozed = new Set((d.snoozed || []).map(s => s.key));
+    const now = Date.now();
+    for (const [k, exp] of _niHandled) if (exp < now) _niHandled.delete(k);
+    updateNeedsInputPill();
+    if (_niOpen) _niRender();
+    return true;
+  } catch (_) { return false; }
 }
+function _niBoot() { _niFetch(); setInterval(() => { if (!document.hidden) _niFetch(); }, 60_000); }
+if (document.body) setTimeout(_niBoot, 0);
+else document.addEventListener('DOMContentLoaded', _niBoot);
+
+// The merged, ordered queue. Before the first fetch it degrades to exactly the
+// AMUX-5277 behaviour: the workers blocked on the owner.
+// "99 need input" (Ethan, 2026-09-27 14:39: "this is unacceptable"): 63 of the
+// 99 were older than 14 days or belonged to workers that are not running. The
+// count and the default queue are what can move NOW; the rest stays one tap
+// away behind "Show older", never gone.
+let _niShowOlder = false;
+let _niOlderCount = 0;
+function _niItems(includeOlder) {
+  const items = (_niQueue || []).map(i => Object.assign({}, i));
+  const byCard = new Map(items.filter(i => i.card).map(i => [i.card, i]));
+  const now = Date.now() / 1000;
+  for (const s of _needsInputSessions()) {
+    const b = s.owner_block || {};
+    const hit = b.card && byCard.get(b.card);
+    if (hit) { hit.worker = hit.worker || s.name; hit.blocked_worker = s.name; if (!hit.question && b.ask) hit.question = b.ask; continue; }
+    const key = b.card ? 'card:' + b.card : 'worker:' + s.name;
+    if (_niServerSnoozed.has(key)) continue;
+    // Not in the server queue: a goal-loop stamp on a card that is not
+    // needsyou, or a lane with no card. No ask type to rank on, so rank 1.
+    items.push({ key, kind: b.card ? 'card' : 'worker', card: b.card || '', worker: s.name,
+      status: 'waiting', question: b.ask || s.waiting_label || 'Waiting on you', unblocks: '',
+      context: (s.preview_lines || []).slice(-6).join('\n') || s.preview || '', rank: 1,
+      since: b.since || now, chips: [], standing_category: 'decision', category: 'other', blocked_worker: s.name });
+    if (b.card) byCard.set(b.card, items[items.length - 1]);
+  }
+  // WHAT CAN MOVE NOW COMES FIRST (Ethan, 2026-09-27: "optimized for auto
+  // pushing"; the live queue opened on a 27-day-old ask from a STOPPED lane,
+  // 1 of 99). Tier: a worker blocked right now on this card, then any running
+  // worker's ask, then a stopped worker's recent ask, then anything older than
+  // 14 days. Within a tier: money/outbound/prod first, then NEWEST first.
+  const running = new Set((typeof sessions !== 'undefined' ? sessions : []).filter(x => x.running).map(x => x.name));
+  const staleAt = t0 => (Date.now() / 1000) - (t0 > 1e12 ? t0 / 1000 : t0) > 14 * 86400;
+  const tier = i => i.blocked_worker ? 0 : staleAt(i.since || 0) ? 3 : running.has(i.worker) ? 1 : 2;
+  for (const i of items) i.stale = tier(i) === 3;
+  const t = Date.now();
+  const all = items.filter(i => !((_niHandled.get(i.key) || 0) > t))
+    .sort((a, b) => (tier(a) - tier(b)) || (a.rank - b.rank) || ((b.since || 0) - (a.since || 0)) || String(a.key).localeCompare(String(b.key)));
+  // THE BAR (Ethan, 2026-09-27 14:42: "the bar for needs input just needs to
+  // be much higher, the goal of amux is to make everything set and forget").
+  // Only what a worker cannot do without him: spend, outbound to outside
+  // people, production data, or a credential/access only he holds. Design
+  // questions, "should I", judgment calls: the worker decides on its own
+  // recommendation; they stay one tap away under "Show more".
+  const high = i => i.kind === 'email'
+    || ['money', 'outbound', 'prod_data'].includes(i.category)
+    || ['credential', 'access'].includes(i.ask_type);
+  const actionable = i => high(i) && (tier(i) <= 1 || (i.kind === 'email' && tier(i) !== 3));
+  const now_ = all.filter(actionable);
+  _niOlderCount = all.length - now_.length;
+  return includeOlder ? now_.concat(all.filter(i => !actionable(i))) : now_;
+}
+function _niToggleOlder() { _niShowOlder = !_niShowOlder; _niIdx = 0; _niPanel = ''; _niRender(); }
+
+async function openNeedsInput() {
+  if (_niOpen) return;
+  _niOpen = true; _niIdx = 0; _niPanel = '';
+  let ov = document.getElementById('ni-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'ni-overlay';
+    ov.className = 'modal-overlay active ni-overlay';
+    ov.innerHTML = '<section class="modal ni-modal" role="dialog" aria-modal="true" aria-labelledby="ni-title">'
+      + '<header class="modal-header"><div class="ni-head"><h3 id="ni-title">Needs input</h3><span id="ni-counter" class="ni-counter" aria-live="polite"></span><button type="button" id="ni-older-toggle" class="ni-older-toggle" hidden onclick="_niToggleOlder()"></button><button type="button" id="ni-approve-all" class="ni-approve-all" hidden onclick="_niApproveAllArm()"></button><button type="button" id="ni-auto-btn" class="ni-auto-btn" aria-pressed="false" onclick="_niAutoToggle()">Auto</button></div>'
+      + '<div class="ni-nav"><button class="btn ni-prev" aria-label="Previous" onclick="_niStep(-1)">&#8249;</button>'
+      + '<button class="btn ni-next" aria-label="Next" onclick="_niStep(1)">&#8250;</button>'
+      + '<button class="modal-close ni-close" aria-label="Close triage" onclick="closeNeedsInput()">&times;</button></div></header>'
+      + '<div class="modal-body ni-body" id="ni-body"></div>'
+      + '<footer class="modal-footer ni-footer" id="ni-footer"></footer></section>';
+    ov.onclick = e => { if (e.target === ov) closeNeedsInput(); };
+    const body = ov.querySelector('#ni-body');
+    let sx = 0, sy = 0, st = 0;
+    body.addEventListener('touchstart', e => { const p = e.touches[0]; sx = p.clientX; sy = p.clientY; st = Date.now(); }, { passive: true });
+    body.addEventListener('touchend', e => {
+      if (e.target.closest && e.target.closest('textarea,input,select')) return;
+      const p = e.changedTouches[0]; const dx = p.clientX - sx, dy = p.clientY - sy;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5 && Date.now() - st < 800) _niStep(dx < 0 ? 1 : -1);
+    }, { passive: true });
+    document.body.appendChild(ov);
+  }
+  ov.classList.add('active');
+  document.body.classList.add('ni-open');
+  _niRender();
+  ov.querySelector('.ni-close').focus();
+  _niFetch();
+}
+function closeNeedsInput() {
+  _niOpen = false;
+  const ov = document.getElementById('ni-overlay');
+  if (ov) ov.remove();
+  document.body.classList.remove('ni-open');
+  document.getElementById('needs-input-pill')?.focus();
+}
+// Capture phase at the document: a tapped footer button is re-rendered away,
+// which drops focus to <body>, so an overlay-scoped listener would go deaf to
+// j/k exactly when the owner is plowing through the queue.
+document.addEventListener('keydown', e => { if (_niOpen) _niKey(e); }, true);
+function _niKey(e) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const typing = e.target.closest && e.target.closest('textarea,input,select');
+  if (e.key === 'Escape') {
+    e.preventDefault(); e.stopPropagation();
+    if (typing && _niPanel) { _niPanel = ''; _niRender(); } else closeNeedsInput();
+    return;
+  }
+  // Stopping propagation here (capture phase) would also stop the event
+  // reaching the textarea, so typing is left completely alone.
+  if (typing) return;
+  const acts = { j: () => _niStep(1), ArrowRight: () => _niStep(1), ArrowDown: () => _niStep(1),
+    k: () => _niStep(-1), ArrowLeft: () => _niStep(-1), ArrowUp: () => _niStep(-1),
+    r: () => _niShowPanel('reply') };
+  // No single-key approve: a stray keystroke must never release spend or mail.
+  const f = acts[e.key];
+  if (!f) return;
+  e.preventDefault(); e.stopPropagation();
+  f();
+}
+function _niStep(d) {
+  const n = _niItems(_niShowOlder).length;
+  if (!n) return;
+  _niIdx = (_niIdx + d + n) % n;
+  _niPanel = '';
+  _niRender();
+}
+function _niCurrent() {
+  const items = _niItems(_niShowOlder);
+  if (_niIdx >= items.length) _niIdx = Math.max(0, items.length - 1);
+  return { item: items[_niIdx], n: items.length };
+}
+function _niRenderCounter() {
+  const el = document.getElementById('ni-counter');
+  if (!el) return;
+  const { n } = _niCurrent();
+  el.textContent = n ? (_niIdx + 1) + ' of ' + n : '';
+  const all = document.getElementById('ni-approve-all');
+  if (all) {
+    const k = _niApprovable().length;
+    all.hidden = !k || _niBusy || _niAutoView;
+    all.textContent = 'Approve all (' + k + ')';
+  }
+  const ab = document.getElementById('ni-auto-btn');
+  if (ab) {
+    const on = !!(_niAuto && _niAuto.resolved && _niAuto.resolved.enabled.value);
+    ab.textContent = _niAutoView ? 'Back to queue' : ('Auto: ' + (_niAuto ? (on ? 'on' : 'off') : '…'));
+    ab.classList.toggle('on', on && !_niAutoView);
+    ab.setAttribute('aria-pressed', String(_niAutoView));
+  }
+  const tog = document.getElementById('ni-older-toggle');
+  if (tog) {
+    tog.hidden = !_niOlderCount || _niAutoView;
+    tog.textContent = _niShowOlder ? 'Hide the rest' : 'Show ' + _niOlderCount + ' more';
+  }
+}
+function _niCatLabel(c) {
+  return { money: 'Money', outbound: 'Outbound', prod_data: 'Prod data', credential: 'Credential' }[c] || '';
+}
+function _niRender() {
+  const body = document.getElementById('ni-body');
+  const foot = document.getElementById('ni-footer');
+  if (!body || !foot) return;
+  // Never repaint under a half-typed reply: the 60s refresh would eat it.
+  const ta = document.getElementById('ni-reply');
+  if (ta && document.activeElement === ta && ta.value) { _niRenderCounter(); return; }
+  if (_niAutoView) {
+    _niRenderCounter();
+    body.innerHTML = '<div class="ni-auto" data-ni-auto-scope="global">' + (_niAuto ? _niAutoHtml(_niAuto, 'global', '') : 'Loading…') + '</div>';
+    foot.innerHTML = '<button class="btn primary ni-wide" onclick="_niAutoToggle()">Back to queue</button>';
+    return;
+  }
+  const { item: it, n } = _niCurrent();
+  _niRenderCounter();
+  if (!it) {
+    body.innerHTML = '<div class="ni-empty" role="status"><div class="ni-empty-mark" aria-hidden="true">&#10003;</div><p>Nothing needs you.</p>'
+      + (_niOlderCount && !_niShowOlder ? '<button class="btn ni-wide" onclick="_niToggleOlder()">Show ' + _niOlderCount + ' more (decisions workers can make, stale, or stopped)</button>' : '') + '</div>';
+    foot.innerHTML = '<button class="btn primary ni-wide" onclick="closeNeedsInput()">Close</button>';
+    return;
+  }
+  const s = it.worker ? sessions.find(x => x.name === it.worker) : null;
+  const st = s ? (s.running ? (s.status === 'waiting' && s.waiting_reason === 'owner' ? 'waiting on you' : (s.status || 'running')) : 'stopped') : (it.worker ? 'not in fleet' : '');
+  const cat = _niCatLabel(it.category);
+  // Re-asks of this card from other lanes are folded into it server-side.
+  const also = (it.also_asked_by || []).join(', ');
+  const ref = it.kind === 'email' ? 'Email approval' : (it.card || 'No card') + (also ? ' (also ' + also + ')' : '');
+  body.innerHTML = '<div class="ni-meta">'
+    + (it.worker ? '<span class="ni-worker">' + esc(it.worker) + '</span>' : '')
+    + (st ? '<span class="ni-status">' + esc(st) + '</span>' : '')
+    + '<span class="ni-card">' + esc(ref) + '</span>'
+    + (cat ? '<span class="ni-cat ni-cat-' + esc(it.category) + '">' + esc(cat) + '</span>' : '')
+    + (it.since ? '<span class="ni-age">' + esc(timeAgo(Math.floor(it.since))) + '</span>' : '')
+    + '</div>'
+    + '<p class="ni-question" id="ni-question">' + esc(it.question || it.title || '') + '</p>'
+    + (it.unblocks ? '<div class="ni-unblocks"><span class="ni-label">Unblocks</span> ' + esc(it.unblocks) + '</div>' : '')
+    + (it.email ? '<div class="ni-email"><div><span class="ni-label">To</span> ' + esc(it.email.to || '') + (it.email.cc ? ' <span class="ni-label">cc</span> ' + esc(it.email.cc) : '') + '</div>'
+        + '<div><span class="ni-label">Subject</span> ' + esc(it.email.subject || '') + '</div></div>' : '')
+    + (it.context ? '<details class="ni-context" open><summary>Context</summary><pre>' + esc(it.context) + '</pre></details>' : '')
+    + _niPanelHtml(it);
+  const hasTarget = !!(it.worker || it.kind === 'email' || it.card);
+  if (_niAllArmed) { foot.innerHTML = _niApproveAllConfirmHtml(); return; }
+  foot.innerHTML = '<div class="ni-actions">'
+    + '<button class="btn primary ni-approve" onclick="_niAct(\'approve\')"' + (hasTarget ? '' : ' disabled')
+      + (_niOwnerMustAct(it) ? ' title="You provide this; the worker is told to verify it and continue"' : '') + '>'
+      + (it.kind === 'email' ? 'Send' : _niOwnerMustAct(it) ? 'I\'ve done it' : 'Approve') + '</button>'
+    + '<button class="btn danger ni-decline" onclick="_niAct(\'decline\')"' + (hasTarget ? '' : ' disabled') + '>Decline</button>'
+    + '<button class="btn ni-reply-btn" onclick="_niShowPanel(\'reply\')"' + (it.kind === 'email' || !it.worker ? ' disabled title="Nobody to reply to"' : '') + '>Reply</button>'
+    + '</div><div class="ni-actions ni-secondary">'
+    // Email approvals are gated per message by email_approval.rs, which does not
+    // read standing approvals, so a rule saved from one would be a promise
+    // nothing keeps.
+    + '<button class="btn ni-always" onclick="_niShowPanel(\'always\')"' + (it.worker && it.kind !== 'email' ? '' : ' disabled title="Email sends are approved one at a time"') + '>Approve &amp; always</button>'
+    + '<button class="btn ni-snooze1" onclick="_niSnooze(60)">Snooze 1h</button>'
+    + '<button class="btn ni-snooze2" onclick="_niSnooze(\'tomorrow\')">Tomorrow</button>'
+    + '<button class="btn ni-open" onclick="_niOpenTarget()">Open</button>'
+    + '</div>';
+  foot.querySelectorAll('button').forEach(b => { if (_niBusy) b.disabled = true; });
+}
+function _niPanelHtml(it) {
+  if (_niPanel === 'reply') {
+    return '<div class="ni-panel ni-reply-panel">'
+      + ((it.chips || []).length ? '<div class="ni-chips">' + it.chips.map((c, i) => '<button class="btn ni-chip" onclick="_niChip(' + i + ')">' + esc(c.label) + '</button>').join('') + '</div>' : '')
+      + '<textarea id="ni-reply" class="input ni-reply" rows="3" placeholder="Your answer. Dictation works here." autocomplete="off"></textarea>'
+      + '<div class="ni-actions"><button class="btn primary ni-send" onclick="_niAct(\'reply\')">Send reply</button><button class="btn" onclick="_niShowPanel(\'\')">Cancel</button></div></div>';
+  }
+  if (_niPanel === 'always') {
+    const cats = ['budget', 'customer_outbound', 'prod_data', 'credential', 'access', 'decision'];
+    const q = String(it.question || '').replace(/\s+/g, ' ').trim();
+    const sentence = it.worker + ' may proceed without asking when: ' + (q.length > 160 ? q.slice(0, 160) + '…' : q);
+    return '<div class="ni-panel ni-always-panel"><label class="ni-label" for="ni-always-text">Standing approval for ' + esc(it.worker) + '</label>'
+      + '<textarea id="ni-always-text" class="input" rows="3">' + esc(sentence) + '</textarea>'
+      + '<select id="ni-always-cat" class="input" aria-label="Category">' + cats.map(c => '<option' + (c === it.standing_category ? ' selected' : '') + '>' + c + '</option>').join('') + '</select>'
+      + '<div class="ni-actions"><button class="btn primary ni-always-go" onclick="_niAct(\'approve_always\')">Approve and save rule</button><button class="btn" onclick="_niShowPanel(\'\')">Cancel</button></div></div>';
+  }
+  return '';
+}
+function _niShowPanel(p) {
+  const { item } = _niCurrent();
+  if (!item) return;
+  if (p === 'reply' && (item.kind === 'email' || !item.worker)) return;
+  _niPanel = _niPanel === p ? '' : p;
+  _niRender();
+  const el = document.getElementById(p === 'reply' ? 'ni-reply' : 'ni-always-text');
+  if (el) { el.focus(); el.scrollIntoView({ block: 'nearest' }); }
+}
+function _niChip(i) {
+  const { item } = _niCurrent();
+  const c = item && (item.chips || [])[i];
+  const ta = document.getElementById('ni-reply');
+  if (c && ta) { ta.value = c.text; _niAct('reply'); }
+}
+function _niClip(s, n) { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s; }
+function _niHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }
+async function _niJson(r) { return r.json().catch(() => ({})); }
+function _niErr(d, r) {
+  return [d.error || d.message || ('HTTP ' + r.status), d.why, d.how].filter(Boolean).join(' · ');
+}
+
+// Owner message to the worker. The msg_id is derived from the item, action and
+// text, so a double tap or a retry is deduped by the server (send_dedup).
+async function _niSend(worker, text, key, action) {
+  const msg_id = 'triage-' + _niHash(key + '|' + action + '|' + text);
+  const r = await fetch(API + '/api/sessions/' + encodeURIComponent(worker) + '/send', {
+    method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ text, record_history: true, msg_id }),
+    signal: AbortSignal.timeout(90000),
+  });
+  const d = await _niJson(r);
+  if (r.ok && d.ok !== false) return { ok: true, deduped: !!d.deduped, queued: _isLocallyQueued(r) };
+  return { ok: false, error: _niErr(d, r) };
+}
+
+// Record the decision on the card and move it out of needsyou, then READ IT
+// BACK: a 2xx is not proof the board stored what we asked for.
+async function _niCard(card, note, marker, unblock) {
+  const url = API + '/api/board/' + encodeURIComponent(card);
+  const g = await fetch(url, { headers: _authHeaders() });
+  if (!g.ok) return { ok: false, error: 'could not read ' + card + ': HTTP ' + g.status };
+  const before = await _niJson(g);
+  if (before.archived) return { ok: false, error: card + ' is archived; restore it first' };
+  const already = String(before.desc || '').includes(marker);
+  const patch = {};
+  if (!already) patch.desc_append = note + ' ' + marker;
+  const moving = unblock && before.status === 'needsyou';
+  if (moving) { patch.status = 'todo'; patch.authorized_by = 'owner (needs-input triage)'; }
+  if (!Object.keys(patch).length) return { ok: true, already: true, status: before.status };
+  // _skipOutbox: this PATCH is read back and any refusal is shown on the spot,
+  // so it must not also linger in the outbox as a blocked change to review.
+  let r = await fetch(url, { method: 'PATCH', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(patch), _skipOutbox: true });
+  let d = await _niJson(r);
+  // A FULL todo QUEUE IS NOT A REFUSAL OF THE ANSWER (2026-09-27: Approve all
+  // reported "5 refused" when every approval message had been delivered and
+  // only mvs-infra's 20/20 and amux's 78/20 todo queues turned the card away,
+  // so the answered cards kept flagging their workers). Retry into backlog:
+  // the worker already has the answer.
+  if (!r.ok && moving && d && d.code === 'todo_wip_limit_reached') {
+    patch.status = 'backlog';
+    r = await fetch(url, { method: 'PATCH', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(patch), _skipOutbox: true });
+    d = await _niJson(r);
+  }
+  if (!r.ok) return { ok: false, error: card + ': ' + _niErr(d, r) };
+  const back = await fetch(url, { headers: _authHeaders() }).then(_niJson).catch(() => ({}));
+  if (moving && back.status === 'needsyou') return { ok: false, error: card + ' is still needsyou after the PATCH (board kept it)' };
+  if (!already && back.desc !== undefined && !String(back.desc).includes(marker)) return { ok: false, error: card + ': the note did not land on the card' };
+  return { ok: true, status: back.status || patch.status || before.status };
+}
+
+async function _niEmail(it, action, reason) {
+  const path = action === 'decline' ? '/api/email/reject/' : '/api/email/approve/';
+  const r = await fetch(API + path + encodeURIComponent(it.approval_id), {
+    method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json', 'X-Amux-Approver': 'dashboard (needs-input triage)' }),
+    body: action === 'decline' ? JSON.stringify({ reason: reason || 'declined in needs-input triage' }) : undefined,
+  });
+  const d = await _niJson(r);
+  if (r.ok) return { ok: true, msg: action === 'decline' ? 'Discarded, nothing was sent' : 'Approved, sent for ' + (d.sent_for_session || it.worker || 'worker') };
+  return { ok: false, error: _niErr(d, r), gone: r.status === 404 };
+}
+
+function _niLog(action, it, outcome, detail) {
+  fetch(API + '/api/needs-input/log', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ action, key: it.key, card: it.card || it.approval_id || '', worker: it.worker || '', outcome, detail: String(detail || '').slice(0, 300) }) }).catch(() => {});
+}
+function _niDone(it) {
+  _niHandled.set(it.key, Date.now() + 5 * 60_000);
+  _niPanel = '';
+  updateNeedsInputPill();
+  _niRender();   // same index now shows the next item: auto-advance
+}
+
+async function _niAct(action) {
+  if (_niBusy) return;
+  const { item: it } = _niCurrent();
+  if (!it) return;
+  const replyEl = document.getElementById('ni-reply');
+  const typed = replyEl ? replyEl.value.trim() : '';
+  if (action === 'reply' && !typed) { showToast('Type a reply first'); replyEl && replyEl.focus(); return; }
+  let rule = null;
+  if (action === 'approve_always') {
+    rule = { allowed: ((document.getElementById('ni-always-text') || {}).value || '').trim(),
+      category: (document.getElementById('ni-always-cat') || {}).value || it.standing_category || 'decision' };
+    if (!rule.allowed) { showToast('Write the rule sentence first'); return; }
+  }
+  _niBusy = true; _niRender();
+  const q = _niClip(it.question || it.title, 300);
+  const ref = it.card ? ' (' + it.card + ')' : '';
+  const stamp = new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const done = [], errs = [];
+  try {
+    if (it.kind === 'email') {
+      const e = await _niEmail(it, action === 'decline' ? 'decline' : 'approve', typed);
+      if (e.ok) done.push(e.msg); else errs.push(e.error);
+      if (!e.ok && e.gone) _niHandled.set(it.key, Date.now() + 5 * 60_000);
+    } else {
+      let text;
+      if (action === 'approve' && _niOwnerMustAct(it)) text = 'Done' + ref + ': ' + q + ' I have provided it. Verify it works, then continue.' + (typed ? ' ' + typed : '');
+      else if (action === 'approve' || action === 'approve_always') text = 'Approved' + ref + ': ' + q + '. Proceed.' + (typed ? ' ' + typed : '');
+      else if (action === 'decline') text = 'Declined' + ref + ': ' + q + '. Do not proceed' + (typed ? '; ' + typed : '') + '.';
+      else text = 'Re' + ref + ': ' + typed;
+      if (it.worker) {
+        const s = await _niSend(it.worker, text, it.key, action);
+        // A plain send returns on durable local acceptance (the outbox owns
+        // delivery and its failures), so say "queued", never "delivered".
+        if (s.ok) done.push(s.deduped ? 'already sent to ' + it.worker : (s.queued ? 'message queued for ' + it.worker : 'sent to ' + it.worker));
+        else errs.push('send to ' + it.worker + ': ' + s.error);
+      }
+      if (it.card) {
+        const verb = action === 'approve' && _niOwnerMustAct(it) ? 'Provided'
+          : { approve: 'Approved', approve_always: 'Approved (standing rule)', decline: 'Declined', reply: 'Owner reply' }[action];
+        const note = '[' + stamp + '] ' + verb + ' by owner in needs-input triage' + (action === 'reply' || (action === 'decline' && typed) ? ': ' + typed : '.');
+        const marker = '#triage-' + _niHash(it.key + '|' + action + '|' + typed);
+        const c = await _niCard(it.card, note, marker, true);
+        if (c.ok) done.push(c.already ? it.card + ' already recorded' : it.card + ' ' + (c.status === 'todo' ? 'moved to todo' : c.status === 'backlog' ? 'moved to backlog (todo full)' : 'noted'));
+        else errs.push(c.error);
+      }
+    }
+    if (rule && !errs.length) {
+      const r = await fetch(API + '/api/approvals/standing', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ title: 'Triage' + ref + ': ' + _niClip(it.question, 80), allowed: rule.allowed, category: rule.category,
+          scope: 'worker:' + it.worker, source: 'needs-input triage' + ref, granted_by: 'owner' }) });
+      const d = await _niJson(r);
+      if (r.ok) done.push('standing rule ' + (d.id || 'saved'));
+      else errs.push('standing approval: ' + _niErr(d, r));
+    }
+  } catch (e) {
+    errs.push(String(e && e.message || e));
+  } finally {
+    _niBusy = false;
+  }
+  const outcome = errs.length ? (done.length ? 'partial' : 'refused') : 'ok';
+  _niLog(action, it, outcome, (done.concat(errs)).join('; '));
+  if (errs.length) {
+    // Stay on the item: a retry is safe (the send is deduped by msg_id and the
+    // card note by its marker), and advancing would bury the refusal.
+    showToast((done.length ? done.join(', ') + '. ' : '') + 'Refused: ' + errs.join(' | '));
+    _niRender();
+    return;
+  }
+  const label = { approve: 'Approved', approve_always: 'Approved and saved rule', decline: 'Declined', reply: 'Replied' }[action];
+  showToast(label + ': ' + done.join(', '));
+  _niDone(it);
+}
+
+// APPROVE ALL (Ethan, 2026-09-27 15:07: "maybe add an approve all button").
+// Two taps: the first shows exactly what it will do (how many outbound sends,
+// how much spend), the second runs it. It walks the queue through _niAct, the
+// same path as one tap on Approve, so every send is deduped, every card note
+// carries its marker, and a refusal leaves that item in the queue. Asks that
+// only the owner can DO (mint a key, sign in, grant access) are skipped:
+// "approved" cannot complete them.
+let _niAllArmed = false;
+// An ask the OWNER has to carry out (mint a key, sign in, grant access), as
+// opposed to one asking permission. "Approved. Proceed." cannot complete it:
+// MM-84 was approved in triage on 2026-09-27 and the worker could only answer
+// that it still needs the key. Its primary action is "I've done it".
+function _niOwnerMustAct(i) {
+  return !!i && i.kind !== 'email' && ['credential', 'access'].includes(i.ask_type);
+}
+function _niApprovable() {
+  return _niItems(_niShowOlder).filter(i => !!(i.worker || i.kind === 'email' || i.card)
+    && !_niOwnerMustAct(i));
+}
+function _niApproveAllArm() {
+  if (_niBusy) return;
+  _niAllArmed = true; _niRender();
+}
+function _niApproveAllCancel() { _niAllArmed = false; _niRender(); }
+function _niApproveAllConfirmHtml() {
+  const items = _niApprovable();
+  const by = c => items.filter(i => (i.kind === 'email' ? 'outbound' : i.category) === c).length;
+  const out = by('outbound'), money = by('money'), prod = by('prod_data');
+  const other = items.length - out - money - prod;
+  const skipped = _niItems(_niShowOlder).length - items.length;
+  const parts = [out && out + ' outbound (emails and posts go out)', money && money + ' spend', prod && prod + ' production data', other && other + ' other']
+    .filter(Boolean).join(', ');
+  return '<div class="ni-confirm-all" role="alertdialog" aria-labelledby="ni-confirm-all-t">'
+    + '<p id="ni-confirm-all-t"><strong>Approve ' + items.length + ' item' + (items.length === 1 ? '' : 's') + '?</strong> ' + esc(parts) + '.'
+    + (skipped ? ' Leaves ' + skipped + ' that need you to act yourself (keys, sign-ins, grants).' : '') + '</p>'
+    + '<div class="ni-actions"><button class="btn primary ni-approve" onclick="_niApproveAllRun()">Approve all ' + items.length + '</button>'
+    + '<button class="btn" onclick="_niApproveAllCancel()">Cancel</button></div></div>';
+}
+async function _niApproveAllRun() {
+  if (_niBusy) return;
+  _niAllArmed = false;
+  const skip = new Set();
+  let ok = 0, refused = 0;
+  for (let guard = 0; guard < 200; guard++) {
+    const list = _niItems(_niShowOlder);
+    const next = list.findIndex(i => !skip.has(i.key) && _niApprovable().some(a => a.key === i.key));
+    if (next < 0) break;
+    const key = list[next].key;
+    _niIdx = next;
+    await _niAct('approve');
+    if (_niItems(_niShowOlder).some(i => i.key === key)) { skip.add(key); refused++; } else ok++;
+  }
+  _niLog('approve_all', { key: 'batch', card: '', worker: '' }, refused ? (ok ? 'partial' : 'refused') : 'ok', ok + ' approved, ' + refused + ' refused');
+  showToast('Approved ' + ok + (refused ? '; ' + refused + ' refused and left in the queue' : ''));
+  _niIdx = 0; _niRender();
+}
+
+async function _niSnooze(minutes) {
+  if (_niBusy) return;
+  const { item: it } = _niCurrent();
+  if (!it) return;
+  let until;
+  if (minutes === 'tomorrow') { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); until = d.getTime() / 1000; }
+  else until = Date.now() / 1000 + minutes * 60;
+  _niBusy = true;
+  try {
+    const r = await fetch(API + '/api/needs-input/snooze', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ key: it.key, until }) });
+    const d = await _niJson(r);
+    _niBusy = false;
+    if (!r.ok) { showToast('Snooze refused: ' + _niErr(d, r)); _niRender(); return; }
+    _niServerSnoozed.add(it.key);
+    if (_niQueue) _niQueue = _niQueue.filter(x => x.key !== it.key);
+    showToast('Snoozed ' + (it.card || it.worker || 'item') + ' until ' + new Date(until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }));
+    _niDone(it);
+  } catch (e) { _niBusy = false; showToast('Snooze failed: ' + e); _niRender(); }
+}
+
+function _niOpenTarget() {
+  const { item: it } = _niCurrent();
+  if (!it) return;
+  _niLog('open', it, 'ok', '');
+  closeNeedsInput();
+  if (it.kind === 'email') { document.getElementById('email-approvals-banner')?.scrollIntoView({ behavior: 'smooth' }); return; }
+  if (it.worker && sessions.some(s => s.name === it.worker)) openPeek(it.worker);
+  else if (it.card) openBoardDetail(it.card);
+}
+// AUTO-APPROVE (AMUX-5301). Ethan, 2026-09-27: "there should also be some
+// kind of mechanism to automatically approve all needs input as they come in",
+// then "approve all should be a configuration on the worker level". The server
+// job does the approving (GET/PUT /api/needs-input/auto); this is the switch
+// board for it: the fleet default in the triage sheet header and Settings, and
+// the per-worker override in each worker's Configurations tab. Each value shows
+// which layer supplies it (worker, group, global or default).
+let _niAuto = null;          // GET /api/needs-input/auto (fleet default view)
+let _niAutoView = false;
+const _NI_AUTO_ROWS = [
+  { f: 'enabled', label: 'Auto-approve new asks', note: 'Approves asks that arrive from now on, exactly as tapping Approve would: the worker is told "Approved. Proceed." and the card leaves your queue. Asks already waiting stay for you.' },
+  { f: 'send_back', label: 'Send key and sign-in asks back', note: 'A worker asking you to mint a key, rotate a secret, grant access or sign in is told to do it itself through amux browser, CDP into your Chrome, or CUA. It can ask you again once, saying which step failed. Spend, outbound and production data still wait for you.' },
+  { f: 'other', label: 'Judgment asks', note: 'Which option to take, whether to go ahead, design calls.' },
+  { f: 'money', label: 'Spend', note: 'Only asks that name a dollar figure at or under the cap below. No figure, or over the cap, waits for you.' },
+  { f: 'money_cap_usd', label: 'Spend cap per ask (USD)', note: 'The most one auto-approved ask may name, monthly prices included.' },
+  { f: 'prod_data', label: 'Production data', note: 'Deleting, overwriting or migrating customer or production data.' },
+  { f: 'outbound', label: 'Outbound sends', note: 'Real emails, posts and messages to people outside the company go out without you seeing them. A send cannot be undone.', warn: true },
+];
+async function _niAutoFetch(worker) {
+  try {
+    const r = await fetch(API + '/api/needs-input/auto' + (worker ? '?worker=' + encodeURIComponent(worker) : ''), { headers: _authHeaders() });
+    const d = await r.json();
+    return r.ok ? d : null;
+  } catch (_) { return null; }
+}
+function _niAutoSrc(src, level) {
+  const here = src === level || (level === 'global' && src === 'global');
+  const txt = { default: 'default', global: 'set for all workers', worker: 'set on this worker', 'server.env': 'server.env kill switch' }[src]
+    || (String(src).startsWith('group:') ? 'from group ' + String(src).slice(6) : src);
+  return '<span class="ni-auto-src' + (here ? ' here' : '') + '">' + esc(txt) + '</span>';
+}
+// One policy editor. level 'global' writes amux.env; 'worker' writes that
+// worker's own layer and offers Inherit where the worker overrides.
+function _niAutoHtml(d, level, name) {
+  const r = d.resolved || {};
+  const q = escJs(level), n = escJs(name || '');
+  const rows = _NI_AUTO_ROWS.map(row => {
+    const cur = r[row.f] || {};
+    const own = level === 'worker' ? cur.source === 'worker' : cur.source === 'global';
+    let ctl;
+    if (row.f === 'money_cap_usd') {
+      ctl = '<input type="number" inputmode="decimal" min="0" step="1" aria-label="Spend cap in dollars" value="' + esc(String(cur.value ?? 50)) + '"'
+        + ' onchange="_niAutoSet(\'' + q + '\',\'' + n + '\',\'money_cap_usd\',Number(this.value))">';
+    } else {
+      const on = !!cur.value;
+      ctl = '<button class="btn' + (on ? ' primary' : '') + '" role="switch" aria-checked="' + on + '" aria-label="' + esc(row.label) + '"'
+        + ' onclick="_niAutoSet(\'' + q + '\',\'' + n + '\',\'' + row.f + '\',' + (!on) + ')">' + (on ? 'On' : 'Off') + '</button>';
+    }
+    if (own && (level === 'worker' || cur.source === 'global')) {
+      ctl += '<button class="btn" title="Remove this override and use the ' + (level === 'worker' ? 'group or fleet' : 'built-in') + ' value"'
+        + ' onclick="_niAutoSet(\'' + q + '\',\'' + n + '\',\'' + row.f + '\',null)">' + (level === 'worker' ? 'Inherit' : 'Reset') + '</button>';
+    }
+    return '<div class="ni-auto-row" data-ni-auto-field="' + row.f + '"><div class="ni-auto-copy"><div class="ni-auto-label">' + esc(row.label)
+      + _niAutoSrc(cur.source || 'default', level) + '</div><div class="ni-auto-note' + (row.warn ? ' warn' : '') + '">' + esc(row.note) + '</div></div>'
+      + '<div class="ni-auto-ctl">' + ctl + '</div></div>';
+  }).join('');
+  const waiting = d.already_waiting_unapproved || 0;
+  const sweep = level === 'global' && waiting && r.enabled && r.enabled.value
+    ? '<button class="btn ni-wide ni-auto-sweep" onclick="_niAutoSweep(this)">Also apply to the ' + waiting + ' already waiting</button>' : '';
+  return '<p class="ni-auto-summary" role="status">' + esc(d.summary || '') + '</p>'
+    + (level === 'worker' ? '<div class="ni-auto-note">This worker’s values override its groups and the fleet default. Inherit returns a value to the layer above.</div>' : '')
+    + rows
+    + '<div class="ni-auto-note">Never automatic: keys, sign-ins and access grants. Only you can do those. Stop it everywhere with AMUX_NEEDS_INPUT_AUTO=0 in server.env.</div>'
+    + sweep
+    + (level === 'global' ? _niAutoListHtml(d) : '');
+}
+function _niAutoListHtml(d) {
+  const rec = d.recent || [];
+  const label = { approved: 'Approved', sent_back: 'Sent back to the worker', refused: 'Refused, still waiting for you', pending: 'In flight' };
+  return '<div class="ni-auto-h">Auto-approved, last 7 days (' + rec.length + ')</div>'
+    + (rec.length ? '<div class="ni-auto-list">' + rec.map(e => '<div class="ni-auto-item">'
+        + '<span class="ni-auto-out ' + esc(e.outcome) + '">' + esc(label[e.outcome] || e.outcome) + '</span> · '
+        + esc(e.card || e.key) + (e.worker ? ' · ' + esc(e.worker) : '') + ' · ' + esc(e.category) + ' · ' + _notifTimeAgo(e.at * 1000)
+        + '<div>' + esc(e.question || '') + '</div>'
+        + (e.detail ? '<div class="ni-auto-note">' + esc(e.detail) + '</div>' : '') + '</div>').join('') + '</div>'
+      : '<div class="ni-auto-note">Nothing auto-approved yet.</div>');
+}
+async function _niAutoToggle() {
+  _niAutoView = !_niAutoView;
+  _niAllArmed = false; _niPanel = '';
+  _niRender();
+  if (_niAutoView) { _niAuto = await _niAutoFetch('') || _niAuto; _niRender(); }
+}
+async function _niAutoSet(level, name, field, value) {
+  if (field === 'money_cap_usd' && value !== null && !(value >= 0 && value <= 100000)) { showToast('Cap must be 0 to 100000 dollars'); return; }
+  if (field === 'outbound' && value === true
+      && !confirm('Outbound on: real emails and posts to outside people will go out without you seeing them first. Sends cannot be undone. Turn it on?')) return;
+  try {
+    // _skipOutbox: a policy change must land or say it did not; a queued
+    // write would show the old policy as saved.
+    const r = await fetch(API + '/api/needs-input/auto', { method: 'PUT', _skipOutbox: true, headers: _authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ level, name: name || undefined, values: { [field]: value } }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.ok === false) { showToast('Not saved: ' + (d.error || ('HTTP ' + r.status))); return; }
+    showToast(d.summary || 'Saved');
+    if (level === 'worker') { _niAutoWorkerRender(name, d); _niAuto = await _niAutoFetch('') || _niAuto; }
+    else _niAuto = d;
+  } catch (e) { showToast('Not saved: ' + e); }
+  _niAutoPaintAll();
+}
+async function _niAutoSweep(btn) {
+  const n = (_niAuto && _niAuto.already_waiting_unapproved) || 0;
+  if (!confirm('Apply the current policy to the ' + n + ' asks already waiting? Each is approved only if its worker’s policy covers it.')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(API + '/api/needs-input/auto/sweep', { method: 'POST', _skipOutbox: true, headers: _authHeaders({ 'Content-Type': 'application/json' }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showToast('Refused: ' + (d.error || r.status)); }
+    else {
+      const rep = d.report || {};
+      showToast('Approved ' + (rep.approved || []).length + ((rep.refused || []).length ? '; ' + rep.refused.length + ' refused and left for you' : ''));
+    }
+  } catch (e) { showToast('Refused: ' + e); }
+  _niAuto = await _niAutoFetch('') || _niAuto;
+  _niFetch();
+  _niAutoPaintAll();
+}
+// Repaint every fleet-level editor on screen (triage sheet and Settings).
+function _niAutoPaintAll() {
+  if (_niOpen) _niRender();
+  const el = document.getElementById('ni-auto-settings');
+  if (el && _niAuto) el.innerHTML = '<div class="ni-auto" data-ni-auto-scope="global">' + _niAutoHtml(_niAuto, 'global', '') + '</div>';
+}
+async function _niAutoSettingsLoad() {
+  const el = document.getElementById('ni-auto-settings');
+  if (!el) return;
+  const d = await _niAutoFetch('');
+  if (!d) { el.textContent = 'Could not load the auto-approve policy'; return; }
+  _niAuto = d;
+  _niAutoPaintAll();
+}
+function _niAutoWorkerRender(name, d) {
+  document.querySelectorAll('[data-ni-auto-worker]').forEach(el => {
+    if (el.getAttribute('data-ni-auto-worker') !== name) return;
+    el.innerHTML = d ? '<div class="ni-auto">' + _niAutoHtml(d, 'worker', name) + '</div>' : 'Could not load the auto-approve policy';
+  });
+}
+async function _niAutoWorkerLoad(name) { _niAutoWorkerRender(name, await _niAutoFetch(name)); }
+setTimeout(() => { _niAutoFetch('').then(d => { if (d) { _niAuto = d; if (_niOpen) _niRenderCounter(); } }); }, 0);
+
 // Tooltip for a waiting badge: the stuck composer text, when that is the reason.
 function _waitingTitle(s) {
   if (s.waiting_reason === 'project_execution' && (s.project_waiting_reason || s.state_detail)) {
@@ -6496,8 +7161,12 @@ function render() {
           const llmTask = s.task_override || '';
           const hasBoard = !!displayTaskBoardId;
           const showLlm = llmTask && llmTask !== displayTaskName;
-          const doingCard = hasBoard ? _cardDoingItem(s.name) : null;
-          const cardDesc = doingCard && doingCard.desc ? doingCard.desc.split('\n')[0].slice(0, 120) : '';
+          // The card this line already names (displayTaskBoardId, from the
+          // server's runtime link), found by id. Board rows arrive slimmed, so
+          // `desc` is absent and `desc_head` is the field that carries the line;
+          // reading `.desc` rendered nothing for every worker.
+          const shownCard = hasBoard ? (boardItems || []).find(c => c.id === displayTaskBoardId) : null;
+          const cardDesc = shownCard ? String(shownCard.desc || shownCard.desc_head || '').split('\n')[0].slice(0, 120) : '';
           return (showLlm
             ? `<div class="card-task-name" style="font-weight:600;">${esc(llmTask)}</div>`
             : '')
@@ -10263,10 +10932,12 @@ function _workerPrimaryConfigurationsHTML(name) {
     _workerConfigurationRow('pinned', 'Pinned in worker list', s.pinned ? 'Pinned' : 'Not pinned', 'Presentation preference; does not change execution priority.', sw(!!s.pinned, 'togglePin', 'Toggle pinned state')),
     _workerConfigurationRow('advanced_environment', 'Advanced environment', 'backend: ' + (s.backend || 'tmux') + (s.creator ? ' · creator: ' + s.creator : ''), 'Edit arbitrary worker-level keys. Startup-only values apply on restart.', '<button class="btn" style="font-size:0.68rem;min-height:32px;padding:4px 8px;" onclick="event.stopPropagation();_scopeEditOpen(\'worker\',\'' + q + '\',\'env\')">Edit environment</button>'),
   ];
+  setTimeout(() => _niAutoWorkerLoad(name), 0);
   return '<div class="worker-config-intro">Every durable worker setting, grouped by what it changes. Lifecycle commands remain in the worker menu.</div>'
     + '<div class="worker-config-grid">'
     + _workerConfigurationSection('identity', 'Identity & organization', 'How this worker is named, described, and grouped.', identity)
     + _workerConfigurationSection('runtime', 'Runtime & model', 'Where it runs and which model/tooling it uses.', runtime)
+    + _workerConfigurationSection('needs-input-auto', 'Automatic approval', 'Which of this worker\u2019s asks are approved for you as they arrive.', ['<div data-ni-auto-worker="' + esc(name) + '">Loading\u2026</div>'])
     + _workerConfigurationSection('permissions', 'Permissions & communication', s.isolated ? 'Native CLI tool permissions and isolation.' : 'Standing authority for tools, peers, and external email.', permissions)
     + _workerConfigurationSection('advanced', 'Display & advanced', 'Presentation and lower-level environment controls.', advanced)
     + '</div>';
@@ -10523,12 +11194,135 @@ async function _scopeLoad(scope, targetId) {
             })()
           : '')
       + '</div>';
+    // Browser profile access (AMUX-5307): its own section with its own read,
+    // because the generic env tile masks values and these two never are secret.
+    const _bpId = 'scope-bp-' + lvl + '-' + String(w || 'global').replace(/[^A-Za-z0-9_-]/g, '_');
+    h += '<div class="scope-bp" id="' + _bpId + '" data-level="' + esc(lvl) + '" data-name="' + esc(w || '') + '"></div>';
     const dst = document.getElementById(targetId || 'peek-scope-body') || el;
     dst.innerHTML = h;
+    _scopeBpLoad(lvl, w || '', _bpId);
   } catch (e) {
     const dst = document.getElementById(targetId || 'peek-scope-body') || el;
     dst.textContent = 'Could not load configurations: ' + e.message;
   }
+}
+
+// ── Browser profile access editor (AMUX-5307) ────────────────────────────
+// Ethan: "we should have scopes for accessing certain profiles per
+// group/worker/global but by default all workers should be able to discover
+// all profiles." Discovery is untouched; this edits the two scoped keys that
+// decide USE. Reads GET /api/browser/profile-access (raw lists at this level +
+// the effective verdict per profile) and writes through PUT /api/scope env, so
+// authorization is the Scope tab's own (a worker cannot widen group/global).
+const _bpState = {};
+function _bpSplit(v) { return String(v || '').split(/[\s,]+/).map(x => x.trim()).filter(Boolean); }
+
+async function _scopeBpLoad(lvl, name, id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = '<div class="scope-bp-head">Browser profiles</div><div class="scope-bp-note">Loading\u2026</div>';
+  try {
+    const q = '?level=' + encodeURIComponent(lvl) + (lvl === 'global' ? '' : '&name=' + encodeURIComponent(name));
+    const r = await fetch(API + '/api/browser/profile-access' + q, { headers: _authHeaders() });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    _bpState[id] = {
+      lvl, name, data: d, mode: 'allow',
+      allow: _bpSplit(d.set_here && d.set_here.allow),
+      deny: _bpSplit(d.set_here && d.set_here.deny),
+      dirty: false, msg: '',
+    };
+    _scopeBpRender(id);
+  } catch (e) {
+    el.innerHTML = '<div class="scope-bp-head">Browser profiles</div><div class="scope-bp-note">Could not load: ' + esc(e.message) + '</div>';
+  }
+}
+
+function _bpGlob(p, n) {
+  const re = new RegExp('^' + String(p).toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+  return re.test(String(n).toLowerCase());
+}
+
+function _scopeBpRender(id) {
+  const st = _bpState[id], el = document.getElementById(id);
+  if (!st || !el) return;
+  const d = st.data, profiles = d.profiles || [];
+  const lvlName = st.lvl === 'global' ? 'global' : st.lvl + ' ' + st.name;
+  const listChips = (kind) => {
+    const arr = st[kind];
+    if (!arr.length) return '<span class="scope-bp-empty">' + (kind === 'allow' ? 'not set here (inherits)' : 'none') + '</span>';
+    return arr.map((p, i) => '<span class="scope-bp-chip ' + kind + '">' + esc(p)
+      + '<button aria-label="Remove ' + esc(p) + '" onclick="event.stopPropagation();_scopeBpRemove(\'' + escJs(id) + '\',\'' + kind + '\',' + i + ')">\u00d7</button></span>').join('');
+  };
+  // A chip per profile, colored by the EFFECTIVE verdict at this level as last
+  // saved; pending edits mark the chip so a reader never mistakes a draft for
+  // the live rule.
+  const pchips = profiles.map(p => {
+    const inA = st.allow.some(x => _bpGlob(x, p.name)), inD = st.deny.some(x => _bpGlob(x, p.name));
+    const cls = p.allowed ? 'ok' : 'no';
+    const rule = p.rule || {};
+    const t = (p.allowed ? 'Allowed' : 'Denied') + ' by ' + rule.key + '=' + rule.value + ' at ' + rule.scope;
+    return '<button class="scope-bp-prof ' + cls + (inD ? ' in-deny' : inA ? ' in-allow' : '') + '" title="' + esc(t)
+      + '" onclick="event.stopPropagation();_scopeBpToggle(\'' + escJs(id) + '\',\'' + escJs(p.name) + '\')">'
+      + esc(p.name) + '</button>';
+  }).join('');
+  el.innerHTML = '<div class="scope-bp-head">Browser profiles <span class="scope-bp-count">'
+    + (d.n_allowed != null ? d.n_allowed : '?') + ' of ' + profiles.length + ' usable at ' + esc(lvlName) + '</span></div>'
+    + '<div class="scope-bp-note">Every worker can list every profile. These rules decide which ones a worker may open: worker › group › global, deny beats allow at the same level, unset everywhere means all.</div>'
+    + '<div class="scope-bp-row"><span class="scope-bp-lbl">Allow</span><span class="scope-bp-list">' + listChips('allow') + '</span></div>'
+    + '<div class="scope-bp-row"><span class="scope-bp-lbl">Deny</span><span class="scope-bp-list">' + listChips('deny') + '</span></div>'
+    + '<div class="scope-bp-add">'
+    + '<span class="scope-bp-seg" role="group" aria-label="Add to">'
+    + '<button class="' + (st.mode === 'allow' ? 'sel' : '') + '" onclick="event.stopPropagation();_scopeBpMode(\'' + escJs(id) + '\',\'allow\')">Add to Allow</button>'
+    + '<button class="' + (st.mode === 'deny' ? 'sel' : '') + '" onclick="event.stopPropagation();_scopeBpMode(\'' + escJs(id) + '\',\'deny\')">Add to Deny</button></span>'
+    + '<input class="scope-bp-input" placeholder="name or glob, e.g. persona-*" onkeydown="if(event.key===\'Enter\'){event.preventDefault();_scopeBpAddInput(\'' + escJs(id) + '\',this)}">'
+    + '<button class="btn" onclick="event.stopPropagation();_scopeBpAddInput(\'' + escJs(id) + '\',this.previousElementSibling)">Add</button>'
+    + '</div>'
+    + '<div class="scope-bp-profs">' + pchips + '</div>'
+    + '<div class="scope-bp-foot"><span class="scope-bp-msg">' + esc(st.msg || (st.dirty ? 'Unsaved changes' : 'Tap a profile to add it to the selected list.')) + '</span>'
+    + '<span><button class="btn" ' + (st.dirty ? '' : 'disabled') + ' onclick="event.stopPropagation();_scopeBpLoad(\'' + escJs(st.lvl) + '\',\'' + escJs(st.name) + '\',\'' + escJs(id) + '\')">Reset</button> '
+    + '<button class="btn primary scope-bp-save" ' + (st.dirty ? '' : 'disabled') + ' onclick="event.stopPropagation();_scopeBpSave(\'' + escJs(id) + '\')">Save</button></span></div>';
+}
+
+function _scopeBpMode(id, mode) { const st = _bpState[id]; if (!st) return; st.mode = mode; _scopeBpRender(id); }
+function _scopeBpRemove(id, kind, i) {
+  const st = _bpState[id]; if (!st) return;
+  st[kind].splice(i, 1); st.dirty = true; st.msg = ''; _scopeBpRender(id);
+}
+function _scopeBpAdd(id, v) {
+  const st = _bpState[id]; if (!st) return;
+  v = String(v || '').trim();
+  if (!v || !/^[A-Za-z0-9._*?-]+$/.test(v)) { st.msg = 'Names and globs only: letters, digits, . _ - * ?'; _scopeBpRender(id); return; }
+  const other = st.mode === 'allow' ? 'deny' : 'allow';
+  st[other] = st[other].filter(x => x !== v);
+  if (!st[st.mode].includes(v)) st[st.mode].push(v);
+  st.dirty = true; st.msg = ''; _scopeBpRender(id);
+}
+function _scopeBpAddInput(id, inp) { if (inp) _scopeBpAdd(id, inp.value); }
+function _scopeBpToggle(id, name) {
+  const st = _bpState[id]; if (!st) return;
+  if (st[st.mode].includes(name)) { st[st.mode] = st[st.mode].filter(x => x !== name); st.dirty = true; st.msg = ''; _scopeBpRender(id); }
+  else _scopeBpAdd(id, name);
+}
+
+async function _scopeBpSave(id) {
+  const st = _bpState[id]; if (!st) return;
+  const keys = (st.data && st.data.keys) || { allow: 'AMUX_BROWSER_PROFILES_ALLOW', deny: 'AMUX_BROWSER_PROFILES_DENY' };
+  const value = {};
+  value[keys.allow] = st.allow.length ? st.allow.join(',') : null;
+  value[keys.deny] = st.deny.length ? st.deny.join(',') : null;
+  st.msg = 'Saving\u2026'; _scopeBpRender(id);
+  try {
+    const r = await fetch(API + '/api/scope', {
+      method: 'PUT',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, _authHeaders()),
+      body: JSON.stringify({ level: st.lvl, name: st.name, capability: 'env', value: value }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { st.msg = d.error || ('save failed (' + r.status + ')'); _scopeBpRender(id); return; }
+    showToast('Browser profile access saved at ' + (st.lvl === 'global' ? 'global' : st.lvl + ' ' + st.name));
+    await _scopeBpLoad(st.lvl, st.name, id);
+  } catch (e) { st.msg = 'Save failed: ' + e.message; _scopeBpRender(id); }
 }
 
 // ── Simple tab config (font / size / standing prompt) ──────────────────────
@@ -11541,7 +12335,8 @@ async function _nudgesLoad() {
 
 function _nudgesRow(label, enabled, level, name) {
   // Use data attributes so onclick strings stay simple and quote-safe.
-  const on = enabled !== false;
+  // Absent is OFF: every board toggle defaults off since 0d2a0757.
+  const on = enabled === true;
   return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0;border-bottom:1px solid var(--border);">'
     + '<span style="color:var(--text);font-size:0.76rem;">' + esc(label) + '</span>'
     + '<button class="btn' + (on ? '' : ' primary') + '" data-nlvl="' + esc(level) + '" data-nname="' + esc(name || '') + '" data-nen="' + (!on) + '" style="font-size:0.7rem;min-height:28px;padding:3px 9px;flex:0 0 auto;" onclick="_nudgesRowClick(this)">'
@@ -11564,7 +12359,7 @@ function _nudgesRender() {
 
   let h = '<div style="font-size:0.7rem;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Board nudges</div>';
 
-  // Global row — null/undefined means key absent = on
+  // Global row: null/undefined means the key is absent, which is off
   h += _nudgesRow('Global (all workers)', s.global, 'global', null);
 
   // Group rows — only groups with an explicit value
@@ -11593,7 +12388,8 @@ function _nudgesRender() {
       + '</div></div>';
   }
 
-  h += '<div style="color:var(--dim);font-size:0.66rem;margin-top:8px;">On = default. Off disables board nudges at that scope (sets CC_STANDING_ORDERS=False).</div>';
+  if (typeof s.effective_on === 'number') h += '<div style="color:var(--text);font-size:0.72rem;margin-top:8px;">Nudged now: <b>' + s.effective_on + '</b> of ' + s.effective_total + ' workers</div>';
+  h += '<div style="color:var(--dim);font-size:0.66rem;margin-top:4px;">Off is the default. On sets CC_STANDING_ORDERS=1 at that scope; a worker is nudged when its auto-continue is also on. Worker beats group beats global.</div>';
   el.innerHTML = h;
 }
 
@@ -12598,19 +13394,15 @@ async function _offlineCapSet(n) {
 async function _offlineTrimToCap() {
   await _peekIndexLoad();
   const names = Object.keys(_peekIndex).sort((a, b) => (_peekIndex[b].time||0) - (_peekIndex[a].time||0));
-  for (const n of names.slice(_offlineCap)) {
-    try { _idb.del('peek_' + n); } catch(e) {}
-    try { _idb.del('chat_' + n); } catch(e) {}
-    try { _idb.del('file_' + n); } catch(e) {}
-    delete _peekIndex[n];
-  }
+  for (const n of names.slice(_offlineCap)) _offlineDropWorker(n);
   _peekIndexSave();
 }
 let _peekIndex = {};                 // name -> {etag, time, bytes}
-let _prefetchRunning = false, _prefetchAbort = false;
+let _prefetchRunning = false, _prefetchAbort = false, _peekIndexLoaded = false;
 
 async function _peekIndexLoad() {
   try { _peekIndex = (await _idb.get('peek_index')) || {}; } catch(e) { _peekIndex = {}; }
+  _peekIndexLoaded = true;
   return _peekIndex;
 }
 function _peekIndexSave() { try { _idb.set('peek_index', _peekIndex); } catch(e) {} }
@@ -12623,12 +13415,76 @@ function _linkIsCheap() {
   return !/(^|-)(2g|slow-2g|3g)$/.test(c.effectiveType || '');
 }
 
+// OFFLINE ADAPTERS: one entry per worker renderer (2026-09-27). Each says
+// where that type's offline copy lives and how to refresh it. Prefetch,
+// eviction and the cap loop over this table, so a new worker type gets
+// offline support by adding an entry, and cannot leak storage by being left
+// out of a hand-written list of key prefixes (there were three such lists).
+// The open-time paint stays with each renderer, which reads its own key.
+//
+// sync(name, prev) fetches and saves one worker and returns
+// {unchanged:true} or {bytes}. Both write the shared _peekIndex entry that
+// the cap and eviction count.
+const _PEEK_CACHE_KEY = name => 'peek_' + name;
+const _CHAT_CACHE_KEY = name => 'chat_' + name;
+const _OFFLINE_ADAPTERS = {
+  terminal: {
+    key: _PEEK_CACHE_KEY,
+    async sync(name, prev) {
+      const h = _authHeaders();
+      if (prev && prev.etag) h['If-None-Match'] = prev.etag;
+      const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name)
+                            + '/peek?lines=' + _PEEK_CACHE_LINES, { headers: h });
+      if (r.status === 304) { _peekIndex[name] = { ...prev, time: Date.now() }; return { unchanged: true }; }
+      if (!r.ok) return null;
+      const d = await r.json();
+      const out = d.output || '';
+      // "What's scrollable, not the full log": `output` alone is just the
+      // current frame (~1KB) — useless for review. The scrollback lives in
+      // `history` (~119KB/session), which IS the full log. So keep the TAIL:
+      // the most recent _PEEK_CACHE_TAIL chars, trimmed at a line boundary
+      // so the top isn't a half-line. The server already sent the whole
+      // thing, so trimming costs nothing in transfer and bounds storage.
+      let hist = d.history || '';
+      if (hist.length > _PEEK_CACHE_TAIL) {
+        hist = hist.slice(-_PEEK_CACHE_TAIL);
+        const nl = hist.indexOf('\n');
+        if (nl > 0 && nl < 2000) hist = hist.slice(nl + 1);
+      }
+      await _idb.set(_PEEK_CACHE_KEY(name), { output: out, history: hist, time: Date.now(), offline: true });
+      const sz = out.length + hist.length;
+      _peekIndex[name] = { etag: r.headers.get('ETag') || '', time: Date.now(), bytes: sz };
+      return { bytes: sz };
+    },
+  },
+  chat: {
+    key: _CHAT_CACHE_KEY,
+    async sync(name, prev) {
+      const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/chat?limit=' + _CHAT_CACHE_MSGS, { headers: _authHeaders() });
+      if (!r.ok) return null;
+      const d = await r.json();
+      const before = prev && prev.bytes;
+      await _chatCacheSave(name, d.messages || []);
+      const now = _peekIndex[name] && _peekIndex[name].bytes;
+      return now === before ? { unchanged: true } : { bytes: now || 0 };
+    },
+  },
+};
+// Keys written by removed code that eviction should still clear.
+const _OFFLINE_LEGACY_KEYS = [name => 'file_' + name];
+// Forget one worker's offline copy of every type. The caller saves the index.
+function _offlineDropWorker(name) {
+  for (const key of [...Object.values(_OFFLINE_ADAPTERS).map(a => a.key), ..._OFFLINE_LEGACY_KEYS]) {
+    try { _idb.del(key(name)); } catch(e) {}
+  }
+  delete _peekIndex[name];
+}
+
 // Priority: what you'd actually want offline, in order — sessions doing work
 // now, then ones you recently looked at, then the rest.
 function _prefetchOrder() {
-  // Terminal workers save their scrollback; chat workers save their
-  // conversation (chat_<name>). Other renderers have nothing to save.
-  const running = (sessions || []).filter(s => s.running && ['terminal', 'chat'].includes(_workerRenderer(s.name)));
+  // Only renderers with an offline adapter have anything to save.
+  const running = (sessions || []).filter(s => s.running && _OFFLINE_ADAPTERS[_workerRenderer(s.name)]);
   const recent = new Set([peekSession, _lastPeekedSession].filter(Boolean));
   const rank = s => (s.status === 'active' || s.status === 'waiting' ? 0 : recent.has(s.name) ? 1 : 2);
   return running.sort((a, b) => rank(a) - rank(b) || (b.last_activity || 0) - (a.last_activity || 0));
@@ -12644,65 +13500,40 @@ async function _offlinePrefetch(manual) {
   await _peekIndexLoad();
   const list = _prefetchOrder();
   let fetched = 0, unchanged = 0, bytes = 0, done = 0;
+  const synced = [];
   const CONC = manual ? 4 : 2;
   const report = () => { if (manual) _offlineSyncStatus(
     `Saving for offline… ${done}/${list.length} (${fetched} new, ${unchanged} unchanged)`); };
   const worker = async () => {
     while (list.length && !_prefetchAbort) {
       const s = list.shift();
-      if (_workerRenderer(s.name) === 'chat') {
-        try {
-          const r = await fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/chat?limit=' + _CHAT_CACHE_MSGS, { headers: _authHeaders() });
-          if (r.ok) {
-            const d = await r.json();
-            const before = _peekIndex[s.name] && _peekIndex[s.name].bytes;
-            await _chatCacheSave(s.name, d.messages || []);
-            const now = _peekIndex[s.name] && _peekIndex[s.name].bytes;
-            if (now === before) unchanged++; else { fetched++; bytes += now || 0; }
-          }
-        } catch (e) { /* skip; a dropped link should not kill the pass */ }
-        done++; report();
-        continue;
-      }
+      const adapter = _OFFLINE_ADAPTERS[_workerRenderer(s.name)];
       try {
-        const prev = _peekIndex[s.name];
-        const h = _authHeaders();
-        if (prev && prev.etag) h['If-None-Match'] = prev.etag;
-        const r = await fetch(API + '/api/sessions/' + encodeURIComponent(s.name)
-                              + '/peek?lines=' + _PEEK_CACHE_LINES, { headers: h });
-        if (r.status === 304) { unchanged++; _peekIndex[s.name] = { ...prev, time: Date.now() }; }
-        else if (r.ok) {
-          const d = await r.json();
-          const out = d.output || '';
-          // "What's scrollable, not the full log": `output` alone is just the
-          // current frame (~1KB) — useless for review. The scrollback lives in
-          // `history` (~119KB/session), which IS the full log. So keep the TAIL:
-          // the most recent _PEEK_CACHE_TAIL chars, trimmed at a line boundary
-          // so the top isn't a half-line. The server already sent the whole
-          // thing, so trimming costs nothing in transfer and bounds storage.
-          let hist = d.history || '';
-          if (hist.length > _PEEK_CACHE_TAIL) {
-            hist = hist.slice(-_PEEK_CACHE_TAIL);
-            const nl = hist.indexOf('\n');
-            if (nl > 0 && nl < 2000) hist = hist.slice(nl + 1);
-          }
-          await _idb.set('peek_' + s.name, { output: out, history: hist, time: Date.now(), offline: true });
-          const sz = out.length + hist.length;
-          _peekIndex[s.name] = { etag: r.headers.get('ETag') || '', time: Date.now(), bytes: sz };
-          fetched++; bytes += sz;
-        }
+        const r = adapter ? await adapter.sync(s.name, _peekIndex[s.name]) : null;
+        if (r) synced.push(s.name);
+        if (r && r.unchanged) unchanged++;
+        else if (r) { fetched++; bytes += r.bytes || 0; }
       } catch(e) { /* skip this one; a dropped link shouldn't kill the pass */ }
       done++; report();
     }
   };
   await Promise.all(Array.from({ length: CONC }, worker));
+  // Every worker that synced must be in the index, or its copy is invisible to
+  // the cap and to eviction. Say so where a sweep looks.
+  const lost = synced.filter(n => !_peekIndex[n]);
+  if (lost.length) {
+    try {
+      fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ kind: 'offline-index-lost', workers: lost.slice(0, 20), n_lost: lost.length,
+          verdict: 'offline_copy_unindexed', measured: true, n_considered: synced.length,
+          ver: (typeof APP_VER !== 'undefined' ? APP_VER : '?') }) }).catch(() => {});
+    } catch (e) {}
+  }
   // Evict stopped/vanished sessions and trim to the cap (oldest first).
   const live = new Set((sessions || []).filter(s => s.running).map(s => s.name));
-  for (const name of Object.keys(_peekIndex)) {
-    if (!live.has(name)) { try { _idb.del('peek_' + name); _idb.del('chat_' + name); } catch(e) {} delete _peekIndex[name]; }
-  }
+  for (const name of Object.keys(_peekIndex)) if (!live.has(name)) _offlineDropWorker(name);
   const names = Object.keys(_peekIndex).sort((a,b) => (_peekIndex[b].time||0) - (_peekIndex[a].time||0));
-  for (const n of names.slice(_offlineCap)) { try { _idb.del('peek_' + n); _idb.del('chat_' + n); } catch(e) {} delete _peekIndex[n]; }
+  for (const n of names.slice(_offlineCap)) _offlineDropWorker(n);
   _peekIndexSave();
   _prefetchRunning = false;
   if (manual) {
@@ -12788,14 +13619,19 @@ async function _chatCacheSave(name, messages) {
   const kept = messages.slice(-_CHAT_CACHE_MSGS);
   const rec = { messages: kept, time: Date.now(), offline: true };
   try {
-    await _idb.set('chat_' + name, rec);
-    await _peekIndexLoad();
+    await _idb.set(_CHAT_CACHE_KEY(name), rec);
+    // Load only if nothing has yet. A RELOAD here replaced the in-memory index
+    // with the stored one mid-prefetch, erasing the entry a terminal sync
+    // running in parallel had just written: that copy was then never counted
+    // against the cap or evicted when its worker stopped (2026-09-27,
+    // e2e/offline-adapters.test.mjs).
+    if (!_peekIndexLoaded) await _peekIndexLoad();
     _peekIndex[name] = { etag: '', time: rec.time, bytes: JSON.stringify(kept).length, kind: 'chat' };
     _peekIndexSave();
   } catch (e) {}
 }
 async function _chatCacheGet(name) {
-  try { return await _idb.get('chat_' + name); } catch (e) { return null; }
+  try { return await _idb.get(_CHAT_CACHE_KEY(name)); } catch (e) { return null; }
 }
 // Paint the saved conversation. `reason` becomes the note above it.
 async function _chatPaintCached(name, reason) {
@@ -13492,7 +14328,7 @@ function openPeek(name, opts) {
   // lets a local live fetch win on WiFi (no stale flash), but on cellular where
   // the fetch is 300ms+ the cached content — with pre-rendered HTML — paints
   // almost immediately instead of showing "Loading latest..." for 150ms+.
-  _idb.get('peek_' + name).then(cached => {
+  _idb.get(_PEEK_CACHE_KEY(name)).then(cached => {
     if (!_peekIdentityCurrent(openIdentity) || !cached) return;
     setTimeout(() => {
       if (!_peekIdentityCurrent(openIdentity)) return;
@@ -14676,7 +15512,28 @@ function _peekHtml(raw) {
 }
 
 const _peekToolCollapsed = {};
-function _peekToggleTool(id) {
+// SELECTABLE HEADERS (Ethan, 2026-09-28: "the accordion expansion thing in
+// peek, make sure i can highlight it not just click"). The header text can be
+// selected like the rest of the terminal. The caret always toggles; on the
+// text, a drag-select or a double/triple click (word or line select) never
+// does, and a single click toggles after a beat so a second click can cancel
+// it instead of collapsing the block under the selection.
+let _ptcClickTimer = 0;
+function _peekToggleTool(id, ev) {
+  const onCaret = !!(ev && ev.target && ev.target.closest && ev.target.closest('.ptc-caret'));
+  if (ev && !onCaret) {
+    clearTimeout(_ptcClickTimer);
+    if (ev.detail > 1) return;
+    if (window.getSelection && String(window.getSelection()) !== '') return;
+    _ptcClickTimer = setTimeout(() => {
+      if (window.getSelection && String(window.getSelection()) !== '') return;
+      _peekToggleToolNow(id);
+    }, 250);
+    return;
+  }
+  _peekToggleToolNow(id);
+}
+function _peekToggleToolNow(id) {
   _peekToolCollapsed[id] = !_peekToolCollapsed[id];
   const el = document.getElementById('ptc-' + id);
   if (!el) return;
@@ -14704,7 +15561,7 @@ function _wrapToolCalls(html) {
     const collapsed = _peekToolCollapsed[id];
     if (hasBody) {
       out.push('<div class="ptc' + (collapsed ? ' collapsed' : '') + '" id="ptc-' + id + '">'
-        + '<div class="ptc-head" onclick="_peekToggleTool(' + id + ')">'
+        + '<div class="ptc-head" onclick="_peekToggleTool(' + id + ', event)">'
         + '<span class="ptc-caret"></span>' + lines[i] + '</div>'
         + '<div class="ptc-body">' + lines.slice(i + 1, end).join('\n') + '</div></div>');
     } else {
@@ -15656,7 +16513,7 @@ async function _refreshPeekFrame(liveOnly, request) {
     // Cache BOTH slices — since the live-split, `output` alone is just the tiny
     // live frame (sometimes ''), which painted an EMPTY black peek from cache
     // (social, 2026-07-16). Never write an entry with no content.
-    if (_peekHistoryRaw || _lastPeekRaw) _idb.set('peek_' + name, { output: _lastPeekRaw, history: _peekHistoryRaw, liveHTML: _lastLiveHTML, histHTML: _peekHistoryHTML, time: Date.now() });
+    if (_peekHistoryRaw || _lastPeekRaw) _idb.set(_PEEK_CACHE_KEY(name), { output: _lastPeekRaw, history: _peekHistoryRaw, liveHTML: _lastLiveHTML, histHTML: _peekHistoryHTML, time: Date.now() });
   } catch(e) {
     if (!_peekIdentityCurrent(identity)) return;
     console.error('peek:', e);
@@ -15668,7 +16525,7 @@ async function _refreshPeekFrame(liveOnly, request) {
     hidePeekLoading();   // fetch failed — stop the "Loading latest…" cue (we fall back to cache / retry below)
     // Offline: load cached peek
     if (!lastPeekHTML || lastPeekHTML.includes('Loading...')) {
-      const cached = await _idb.get('peek_' + name);
+      const cached = await _idb.get(_PEEK_CACHE_KEY(name));
       if (!_peekIdentityCurrent(identity)) return;
       if (!_paintCachedPeek(cached)) {
         // No usable cache and the fetch failed (typically the server mid-restart,
@@ -22188,11 +23045,31 @@ function _renderFileBody(data, mode) {
     return;
   }
   if (data.is_video) {
-    // Close the file overlay and open in the full custom video player (with resume)
-    closeFilePreview();
+    // PLAY IT IN THE FILE VIEWER (Ethan, 2026-09-27: "make sure the links like
+    // videos when opened open a file viewer with the video player so i can see
+    // where it sits in the filesystem"). This used to close the viewer and hand
+    // off to the full-screen player, which drops the header: no file name, no
+    // clickable folder path. The header now stays, the video plays inline with
+    // the same saved position, and the full-screen player is one tap away.
     const rawUrl = API + '/api/file/raw?path=' + encodeURIComponent(data.path);
     const fname = data.path.split('/').pop();
-    _playVideoUrl(rawUrl, fname);
+    body.className = 'file-overlay-body file-video';
+    const size = data.size ? _fmtBytes(data.size) : '';
+    body.innerHTML = '<div class="file-video-wrap">'
+      + '<video class="file-video" controls playsinline preload="metadata">'
+      + '<source src="' + esc(rawUrl) + '" type="' + esc(_vpMimeFromUrl(rawUrl)) + '"></video>'
+      + '<div class="file-video-meta"><span>' + esc(size) + '</span>'
+      + '<button class="btn" onclick="_fileVideoFullscreen()">Full-screen player</button></div></div>';
+    const v = body.querySelector('video');
+    v._vpUrl = rawUrl;
+    const saved = parseFloat(localStorage.getItem(_vpPosKey(rawUrl)));
+    if (saved > 0) v.addEventListener('loadedmetadata', () => { v.currentTime = saved; }, { once: true });
+    v.onpause = () => _vpSavePos(v);
+    v.onseeked = () => _vpSavePos(v);
+    v.onerror = () => {
+      const meta = body.querySelector('.file-video-meta span');
+      if (meta) meta.textContent = 'This browser cannot play this video; use Download.';
+    };
     return;
   }
   if (data.is_audio) {
@@ -22706,6 +23583,16 @@ async function openFilePreview(path, options = {}) {
     }
     document.getElementById('file-body').textContent = 'Failed to load file.';
   }
+}
+
+// The inline video's "Full-screen player" button: the custom player, from
+// the same position, with the viewer left open underneath.
+function _fileVideoFullscreen() {
+  const v = document.querySelector('#file-body video.file-video');
+  if (!v) return;
+  _vpSavePos(v);
+  v.pause();
+  _playVideoUrl(v._vpUrl, (_fileData && _fileData.path || '').split('/').pop());
 }
 
 function closeFilePreview() {
@@ -38466,6 +39353,7 @@ function toggleSettings() {
     loadTaskGuard();
     loadAlertConfig();
     _standingApprovalsLoad();
+    _niAutoSettingsLoad();
     loadUsage();
   }
 }
@@ -39180,6 +40068,27 @@ function _workspaceTeamScope(team) {
   return (team.scope_level === 'group' ? 'Group · ' : 'Worker · ') + (team.scope_name || 'not set');
 }
 
+// GLOBAL SCOPE IS HOST-LEVEL ACCESS (AMUX-5334, private security report
+// 2026-09-19). A Global member can prompt every worker, which runs with this
+// machine's permissions, and read, write and delete files anywhere on it. The
+// server refuses a Global grant without `grant_host_access: true`; these
+// dialogs say what that means and only send it when the box is ticked.
+const _HOST_ACCESS_TEXT = 'Global is host-level access: this person can prompt every worker (they run with this machine\u2019s permissions) and read, write and delete files anywhere on this machine. Grant it only to someone you would give your own login.';
+function _hostAccessBoxHtml() {
+  return `<label id="host-access-wrap" style="display:none;gap:8px;align-items:flex-start;margin-top:12px;padding:10px;border:1px solid var(--red,#f66);border-radius:6px;font-size:0.75rem;line-height:1.4;">`
+    + `<input type="checkbox" id="host-access-ack" style="margin-top:2px;min-width:16px;min-height:16px;"><span>${esc(_HOST_ACCESS_TEXT)} I understand and grant it.</span></label>`;
+}
+function _wireHostAccess(modal, isGlobal, ...controls) {
+  const wrap = modal.querySelector('#host-access-wrap');
+  const update = () => { if (wrap) wrap.style.display = isGlobal() ? 'flex' : 'none'; };
+  controls.filter(Boolean).forEach(c => c.addEventListener('change', update));
+  update();
+  return () => !!modal.querySelector('#host-access-ack')?.checked && isGlobal();
+}
+function _teamIsGlobal(id) {
+  return (_workspaceTeams.find(t => t.id === id) || {}).scope_level === 'global';
+}
+
 function _workspaceTeamOptions(selected) {
   return _workspaceTeams.map(team => `<option value="${esc(team.id)}"${team.id === selected ? ' selected' : ''}>${esc(team.name)} — ${esc(_workspaceTeamScope(team))}</option>`).join('');
 }
@@ -39318,18 +40227,22 @@ async function openTeamInvite() {
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Email (optional)</label>
     <input id="team-invite-email" type="email" placeholder="person@example.com" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;margin-bottom:13px;">
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Team</label>
-    <select id="invite-team-id" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;">${_workspaceTeamOptions('team_global')}</select>
+    <select id="invite-team-id" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;"><option value="" disabled selected>Choose a team</option>${_workspaceTeamOptions('')}</select>
+    ${_hostAccessBoxHtml()}
     <div id="team-scope-error" style="color:var(--red,#f66);font-size:0.75rem;margin-top:10px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;"><button class="btn" data-modal-cancel>Cancel</button><button id="team-scope-submit" class="btn primary">Create invite</button></div>`);
   const submit = modal.querySelector('#team-scope-submit');
+  const teamSel = modal.querySelector('#invite-team-id');
+  const hostAck = _wireHostAccess(modal, () => _teamIsGlobal(teamSel.value), teamSel);
   submit.addEventListener('click', async () => {
     const email = (modal.querySelector('#team-invite-email')?.value || '').trim();
-    const team_id = modal.querySelector('#invite-team-id').value;
+    const team_id = teamSel.value;
+    if (!team_id) { _teamScopeError(modal, 'Choose a team'); return; }
     submit.disabled = true;
     submit.textContent = 'Creating…';
     let res;
     try {
-      res = await fetch('/api/org/invites', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, team_id})});
+      res = await fetch('/api/org/invites', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, team_id, grant_host_access: hostAck()})});
     } catch (e) {
       _teamScopeError(modal, 'Network error');
       submit.disabled = false;
@@ -39361,7 +40274,7 @@ function _workspaceAccessModal(html) {
 function openTeamEditor(teamId) {
   closeSettings();
   const team = _workspaceTeams.find(value => value.id === teamId) || null;
-  const modal = _teamScopeDialog(team ? 'Edit team' : 'Create team', '', team ? team.scope_level : 'global', team ? team.scope_name : '', 'Save team', true);
+  const modal = _teamScopeDialog(team ? 'Edit team' : 'Create team', '', team ? team.scope_level : 'worker', team ? team.scope_name : '', 'Save team', true);
   const heading = modal.querySelector('h3');
   if (heading) heading.insertAdjacentHTML('afterend', `<label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Team name</label><input id="team-name" value="${esc(team ? team.name : '')}" placeholder="e.g. TubeScience" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;margin-bottom:13px;">`);
   if (team) {
@@ -39374,12 +40287,14 @@ function openTeamEditor(teamId) {
       modal.remove(); showToast('Team deleted'); toggleSettings(); loadTeamSection();
     };
   }
+  const levelSel = modal.querySelector('#team-scope-level');
+  const teamAck = _wireHostAccess(modal, () => levelSel.value === 'global', levelSel);
   modal.querySelector('#team-scope-submit').onclick = async () => {
-    const scope_level = modal.querySelector('#team-scope-level').value;
+    const scope_level = levelSel.value;
     const scope_name = scope_level === 'global' ? '' : modal.querySelector('#team-scope-name').value;
     const name = modal.querySelector('#team-name').value.trim();
     const response = await fetch(team ? '/api/org/teams/' + encodeURIComponent(team.id) : '/api/org/teams', {
-      method:team ? 'PATCH' : 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,scope_level,scope_name})
+      method:team ? 'PATCH' : 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,scope_level,scope_name,grant_host_access:teamAck()})
     }).catch(() => null);
     const data = response ? await response.json().catch(() => ({})) : {};
     if (!response || !response.ok) { _teamScopeError(modal, data.error || 'Could not save team'); return; }
@@ -39407,8 +40322,9 @@ function _teamScopeDialog(title, email, level, name, submitLabel, hideEmail) {
     ${hideEmail ? '' : email ? `<p style="color:var(--dim);font-size:0.82rem;margin:0 0 14px;">${esc(email)}</p>` : `<label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Email (optional)</label><input id="team-invite-email" type="email" placeholder="person@example.com" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;margin-bottom:13px;">`}
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Access level</label>
     <select id="team-scope-level" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;">
-      <option value="global">Global — every worker and card</option><option value="group">Group — workers tagged in one group</option><option value="worker">Worker — one worker only</option>
+      <option value="global">Global — host-level: every worker and the host filesystem</option><option value="group">Group — workers tagged in one group</option><option value="worker">Worker — one worker only</option>
     </select>
+    ${_hostAccessBoxHtml()}
     <div id="team-scope-target-wrap" style="margin-top:13px;display:none;"><label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Target</label><select id="team-scope-name" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;"></select></div>
     <div id="team-scope-error" style="color:var(--red,#f66);font-size:0.75rem;margin-top:10px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
@@ -39464,14 +40380,17 @@ async function openMemberScope(id, email, teamId) {
     <p style="color:var(--dim);font-size:0.82rem;margin:0 0 14px;">${esc(email)}</p>
     <label style="display:block;color:var(--dim);font-size:0.72rem;margin-bottom:5px;">Team</label>
     <select id="member-team-id" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:inherit;">${_workspaceTeamOptions(teamId)}</select>
+    ${_hostAccessBoxHtml()}
     <div id="team-scope-error" style="color:var(--red,#f66);font-size:0.75rem;margin-top:10px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;"><button class="btn" data-modal-cancel>Cancel</button><button id="team-scope-submit" class="btn primary">Save team</button></div>`);
   const submit = modal.querySelector('#team-scope-submit');
+  const memberSel = modal.querySelector('#member-team-id');
+  const memberAck = _wireHostAccess(modal, () => _teamIsGlobal(memberSel.value), memberSel);
   submit.addEventListener('click', async () => {
-    const team_id = modal.querySelector('#member-team-id').value;
+    const team_id = memberSel.value;
     submit.disabled = true;
     const response = await fetch('/api/org/members/' + encodeURIComponent(id), {
-      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({team_id})
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({team_id, grant_host_access: memberAck()})
     }).catch(() => null);
     const data = response ? await response.json().catch(() => ({})) : {};
     if (!response || !response.ok) {
@@ -44653,16 +45572,28 @@ async function _bwLoadProfiles() {
       // server's own measurement; an older server omits it, and `!== false`
       // keeps those listings unchanged rather than marking everything missing.
       const missing = p.on_disk === false;
+      // WHO MAY USE IT (AMUX-5307). Every profile stays listed; a scoped one
+      // says so, and the title names the workers and groups it is denied to.
+      const acc = p.access || null;
+      const limited = acc && acc.all_workers === false;
       o.textContent = (missing ? '⚠' : icon) + ' '
                     + (lbl ? lbl + ' (' + p.name + ')' : p.name)
                     + (missing ? ' — no profile directory, starts logged out'
-                               : (doms ? ' — ' + doms : ''));
+                               : (doms ? ' — ' + doms : ''))
+                    + (limited ? ' · ' + acc.workers_allowed + '/' + acc.workers_total + ' workers' : '');
       if (missing) {
         o.title = 'Saved for ' + (doms || 'no recorded domains')
                 + ', but the directory is gone. Starting it creates an empty '
                 + 'profile and you will not be signed in.';
       } else if (doms) {
         o.title = doms;
+      }
+      if (acc) {
+        o.title = (o.title ? o.title + '\n' : '') + (limited
+          ? 'Usable by ' + acc.workers_allowed + ' of ' + acc.workers_total + ' workers. Denied to: '
+            + ((acc.denied_workers || []).join(', ') || 'none')
+            + ((acc.denied_groups || []).length ? '; groups: ' + acc.denied_groups.join(', ') : '')
+          : 'Usable by all workers');
       }
       return o;
     };
