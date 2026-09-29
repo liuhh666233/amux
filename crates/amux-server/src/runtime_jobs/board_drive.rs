@@ -4990,6 +4990,30 @@ fn decline_exit_text(drains: bool) -> &'static str {
     }
 }
 
+/// One paragraph of facts about the lane's rate, or nothing when it is keeping
+/// up. Pure so the thresholds are tested. Names only tools that exist.
+pub(crate) fn trend_note(t: &crate::runtime_jobs::board_drain::Trend) -> String {
+    let behind = t.measured && t.verdict == "falling_behind" && t.net_7d >= 20;
+    let slower = t.measured && t.slowdown;
+    if !behind && !slower {
+        return String::new();
+    }
+    let mut facts = vec![format!(
+        "last 7 days {} cards opened and {} closed (net {:+})",
+        t.opened_7d, t.closed_7d, t.net_7d
+    )];
+    if slower {
+        facts.push(format!("last 24h {} closed against a {}/day average", t.closed_24h, t.closed_7d / 7));
+    }
+    format!(
+        "\n\n[your board's trend] {}. At this rate your board does not empty. How to cut it \
+         down is your call. Tools you have: retire duplicates and cards that are not a unit of \
+         work with `amux board discard <ID>`, and set AMUX_DISPATCH_BACKLOG_WHEN_IDLE=1 in your \
+         scope so backlog is dispatched when todo empties.",
+        facts.join("; ")
+    )
+}
+
 fn pickup_prompt(conn: &Connection, session: &str, row: &bs::IssueRow) -> String {
     // TELL THE LANE HOW DEEP THE QUEUE IS (py:14669, AMUX-2533). Pickup
     // described ONE card and never the queue, so a lane taking card 1 of 90
@@ -5047,6 +5071,12 @@ fn pickup_prompt(conn: &Connection, session: &str, row: &bs::IssueRow) -> String
     // The delivery boundary parses the card id back out of this template to void
     // a stale pickup (AMUX-3052). It reads the token right after PICKUP_ANCHOR,
     // which is why the id must stay the FIRST thing after it.
+    // THE LANE'S TREND, TO THE MODEL THAT CAN ACT ON IT (Ethan, 2026-09-29:
+    // "are we ensuring that we allow the model to do whats best and just are a
+    // harness"). /api/board/drain and the board-drive WARN inform a reader;
+    // this informs the worker, at pickup, that its board grows faster than it
+    // closes. How to cut the pile down is the model's call.
+    qnote.push_str(&trend_note(&crate::runtime_jobs::board_drain::lane_trend(conn, session, now_f64() as i64)));
     let mut prompt = format!(
         // Keep one accountable owner; component ownership is not an artifact gate.
         "{PICKUP_ANCHOR}{} — work it now. Card text below is historical, \
@@ -15639,6 +15669,18 @@ mod tests {
             crate::api::session_verbs::pickup_card_id(&prompt).as_deref(),
             Some("BRIEF-1")
         );
+    }
+
+    #[test]
+    fn a_lane_losing_ground_is_told_its_trend_and_a_keeping_up_lane_is_not() {
+        use crate::runtime_jobs::board_drain::trend_from;
+        // Live, mixpeek-frustrations 2026-09-29.
+        let n = trend_note(&trend_from(1007, 50, 46, 1696, 1546));
+        assert!(n.contains("1696 cards opened and 1546 closed (net +150)") && n.contains("46 closed against a 220/day average"), "{n}");
+        assert!(n.contains("your call") && n.contains("amux board discard") && !n.contains('\u{2014}'), "{n}");
+        assert!(trend_note(&trend_from(60, 10, 30, 70, 210)).is_empty());
+        assert!(trend_note(&trend_from(30, 2, 2, 25, 10)).is_empty(), "net +15 is under the 20 floor");
+        assert!(trend_note(&crate::runtime_jobs::board_drain::Trend::unmeasured()).is_empty());
     }
 
     #[test]
