@@ -34,6 +34,10 @@ on:
         description: 'Build to submit (default: newest TestFlight build of the version)'
         required: false
         default: ''
+      dry_run:
+        description: 'yes = report what cancel_pending would cancel, change nothing'
+        required: false
+        default: 'no'
 
 jobs:
   release:
@@ -82,4 +86,5 @@ jobs:
           EXCLUDE_TERRITORIES: ${{ inputs.exclude_territories }}
           REVIEW_NOTE: ${{ inputs.review_note }}
           BUILD_NUMBER: ${{ inputs.build_number }}
+          DRY_RUN: ${{ inputs.dry_run == 'yes' && '1' || '' }}
           APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}

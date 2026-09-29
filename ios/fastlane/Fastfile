@@ -151,6 +151,17 @@ platform :ios do
       # reuses a draft, so leave it.
       pending = app.get_review_submissions(filter: { state: "WAITING_FOR_REVIEW,UNRESOLVED_ISSUES" })
       UI.message("#{pending.size} pending review submission(s)")
+      # DRY_RUN=1: say what CANCEL_PENDING would cancel, then stop. Nothing is
+      # cancelled, edited or submitted.
+      if ENV["DRY_RUN"] == "1"
+        all = app.get_review_submissions(filter: { platform: "IOS" }).first(10)
+        all.each do |sub|
+          verb = pending.any? { |x| x.id == sub.id } ? "WOULD CANCEL" : "would leave"
+          UI.message("DRY_RUN #{verb} submission=#{sub.id} state=#{sub.state}")
+        end
+        UI.message("DRY_RUN stop: nothing changed")
+        next
+      end
       pending.each do |sub|
         UI.important("Cancelling review submission #{sub.id} (#{sub.state}) so the listing can be edited")
         sub.cancel_submission
@@ -165,6 +176,13 @@ platform :ios do
         sleep 10
       end
       UI.user_error!("version never became editable (state #{state})") unless editable.include?(state)
+    end
+
+    # DRY_RUN never reaches a step that changes anything, with or without
+    # CANCEL_PENDING.
+    if ENV["DRY_RUN"] == "1"
+      UI.message("DRY_RUN stop: nothing changed")
+      next
     end
 
     # EXCLUDE_TERRITORIES=CHN (comma list of territory ids): make the app
