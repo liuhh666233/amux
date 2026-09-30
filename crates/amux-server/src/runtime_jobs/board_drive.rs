@@ -3835,6 +3835,12 @@ fn stale_gate_excluded_todos(conn: &Connection, session: &str, fresh_cut: i64) -
 ///
 /// The production entry point. Tests use the `_with` form so a lane's ON-DISK
 /// scope env cannot decide whether a unit test passes.
+/// `AMUX_PICKUP_DELEGATED_ONLY` resolved worker > group > global.
+fn delegated_only_pickup(session: &str) -> bool {
+    crate::api::session_verbs::scoped_setting_in(&crate::api::session_verbs::home(), session, "AMUX_PICKUP_DELEGATED_ONLY")
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
 pub fn select_pickup(conn: &Connection, session: &str, now: f64) -> Pickup {
     select_pickup_with(conn, session, now, bs::continuation_required(Some(session)))
 }
@@ -4033,6 +4039,31 @@ pub fn select_pickup_with(
             .map(|rows| rows.flatten().collect())
         })
         .unwrap_or_default()
+    };
+    // DELEGATED-ONLY PICKUP (2026-09-30, goal-spec-12 orchestration). An
+    // implementation worker under an orchestrator filed defects it found onto
+    // its OWN board (gs12-mvs GM-9, gs12-compute GC-13/14), and with pickup on,
+    // dispatch would hand those back to it as work nobody assigned.
+    // AMUX_PICKUP_DELEGATED_ONLY=1 (worker > group > global) restricts pickup to
+    // cards another lane requested (`requested_by` set), so the orchestrator
+    // stays the only source of assignments. Default off: every other lane is
+    // unchanged.
+    let ids = if delegated_only_pickup(session) {
+        let (kept, withheld): (Vec<String>, Vec<String>) = ids.into_iter().partition(|id| {
+            bs::get_issue(conn, id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.requested_by)
+                .is_some_and(|by| !by.trim().is_empty() && by != session)
+        });
+        if !withheld.is_empty() {
+            tracing::info!(session, withheld = ?withheld, kept = kept.len(), measured = true,
+                n_considered = kept.len() + withheld.len(), verdict = "pickup_withheld_undelegated",
+                "delegated-only pickup: cards this lane filed for itself are not dispatched to it");
+        }
+        kept
+    } else {
+        ids
     };
     if ids.is_empty() {
         // Name the aged-out cards rather than reporting an empty queue: the
@@ -14503,6 +14534,31 @@ mod tests {
             claimed(&select_pickup_with(&conn, "lane", now_f64(), true)),
             Some("AF-90"),
             "satisfying the gate makes it claimable again, or the gate is a mute"
+        );
+    }
+
+    /// Goal-spec-12, 2026-09-30: a worker under an orchestrator filed defects
+    /// onto its own board and pickup would have handed them back as work.
+    #[test]
+    fn delegated_only_pickup_skips_cards_the_lane_filed_for_itself() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("sessions")).unwrap();
+        let _g = crate::api::settings::test_env::set_home(home.path());
+        let conn = board_db();
+        add_card(&conn, "GM-9", "lane", "todo", "self-filed defect", "SCOPE: real\n- [ ] do it");
+        // Control first: without the setting, the self-filed card is offered.
+        assert_eq!(claimed(&select_pickup_with(&conn, "lane", now_f64(), false)), Some("GM-9"));
+        std::fs::write(home.path().join("sessions/lane.env"), "AMUX_PICKUP_DELEGATED_ONLY=1\n").unwrap();
+        assert!(
+            claimed(&select_pickup_with(&conn, "lane", now_f64(), false)).is_none(),
+            "a card the lane filed for itself must not be dispatched under delegated-only"
+        );
+        add_card(&conn, "GM-6", "lane", "todo", "assigned by the orchestrator", "SCOPE: real\n- [ ] do it");
+        conn.execute("UPDATE issues SET requested_by='orchestrator' WHERE id='GM-6'", []).unwrap();
+        assert_eq!(
+            claimed(&select_pickup_with(&conn, "lane", now_f64(), false)),
+            Some("GM-6"),
+            "a card another lane requested is still dispatched"
         );
     }
 
