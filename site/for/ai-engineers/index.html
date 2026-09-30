@@ -45,7 +45,7 @@
     "description": "AI engineers use amux as their agent control plane — orchestrating multi-model fleets (Claude Code, Codex, Gemini CLI), tracking token spend, integrating MCP servers, and building self-healing pipelines.",
     "url": "https://amux.io/for/ai-engineers/",
     "datePublished": "2026-07-05",
-    "dateModified": "2026-08-25",
+    "dateModified": "2026-09-30",
     "author": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "publisher": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "image": "https://amux.io/og-image.png",
@@ -127,13 +127,27 @@
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <a href="/for/">For Developers</a> <span class="sep">›</span> <span>AI Engineers</span></div>
 
     <h1>amux for AI Engineers</h1>
-    <p class="subtitle">The open-source control plane AI engineers deploy once and build their entire agent infrastructure on top of. Updated August 2026.</p>
+    <div style="background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.25);border-radius:8px;padding:0.9rem 1.1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+      <span style="color:#4ade80;font-weight:600">Deploy your agent control plane today</span>
+      <span style="color:var(--text-muted,#8892a4);font-size:0.9rem">Workspace isolation, vault secrets, approval memory — Sept 2026</span>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" style="margin-left:auto;background:#4ade80;color:#0a0e1a;padding:0.35rem 0.9rem;border-radius:5px;font-weight:600;font-size:0.9rem;text-decoration:none;white-space:nowrap" data-posthog-event="exp109_ai_engineers_topofpage_cta_click">Star on GitHub</a>
+    </div>
+    <p class="subtitle">The open-source control plane AI engineers deploy once and build their entire agent infrastructure on top of. Updated September 2026.</p>
 
     <p>AI engineers don't just use agent tools — they build, orchestrate, and operate them. amux is the infrastructure layer: it runs your agent fleet as isolated processes with real supervision, exposes a clean REST API any agent or external system can call, tracks token spend from JSONL transcripts, integrates MCP servers fleet-wide, and self-heals sessions overnight without babysitting. Open source, single Rust binary, zero external dependencies — you can read the entire source, modify it, and deploy it on any Linux or macOS machine in under five minutes.</p>
 
     <div style="background:var(--surface-2);border-left:3px solid var(--accent,#c75b2e);padding:1rem 1.25rem;border-radius:0 6px 6px 0;margin:1.5rem 0">
       <strong>For AI engineers specifically:</strong> amux is not a Python orchestration SDK. Each agent is an independent OS process with its own PID, JSONL transcript, tmux window, and resource envelope. The control plane is a REST API. This gives you real isolation, real process supervision, and real observability — not async tasks inside a shared Python event loop.
     </div>
+
+    <h2>What's New — September 2026</h2>
+    <p>Four infrastructure improvements shipped in September 2026 that directly affect AI engineers running multi-agent fleets:</p>
+    <ul>
+      <li><strong>Workspace isolation</strong> (<code>AMUX_WORKSPACE_ISOLATION=1</code>): each worker now gets its own git worktree and <code>TMPDIR</code> at launch. Parallel agents on the same codebase no longer share a checkout — no more "peer's uncommitted file failed my test" false positives. Enable with one env var; each agent sees a clean, isolated tree. See the <a href="/guides/ai-agent-workspace-isolation/">workspace isolation guide</a>.</li>
+      <li><strong>Vault secrets</strong> (<code>477d835d</code>, AMUX-5375): encrypted secrets scoped at global, group, or worker level, injected as environment variables at agent launch. API keys, database credentials, and OAuth tokens live in the vault — not in CLAUDE.md or git history. Set once, rotated once, never leaked into a transcript.</li>
+      <li><strong>Approval memory</strong> (<code>7d47a821</code>): every owner approval is now automatically saved as a standing rule. The next time any agent requests the same action (matched by tool and scope), it proceeds without interrupting you. One approval today prevents dozens of identical pauses across the fleet. Reviewable and revocable from the Approvals tab.</li>
+      <li><strong>Peek split pane</strong> (<code>02a660d8</code>): the transcript viewer now supports drag-resizable split panes, per-pane zoom (Cmd+/Cmd−), sortable file browser, and a file browser toggle in the toolbar. Message filter and pagination arrows reach mid-turn messages in earlier pages (AMUX-5377). The peek panel is now a genuine two-pane IDE-grade transcript explorer.</li>
+    </ul>
 
     <h2>What AI engineers build on top of amux</h2>
 
@@ -175,9 +189,17 @@
           <td style="padding:0.6rem 0.75rem">Agent-to-agent delegation and result handoff</td>
           <td style="padding:0.6rem 0.75rem">POST /api/sessions/:name/send + GET /api/sessions/:name/peek</td>
         </tr>
-        <tr>
+        <tr style="border-bottom:1px solid var(--border,#333)">
           <td style="padding:0.6rem 0.75rem">Business automation composed with coding agents</td>
           <td style="padding:0.6rem 0.75rem">Browser agent API + scheduler + board handoff</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border,#333)">
+          <td style="padding:0.6rem 0.75rem">Isolated per-agent workspace (no shared-checkout conflicts)</td>
+          <td style="padding:0.6rem 0.75rem">Workspace isolation (<code>AMUX_WORKSPACE_ISOLATION=1</code>, git worktrees)</td>
+        </tr>
+        <tr>
+          <td style="padding:0.6rem 0.75rem">Scoped secret injection (API keys, DB creds, OAuth tokens)</td>
+          <td style="padding:0.6rem 0.75rem">Vault secrets (AMUX-5375, global / group / worker scope)</td>
         </tr>
       </tbody>
     </table>
@@ -406,7 +428,7 @@ jobs:
     <p>The <a href="/guides/ai-agent-read-aloud/">amux read-aloud feature</a> (Piper TTS, free, local, no API key) lets you listen to the Trends summary or individual session output. For AI engineers who manage fleet state first thing in the morning, this enables a fully hands-free review on the commute — hear what the fleet accomplished overnight, dictate your next instructions via Whisper, and start the workday without sitting down at a desk.</p>
 
     <h2>What's New — August 2026</h2>
-    <p>Four engineering improvements shipped in August 2026 that directly affect AI engineers building on amux:</p>
+    <p>Engineering improvements from August 2026 (September 2026 additions above):</p>
     <ul>
       <li><strong>Canonical worker-send route</strong> (<code>5e647edd</code>): <code>POST /api/sessions/&lt;worker-id&gt;/send</code> is now a first-class, stable API endpoint. External systems — GitHub Actions, webhooks, other agents — can address any named worker directly. Previously the send path had no canonical address and had to be discovered from session listings. See the new <a href="/guides/ai-agent-github-actions/">GitHub Actions integration guide</a>.</li>
       <li><strong>Schedule turns/day estimate</strong> (<code>9b27e1c1</code>): When you create or edit a recurring schedule, amux now displays the estimated number of agent turns per day that schedule will consume. AI engineers can plan token budgets before scheduling overnight batch runs, rather than discovering cost only after the first execution.</li>
@@ -488,7 +510,7 @@ jobs:
 
     <h2>Getting started as an AI engineer</h2>
     <ol>
-      <li><strong>Install:</strong> <code>git clone https://github.com/mixpeek/amux && cd amux && ./install.sh</code></li>
+      <li><strong>Install:</strong> <code>brew install mixpeek/tap/amux</code> (or <code>curl -fsSL https://amux.io/install.sh | sh</code>)</li>
       <li><strong>Register your project:</strong> <code>amux register myproject --dir ~/Dev/myproject --yolo</code></li>
       <li><strong>Configure MCP servers</strong> in <code>mcp.json</code> at the amux root</li>
       <li><strong>Write a CLAUDE.md</strong> with the board claiming workflow, context budget, and task conventions</li>
@@ -501,8 +523,8 @@ jobs:
     <div class="cta-box">
       <h3>Deploy your agent control plane</h3>
       <p>amux is the open-source infrastructure AI engineers deploy once and build their entire agent stack on top of. Single Rust binary, REST API, JSONL observability, self-healing watchdog, MIT licensed.</p>
-      <pre><code>git clone https://github.com/mixpeek/amux && cd amux && ./install.sh
-amux register myproject --dir ~/Dev/myproject --yolo
+      <pre><code>brew install mixpeek/tap/amux
+amux register myproject --dir ~/Dev/myproject
 amux serve  # → https://localhost:8824</code></pre>
       <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-top:0.5rem">
         <a class="btn btn-primary" href="https://github.com/mixpeek/amux">View on GitHub</a>
@@ -513,6 +535,7 @@ amux serve  # → https://localhost:8824</code></pre>
 
     <h2>Guides for AI engineers</h2>
     <ul>
+      <li><a href="/guides/ai-agent-workspace-isolation/">Workspace isolation: git worktree per agent (Sept 2026)</a></li>
       <li><a href="/guides/harness-engineering/">Harness engineering: building robust agent pipelines</a></li>
       <li><a href="/guides/context-engineering/">Context engineering for AI coding agents</a></li>
       <li><a href="/guides/multi-agent-orchestrator-architecture/">Multi-agent orchestrator architecture</a></li>

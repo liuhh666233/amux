@@ -1,5 +1,47 @@
 [
   {
+    "sha": "02a660d8",
+    "date": "2026-09-30",
+    "title": "Peek: split pane drag resize, per-pane zoom, sortable file browser",
+    "body": "The transcript viewer now supports drag-resizable split panes — grab the divider between the file browser and transcript view and drag to your preferred width. Per-pane zoom lets you increase or decrease text size in each panel independently (Cmd+ / Cmd−). The file browser is now sortable by name, size, or last modified. The split toggle button in the toolbar shows or hides the file browser panel with one click. Together these make the peek panel a genuine two-pane IDE-grade transcript explorer.",
+    "type": "feat"
+  },
+  {
+    "sha": "64f864c6",
+    "date": "2026-09-30",
+    "title": "Peek: file browser split toggle button added to toolbar",
+    "body": "A new button in the peek toolbar shows or hides the file browser split pane without closing the transcript view. Previously the file browser state persisted across navigations but had no explicit toggle — you had to close and reopen the peek panel to change the layout. The toggle is persistent: if you hide the file browser, it stays hidden across peek sessions until you turn it back on.",
+    "type": "feat"
+  },
+  {
+    "sha": "9b2f90f3",
+    "date": "2026-09-30",
+    "title": "Fix: box-drawing tables scroll horizontally; all other content word-wraps",
+    "body": "Previously, all content in the peek panel either scrolled or wrapped uniformly. This caused box-drawing tables to collapse into unreadable columns on narrow panels (they rely on exact character widths), while plain prose code that was obviously meant to wrap was getting a horizontal scrollbar instead. The fix detects box-drawing characters at the start of a line and applies scroll-on-overflow only to those blocks; everything else word-wraps normally.",
+    "type": "fix"
+  },
+  {
+    "sha": "f598e5cd",
+    "date": "2026-09-30",
+    "title": "Fix: peek message filter and arrows reach mid-turn messages in earlier pages (AMUX-5377)",
+    "body": "The message filter and pagination arrows in the peek panel were only scanning the currently visible page of the transcript. If a message matching the filter criteria was in an earlier page, the filter would show zero results. Both the filter and the previous/next arrows now scan the full transcript history, not just the current viewport. Pages load on demand as the arrows page through matching messages.",
+    "type": "fix"
+  },
+  {
+    "sha": "7cc19bc9",
+    "date": "2026-09-30",
+    "title": "Fix: an owner /clear drops queued needs-input auto-approvals",
+    "body": "When an owner ran /clear in a session, the session's message queue was flushed — but any pending needs-input auto-approvals queued for that session were not. On the next turn, those stale approvals would fire against whatever new task the session had picked up, silently approving actions that were never reviewed by the owner. The fix: /clear now also flushes the queued auto-approval entries for that session.",
+    "type": "fix"
+  },
+  {
+    "sha": "477d835d",
+    "date": "2026-09-30",
+    "title": "Vault secrets: encrypted credentials scoped global, group, or worker — delivered at agent launch (AMUX-5375)",
+    "body": "Agents now receive encrypted secrets as environment variables at launch. Store API keys, OAuth tokens, database credentials, and webhook secrets in the vault via the Secrets tab. Set the scope: global (all workers), group (a named set), or per-worker. On launch, amux decrypts the relevant secrets and injects them into the agent's environment — they never appear in CLAUDE.md, git history, or transcript output. Rotating a credential updates every worker that uses it without editing any per-agent config.",
+    "type": "feat"
+  },
+  {
     "sha": "167c46df",
     "date": "2026-09-29",
     "title": "Vault checkout: amux order --url runs a full headless checkout flow unattended",

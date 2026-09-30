@@ -45,7 +45,7 @@
     "description": "Solopreneurs use amux to run a 5-10 agent engineering team from their phone — writing code, reviewing PRs, running tests, managing customers, and automating business operations, all in parallel.",
     "url": "https://amux.io/for/solopreneurs/",
     "datePublished": "2026-07-03",
-    "dateModified": "2026-08-18",
+    "dateModified": "2026-09-30",
     "author": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "publisher": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "image": "https://amux.io/og-image.png",
@@ -296,22 +296,36 @@
       <span>Solopreneurs</span>
     </div>
 
-    <div class="cta-banner" style="background:linear-gradient(90deg,#1a2a1a,#1e3020);border:1px solid #2d5a2d;border-radius:8px;padding:1rem 1.5rem;margin:0 0 1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
-      <span style="flex:1;min-width:200px;font-size:0.95rem">Run an AI engineering team solo — open source, MIT licensed, self-hosted.</span>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="posthog&&posthog.capture('exp047_solopreneurs_topofpage_cta_click')" style="background:#2d7a2d;color:#fff;padding:0.5rem 1.25rem;border-radius:6px;text-decoration:none;font-weight:600;white-space:nowrap;font-size:0.9rem">View amux on GitHub &#x2605;</a>
+    <!-- EXP-112: September 2026 refresh — replace EXP-047 with updated top-of-page green CTA -->
+    <div style="background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.25);border-radius:8px;padding:0.9rem 1.1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+      <span style="color:#4ade80;font-weight:600">Updated September 2026</span>
+      <span style="color:var(--text-muted,#8892a4);font-size:0.9rem">Approval memory, vault checkout, workspace isolation, vault secrets — all shipped this month</span>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" style="margin-left:auto;background:#4ade80;color:#0a0e1a;padding:0.35rem 0.9rem;border-radius:5px;font-weight:600;font-size:0.9rem;text-decoration:none;white-space:nowrap" data-posthog-event="exp112_solopreneurs_topofpage_cta_click">Star on GitHub</a>
     </div>
 
     <h1>Run a 10-Person AI Engineering Team by Yourself</h1>
-    <p class="subtitle">One person. A dozen agents. A full software business, running while you sleep. <span style="font-size:0.85em;color:var(--text-muted)">Updated August 2026.</span></p>
+    <p class="subtitle">One person. A dozen agents. A full software business, running while you sleep. <span style="font-size:0.85em;color:var(--text-muted)">Updated September 2026.</span></p>
 
     <div class="answer-box">
       <p>With amux, a solopreneur can simultaneously deploy a developer agent writing new features, a reviewer agent checking every PR, a test agent ensuring coverage, a docs agent keeping documentation current, and a bug-triage agent clearing the backlog — all orchestrated from a single dashboard or their iPhone. The CRM, email, browser automation, and scheduler handle the business side: customer relationships, status updates, Stripe reports, and recurring overnight tasks. You become the architect and decision-maker; the agents handle execution at a pace no small human team can match.</p>
     </div>
 
     <!-- ============================================================ -->
+    <h2>What's New in September 2026</h2>
+
+    <p>Four features shipped in September 2026 that directly change what a solopreneur can automate and trust their agents with overnight:</p>
+
+    <ul>
+      <li><strong>Approval memory — approve once, never approve again.</strong> When you approve an agent action in the needs-input panel, amux now auto-saves it as a standing rule. The next time any agent requests the same action, it proceeds without pausing. One approval today removes 50 identical interruptions this month. Approval memory is session-scoped by default; promote it to fleet-wide from the Approvals tab. See the <a href="/guides/ai-agent-standing-approvals/">standing approvals guide</a>.</li>
+      <li><strong>Vault checkout — amux orders things for you unattended.</strong> <code>amux order --url &lt;url&gt;</code> launches a sandboxed browser, navigates to a checkout page, applies your saved profile (address, payment method), and returns a receipt — without you present. The first run requires your confirmation; repeat runs with the same merchant and amount range proceed automatically. Useful for procurement automation, SaaS renewals, and any recurring purchase your business handles monthly.</li>
+      <li><strong>Workspace isolation — 10 agents, zero file conflicts.</strong> Set <code>AMUX_WORKSPACE_ISOLATION=1</code> and each agent gets its own git worktree and temp directory at launch. The feature-writing agent and the test-writing agent no longer corrupt each other's in-progress edits. For solopreneurs running large overnight fleets, this eliminates the most common class of "why did this commit include broken code from another agent" failure. See the <a href="/guides/ai-agent-workspace-isolation/">workspace isolation guide</a>.</li>
+      <li><strong>Vault secrets — encrypted credentials, scoped per agent.</strong> Store API keys, OAuth tokens, and database passwords in the vault. Scope them at global, group, or per-worker level. Agents receive them as environment variables at launch — the secrets never appear in CLAUDE.md, git history, or agent transcripts. One rotation updates every agent that uses that credential.</li>
+    </ul>
+
+    <!-- ============================================================ -->
     <h2>What's New in August 2026</h2>
 
-    <p>The gap between a solopreneur running amux and a small engineering team keeps widening. Four features shipped this month that are particularly valuable for solo operators:</p>
+    <p>The gap between a solopreneur running amux and a small engineering team keeps widening. Four features shipped in August 2026:</p>
 
     <ul>
       <li><strong>Connectors tab — paste API keys once, use them everywhere.</strong> The new Connectors tab lets you configure credentials for external services (Google, Granola, custom APIs) at global, group, or per-worker scope. Agents pick them up automatically — no more scattering API keys across shell profiles or CLAUDE.md files. See the <a href="/guides/ai-agent-connectors/">connector setup guide</a>.</li>

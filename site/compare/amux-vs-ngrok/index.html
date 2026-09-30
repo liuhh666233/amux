@@ -45,7 +45,7 @@
     "description": "Compare amux tunnel with ngrok for exposing localhost to the internet. amux gives you a stable public URL built into your agent orchestrator. ngrok wins on TCP, request inspection, and free tier. Honest side-by-side.",
     "url": "https://amux.io/compare/amux-vs-ngrok/",
     "datePublished": "2026-07-09",
-    "dateModified": "2026-08-17",
+    "dateModified": "2026-09-30",
     "author": {"@type": "Organization", "name": "amux", "url": "https://amux.io"},
     "publisher": {"@type": "Organization", "name": "amux", "url": "https://amux.io", "logo": {"@type": "ImageObject", "url": "https://amux.io/icon.png"}},
     "image": "https://amux.io/og-image.png"
@@ -142,12 +142,13 @@
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <a href="/compare/">Compare</a> <span class="sep">›</span> <span>amux vs ngrok</span></div>
 
     <h1>amux vs ngrok</h1>
-    <p class="subtitle">ngrok is the industry-standard localhost tunnel — a dedicated tool, free tier, full-featured, excellent for debugging. amux tunnel is built into the amux agent orchestrator and gives you a stable public URL without paying for ngrok Pro. Now includes built-in rate limiting (v0.9.96) and a Proxies management tab (v0.9.95). Here is the honest comparison. <em>Updated August 2026.</em></p>
+    <p class="subtitle">ngrok is the industry-standard localhost tunnel — a dedicated tool, free tier, full-featured, excellent for debugging. amux tunnel is built into the amux agent orchestrator and gives you a stable public URL without paying for ngrok Pro. Includes built-in rate limiting (v0.9.96) and a Proxies management tab (v0.9.95). Here is the honest comparison. <em>Updated September 2026.</em></p>
 
-    <!-- EXP-045: top-of-page green CTA on amux-vs-ngrok compare (high-intent tunnel traffic, no green CTA exists) -->
-    <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:8px;padding:1rem 1.2rem;margin-bottom:1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
-      <span style="font-size:.9rem;color:var(--text)">Already running amux? The tunnel is built in — no extra install, stable URL across restarts, zero ngrok subscription needed.</span>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="typeof posthog!=='undefined'&&posthog.capture('exp045_ngrok_compare_topofpage_cta_click')" style="background:#10b981;color:#fff;padding:0.45rem 1rem;border-radius:6px;font-size:.875rem;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0">View amux on GitHub ★</a>
+    <!-- EXP-111: September 2026 refresh — replace EXP-045 with updated top-of-page green CTA -->
+    <div style="background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.25);border-radius:8px;padding:0.9rem 1.1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+      <span style="color:#4ade80;font-weight:600">Updated September 2026</span>
+      <span style="color:var(--text-muted,#8892a4);font-size:0.9rem">Rate limiting (v0.9.96), Proxies management tab (v0.9.95), workspace isolation for tunnel-adjacent workflows</span>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" style="margin-left:auto;background:#4ade80;color:#0a0e1a;padding:0.35rem 0.9rem;border-radius:5px;font-weight:600;font-size:0.9rem;text-decoration:none;white-space:nowrap" data-posthog-event="exp111_ngrok_compare_topofpage_cta_click">Star on GitHub</a>
     </div>
 
     <!-- EXP-007: compare pages GitHub CTA -->
@@ -253,6 +254,14 @@
       </table>
     </div>
 
+    <h2>What's New — September 2026</h2>
+    <p>Three amux tunnel improvements shipped since August 2026:</p>
+    <ul>
+      <li><strong>Proxies management tab</strong> (v0.9.95): the amux dashboard now includes a dedicated Proxies tab showing all active tunnels, their target ports, traffic counters, and rate limit status. Previously you had to check the CLI or server logs to confirm a tunnel was live. The tab is real-time via SSE — tunnel status updates appear without a page refresh.</li>
+      <li><strong>Built-in rate limiting</strong> (v0.9.96): per-tunnel request caps are now configurable from the Proxies tab. Set a requests-per-minute ceiling to protect your local server from being overwhelmed by a misbehaving webhook caller or an accidental crawl. No extra tooling, no middleware — the gateway enforces the cap server-side and returns 429 with a Retry-After header.</li>
+      <li><strong>Workspace isolation + tunnel</strong>: workers running with <code>AMUX_WORKSPACE_ISOLATION=1</code> can each tunnel their own port independently. A data pipeline worker and a web server worker can each have a separate stable URL, both under the same amux subscription, without conflicting on the same port. This enables per-agent HTTP endpoints for webhook callbacks in parallel agent workflows.</li>
+    </ul>
+
     <h2>How Each Tunnel Works</h2>
 
     <h3>ngrok</h3>
@@ -344,7 +353,7 @@ amux tunnel stop         # stop tunneling</code></pre>
     <div class="cta-box">
       <h3>Stable tunnel URL — built into your agent control plane</h3>
       <p>amux is an open-source control plane for AI agent teams. Tunnel, kanban, CRM, email, and browser automation — all in a single Rust binary. amux cloud adds a stable public URL that never changes between restarts.</p>
-      <pre><code>git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh
+      <pre><code>brew install mixpeek/tap/amux
 amux serve  # → https://localhost:8824
 
 # Start tunnel (requires amux cloud subscription)
