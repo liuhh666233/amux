@@ -154,6 +154,88 @@ Three layers, in the order to rely on them:
 3. **macOS**: separate user accounts mean files, shell history and the unified
    log each carry the account name.
 
+## Multiplayer: several people on the same workers
+
+What amux has today, checked on origin/main 2026-09-30: every mutation is
+attributed to a worker SESSION, and board cards carry a `rev` so a stale write
+is refused. There is no human identity: nothing reads a person's login, so two
+people on one dashboard are indistinguishable.
+
+### Should we use Yjs (or another CRDT)?
+
+No, for the board and for worker input. A CRDT merges concurrent edits
+silently, which is right for co-editing a text document and wrong here. When
+two people change the same card, or give the same worker opposite
+instructions, the useful outcome is that the second person SEES the conflict
+and who caused it, then decides. amux's ethos already records this as settled
+("No CRDT for the board": `rev` is a concurrency check whose failure is the
+product). Yjs only earns a place if we later add a live co-edited document
+surface, where merging keystrokes is the point.
+
+### Design, in the order to build it
+
+1. **Human identity at the edge.** Put the dashboard behind Tailscale Serve,
+   which adds `Tailscale-User-Login` to every request and cannot be forged from
+   inside the tailnet. The server stamps it as `human` on every board
+   mutation, message, steering row and send, beside the existing session stamp.
+   A request with no header (localhost) is the machine owner.
+2. **Worker input is serialized, never merged.** Messages to a worker already go
+   through the steering queue one at a time. Each row carries its sender, and
+   the worker sees "from alice@customer" at the top of the message, so the
+   agent knows whose instruction it is acting on.
+3. **Typing directly in a pane takes a soft lock.** Two people typing into one
+   terminal produces interleaved garbage. The first person to type holds the
+   pane; everyone else sees "alice is typing" and their input goes to the
+   queue instead. The lock expires after 30 seconds of silence.
+4. **Board conflicts name the other person.** A write with a stale `rev` already
+   gets a 409. Add who made the newer change and when, and have the dashboard
+   offer to re-apply on top of it.
+5. **Presence.** An SSE event listing who is viewing which worker, shown as
+   avatars in the header, so nobody is surprised by someone else's action.
+
+### The demo that proves it (acceptance for "multiplayer done")
+
+Two people, two laptops, both on the tailnet, one worker:
+
+- Both open the same worker. Each sees the other's avatar.
+- Both send the worker a message within the same second. Both messages are
+  delivered in order, each labeled with its sender, and the worker's reply
+  addresses each person.
+- Alice types in the pane. Bob's typing is queued and he sees why.
+- Both edit the same card. One write lands; the other gets a conflict naming
+  the first person, and re-applies.
+- The board log and message history show the right person on every one of the
+  above, not the session name alone.
+
+## Tailscale acceptance
+
+- The Mac shows as connected in the tailnet admin console, tagged
+  `tag:customer-<name>`.
+- Adding a person is one Terraform change (or one invite link), with no step on
+  the Mac itself. Removing them cuts off the dashboard, screen and SSH within a
+  minute.
+- A test person can reach only this Mac, not anything else on the tailnet.
+- The Mac rejoins the tailnet on its own after a reboot.
+
+## Other requirements worth deciding now
+
+- **Whose Claude account runs the workers.** A personal Claude subscription is
+  licensed to one person, so a shared machine used by several people should run
+  on an Anthropic API key from an organization account (ours or the
+  customer's). This also settles who pays for tokens.
+- **Spend per person.** With human identity in place, token cost can be totaled
+  per person as well as per worker. Useful for the customer, and for us if we
+  bill usage.
+- **Offboarding.** One command removes a person from the tailnet, their macOS
+  account and their amux access, and keeps their history for the audit trail.
+- **Health alerts.** Our own amux pings the customer machine every few minutes
+  and pages us if it stops answering or reboots unexpectedly.
+- **Data boundary.** None of our credentials ever go onto the customer's
+  machine, and none of theirs come back to ours. Separate tailnet, separate
+  `server.env`, separate backup bucket.
+- **Data location.** Scaleway's Macs are in Paris. Check this is acceptable to a
+  US customer's compliance people before renting.
+
 ## Backup and portability
 
 The goal is to lift the whole setup onto other hardware later, such as a Mac
@@ -201,8 +283,9 @@ Tailscale come back up.
 
 ## Next steps
 
-1. Card: per-person attribution on the amux dashboard (the open question
-   above). This blocks any promise of "full provenance".
+1. Cards for the multiplayer design, one per step (identity at the edge, sender
+   on queued messages, pane soft lock, conflict naming, presence). Identity
+   first: it blocks any promise of "full provenance".
 2. Card: the IaC directory (Terraform for Scaleway and Tailscale, the Ansible
    playbook, the Brewfile, `make up` and `make down`).
 3. After spending approval: rent one Mac, run `make up` against it ourselves,
