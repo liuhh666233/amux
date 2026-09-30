@@ -14,6 +14,38 @@ Get a customer live on amux in one day with no hardware purchase:
 5. Back up the whole system so it can move later, for example onto a dedicated
    Mac Studio the customer buys, without rebuilding by hand.
 
+## Deployment model
+
+In Ethan's words (2026-09-30): we dogfood the experience ourselves first, then
+deploy it for the customer the same way.
+
+1. **We go first.** We rent the Mac, set up amux and the workflows, and invite
+   ourselves as members, exactly as a customer would be invited.
+2. **Full service before handover.** Email, credentials and connectors are
+   working before the customer signs in, so they start with a working system
+   rather than a setup task.
+3. **We work on it remotely, like our own Mac.** amux in the browser plus
+   Remote Desktop over Tailscale. Nothing about it differs from how we work
+   today.
+4. **The customer joins from their laptop.** Tailscale on the laptop, amux in
+   the browser, screen sharing when they want the desktop.
+5. **Backed up and portable from day one.** The whole system can move to a Mac
+   Studio or any other Mac later.
+
+### Isolation tiers
+
+The same code sets up all three. Only where the Mac lives changes.
+
+| Tier | Where the Mac is | When |
+|---|---|---|
+| 1. Cloud Mac (default) | Rented from Scaleway, on a tailnet we own | Every customer at the start. Live in a day. |
+| 2. Customer's own Mac | Their office or data center; we install over Tailscale | Their security team wants the hardware in their control. |
+| 3. Mac we ship | We set it up here, then courier it | They want dedicated hardware without doing the setup. |
+
+Moving from tier 1 to tier 2 or 3 is the Time Machine restore described under
+Backup and portability. The Ansible playbook runs over SSH on any Mac, so tiers
+2 and 3 need no new code.
+
 ## Provider choice
 
 All of these are real Apple hardware. Apple's macOS license requires a 24-hour
@@ -355,6 +387,73 @@ Test the move before a customer needs it: restore the Time Machine backup onto
 a second rented Mac for a day (about $10) and check that amux, the workers and
 Tailscale come back up.
 
+## Acceptance: the dogfood run
+
+We run this whole list on our own rented Mac, as the "customer", before any
+real customer. Every line has a check that can fail. The run is not complete
+until every line passes, and the results go on the card as evidence.
+
+**Live in a day**
+
+- [ ] From an empty account, `make up` finishes and the dashboard loads over
+  Tailscale in under 4 hours of wall-clock time. Record the actual time.
+- [ ] `make down`, then `make up` again from nothing, passes every check below
+  a second time.
+
+**Access**
+
+- [ ] A second person (one of us, acting as the customer) accepts a tailnet
+  invite on their own laptop, opens amux in the browser and is signed in as
+  their member, with no step done on the Mac. (Needs MP-1.)
+- [ ] The same person opens Screen Sharing over Tailscale and can click and
+  type on the desktop.
+- [ ] That person cannot reach anything else on our tailnet (connection test
+  to one of our other machines fails).
+- [ ] Removing the person from the tailnet cuts off the dashboard, screen and
+  SSH within a minute.
+
+**Full service**
+
+Each connector is proven by using it for real, not by the credential being
+present.
+
+- [ ] Email: a worker sends a message through `/api/email/send` and reads the
+  reply through `/api/email/inbox`, from the customer's own account.
+- [ ] Calendar: a worker creates an event, and it shows up in the customer's
+  calendar through the iCal feed.
+- [ ] Every other connector the customer uses (Google Drive, Slack, Granola and
+  so on): one real read and one real write each.
+- [ ] Credentials: `GET /api/connectors` shows no connector with missing keys
+  among the ones this customer needs.
+- [ ] Browser: a saved sign-in profile opens a page that requires the
+  customer's login.
+- [ ] A schedule fires on time and its run is recorded.
+- [ ] None of our credentials are on the machine: search `server.env` and the
+  vault for our keys by name and find none.
+
+**Working remotely**
+
+- [ ] Intervention drill: we break something on purpose (stop a worker, fill a
+  queue), and fix it using only amux in the browser and Screen Sharing, with
+  nobody at the machine.
+- [ ] Reboot drill: reboot the Mac. It comes back on Tailscale, amux is up and
+  workers resume, with nobody touching it. Record how long it takes.
+- [ ] Health alert: our own amux notices the reboot and alerts us.
+
+**Attribution**
+
+- [ ] The two-person demo under Multiplayer passes (MP-8), and the history shows
+  the right person on every action.
+
+**Portability**
+
+- [ ] Restore the Time Machine backup onto a second rented Mac with Migration
+  Assistant. amux, the workers, the connectors and Tailscale all work there.
+- [ ] Restore one file from the restic backup in B2.
+
+When this list passes on our own Mac, the first customer gets the same run with
+their accounts in place of ours.
+
 ## Monthly cost, one customer
 
 | Item | Cost |
@@ -377,9 +476,9 @@ Tailscale come back up.
    blocks any promise of "full provenance".
 2. Card: the IaC directory (Terraform for Scaleway and Tailscale, the Ansible
    playbook, the Brewfile, `make up` and `make down`).
-3. After spending approval: rent one Mac, run `make up` against it ourselves,
-   then `make down` and `make up` again from scratch. A second clean run is the
-   proof that nothing depends on a manual step we forgot to write down.
+3. After spending approval: rent one Mac and do the dogfood run above on it,
+   with ourselves as the customer. The second clean `make up` is the proof that
+   nothing depends on a manual step we forgot to write down.
 4. Decide on MDM before the second customer.
 
 ## Sources
