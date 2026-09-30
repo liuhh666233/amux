@@ -710,10 +710,27 @@ cmd_register() {
   # of printing usage; a leading-dash name is a mistake, not an identifier. Same
   # guard the board verbs carry (see the `-*) die` case there).
   case "$name" in
-    ""|-h|--help|help) die "usage: amux register <name> [--model opus] [--yolo] [--dir /path] [claude flags...]" ;;
+    ""|-h|--help|help) die "usage: amux register <name> [--model opus] [--yolo] [--dir /path] [--worktree] [--worktree-profile p[,p2]] [claude flags...]" ;;
     -*) die "amux register: '$name' looks like a flag, not a worker name. Put the name first: amux register <name> [flags]" ;;
   esac
   shift
+
+  # Worktree flags are amux's, not claude's: take them out before the rest is
+  # parsed as claude flags (AMUX-5341). --worktree-profile implies --worktree.
+  local wt="" wt_profile="" rest=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --worktree) wt=1; shift ;;
+      --worktree-profile) [[ -n "${2:-}" ]] || die "--worktree-profile needs a profile name (see: amux worktree <name> profiles)"
+                          wt=1; wt_profile="$2"; shift 2 ;;
+      --worktree-profile=*) wt=1; wt_profile="${1#*=}"; shift ;;
+      *) rest+=("$1"); shift ;;
+    esac
+  done
+  if [[ -n "$wt_profile" && ! "$wt_profile" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*(,[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+    die "--worktree-profile '$wt_profile' is not a profile name (names joined by commas)"
+  fi
+  set -- ${rest[@]+"${rest[@]}"}
 
   parse_claude_flags "$@"
 
@@ -739,6 +756,9 @@ cmd_register() {
   if [[ -f "$file" ]]; then
     preserved=$(grep -E '^CC_[A-Za-z0-9_]+=' "$file" 2>/dev/null \
                 | grep -vE '^(CC_NAME|CC_DIR|CC_FLAGS)=' || true)
+    # A flag given now replaces the stored value rather than duplicating it.
+    [[ -n "$wt" ]] && preserved=$(printf '%s\n' "$preserved" | grep -vE '^CC_WORKTREE=' || true)
+    [[ -n "$wt_profile" ]] && preserved=$(printf '%s\n' "$preserved" | grep -vE '^CC_WORKTREE_PROFILE=' || true)
   fi
   {
     echo "# amux session: $name"
@@ -746,12 +766,64 @@ cmd_register() {
     echo "CC_NAME=\"$name\""
     echo "CC_DIR=\"$resolved_dir\""
     echo "CC_FLAGS=\"${CC_FLAGS_STR}\""
+    [[ -n "$wt" ]] && echo "CC_WORKTREE=\"1\""
+    [[ -n "$wt_profile" ]] && echo "CC_WORKTREE_PROFILE=\"$wt_profile\""
     [[ -n "$preserved" ]] && printf '%s\n' "$preserved"
   } > "$file"
 
   echo "${GREEN}registered${RESET} ${BOLD}$name${RESET} → $resolved_dir"
   [[ -n "$preserved" ]] && echo "  ${DIM}preserved: $(printf '%s\n' "$preserved" | sed -E 's/=.*//' | paste -sd, -)${RESET}"
   [[ -n "$CC_FLAGS_STR" ]] && echo "  flags: $CC_FLAGS_STR"
+}
+
+# amux worktree <name> [show|profiles|widen <profile-or-folder>...|profile <p>]
+# (AMUX-5341). A worker's worktree can be sparse when its repo ships
+# scripts/worktree.sh; this shows the profile, folders and size, lists the
+# repo's profiles, widens the checkout, or sets the profile the next
+# worktree is created with (empty string clears it).
+cmd_worktree() {
+  local name="${1:-}" sub="${2:-show}"
+  case "$name" in
+    ""|-h|--help|help) die "usage: amux worktree <name> [show|profiles|widen <profile-or-folder>...|profile <p>]" ;;
+  esac
+  shift; [[ $# -gt 0 ]] && shift
+  local base="$AMUX_API/api/sessions/$name/worktree" out code
+  case "$sub" in
+    show)     out=$(_curl -sk -m 60 "$base") || die "server unreachable" ;;
+    profiles) out=$(_curl -sk -m 60 "$base/profiles") || die "server unreachable" ;;
+    widen)
+      [[ $# -gt 0 ]] || die "usage: amux worktree $name widen <profile-or-folder>..."
+      local body; body=$(python3 -c 'import json,sys; print(json.dumps({"widen": sys.argv[1:]}))' "$@")
+      out=$(_curl -sk -m 150 -X POST -H 'Content-Type: application/json' \
+        -H "X-Amux-Session: ${AMUX_SESSION:-}" -d "$body" "$base") || die "server unreachable" ;;
+    profile)
+      local body; body=$(python3 -c 'import json,sys; print(json.dumps({"worktree_profile": sys.argv[1]}))' "${1:-}")
+      out=$(_curl -sk -m 20 -X PATCH -H 'Content-Type: application/json' \
+        -H "X-Amux-Session: ${AMUX_SESSION:-}" -d "$body" "$AMUX_API/api/sessions/$name/config") || die "server unreachable" ;;
+    *) die "amux worktree: unknown subcommand '$sub' (show|profiles|widen|profile)" ;;
+  esac
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if d.get("error"):
+    print("error:", d["error"], file=sys.stderr); sys.exit(1)
+if "profiles" in d:
+    if not d.get("supported"):
+        print(d.get("why") or "this repo has no scripts/worktree.sh"); sys.exit(0)
+    for p in d["profiles"]:
+        mark = "*" if p["name"] == d.get("current") else " "
+        print(f"{mark} {p[\"name\"]:<12} {p[\"tracked_gb\"]:5.2f}G  " + ("(everything)" if p["full"] else " ".join(p["folders"])))
+elif "worktree" in d:
+    if not d["worktree"]:
+        print("no worktree (profile for next create: %s)" % (d.get("profile") or "repo default")); sys.exit(0)
+    kb = d.get("size_kb")
+    print("path:    ", d["path"])
+    print("profile: ", d.get("profile") or "repo default")
+    print("size:    ", "%.2fG" % (kb / 1048576) if kb is not None else "unmeasured (%s)" % d.get("why_unmeasured"))
+    print("folders: ", "(full checkout)" if d["full"] else " ".join(d["folders"]))
+else:
+    print(d.get("output") or d.get("message") or "ok")
+'
 }
 
 # The lane's OWN conversation id, from its meta. Empty when it has never had
@@ -5454,6 +5526,7 @@ verb parity. New verbs land in amux-rs (crates/amux-cli).${RESET}
 
 ${BOLD}Worker management:${RESET}
   amux register <name> [flags]   Register a worker with Claude Code flags
+  amux worktree <name> [show|profiles|widen <p>...|profile <p>]   Sparse worktree profile, size, widen
   amux start <name> [--detach]   Start a registered worker in tmux (-d = don't attach)
                                 (--dry-run: print the command without spawning)
   amux exec <name> [flags]       Register + start in one step
@@ -6360,6 +6433,7 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
 
   case "${1:-}" in
     register|reg)     shift; cmd_register "$@" ;;
+    worktree|wt)      shift; cmd_worktree "$@" ;;
     start)            shift; cmd_start "$@" ;;
     exec|run)         shift; cmd_exec "$@" ;;
     attach|a)         shift; cmd_attach "$@" ;;

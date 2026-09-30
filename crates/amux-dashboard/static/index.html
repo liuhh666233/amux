@@ -2233,6 +2233,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <div id="create-worktree-info" style="display:none;margin-top:6px;font-size:0.78rem;color:var(--dim);background:rgba(99,102,241,0.06);border-radius:6px;padding:8px 10px;line-height:1.5;">
         Creates a git worktree with its own working directory and branch. The worker works on an isolated copy &mdash; changes are merged back when done.
       </div>
+      <div id="create-worktree-profile-row" style="display:none;margin-top:8px;">
+        <label class="field-label" for="create-worktree-profile">Folders <span class="field-optional">(this repo's scripts/worktree.sh profiles; widen later from the worker)</span></label>
+        <select id="create-worktree-profile" class="input"></select>
+      </div>
     </div>
     <div class="field-group">
       <label class="field-label" style="display:flex;align-items:center;gap:6px;cursor:pointer;">

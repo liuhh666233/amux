@@ -10889,6 +10889,56 @@ function _workerConfigurationRow(key, label, value, note, controls) {
     + controls + '</div></div>';
 }
 
+// Sparse worktree (AMUX-5341): which folders the worker's worktree checks out,
+// its size on disk, and a Widen action through the repo's scripts/worktree.sh.
+// Size is filled in after render: `du` over a large tree is not instant.
+function _workerWorktreeRow(s, q) {
+  const id = 'wt-detail-' + String(s.name || '').replace(/[^A-Za-z0-9_-]/g, '_');
+  setTimeout(() => _workerWorktreeFill(s.name, id), 0);
+  const btn = (fn, label) => '<button class="btn" style="font-size:0.68rem;min-height:32px;padding:4px 8px;"'
+    + ' onclick="event.stopPropagation();' + fn + '(\'' + q + '\')">' + label + '</button>';
+  return _workerConfigurationRow('worktree', 'Worktree folders', s.worktree_profile || 'Repo default',
+    'Profile applies when the worktree is created. ', btn('_workerWorktreeWiden', 'Widen') + ' ' + btn('_workerWorktreeProfile', 'Profile'))
+    .replace('<div class="worker-config-note">', '<div class="worker-config-note"><span id="' + id + '" style="display:block;"></span>');
+}
+async function _workerWorktreeFill(name, id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = 'Measuring…';
+  try {
+    const d = await (await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/worktree')).json();
+    if (!d.worktree) { el.textContent = 'No worktree yet; it is created on the next start.'; return; }
+    const size = d.size_kb != null ? (d.size_kb / 1048576).toFixed(2) + 'G on disk' : 'size unmeasured';
+    el.textContent = size + ' · ' + (d.full ? 'full checkout' : d.folders.join(' '));
+  } catch (e) { el.textContent = 'Worktree details unavailable.'; }
+}
+async function _workerWorktreeWiden(name) {
+  const v = await showPrompt('Add profiles or folders to ' + name + '’s worktree (space separated; “full” checks out everything)', 'studio gtm/data');
+  if (!v || !v.trim()) return;
+  const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/worktree', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({widen: v.trim().split(/[\s,]+/)})});
+  const d = await r.json().catch(() => ({}));
+  showToast(r.ok ? 'Worktree widened' : ('Widen failed: ' + (d.error || r.status)));
+  _workerWorktreeFill(name, 'wt-detail-' + String(name).replace(/[^A-Za-z0-9_-]/g, '_'));
+}
+async function _workerWorktreeProfile(name) {
+  let hint = '';
+  try {
+    const d = await (await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/worktree/profiles')).json();
+    if (d.supported) hint = (d.profiles || []).map(p => p.name).join(', ');
+    else { showToast(d.why || 'This repo has no scripts/worktree.sh'); return; }
+  } catch (e) {}
+  const v = await showPrompt('Profile for ' + name + '’s next worktree (blank = repo default). Available: ' + hint, 'server,studio');
+  if (v === null || v === undefined) return;
+  const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/config', {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({worktree_profile: v.trim()})});
+  const d = await r.json().catch(() => ({}));
+  showToast(r.ok ? (d.message || 'Profile saved') : ('Not saved: ' + (d.error || r.status)));
+  if (r.ok) fetchSessions();
+}
+
 function _workerConfigurationSection(key, title, note, rows) {
   return '<section class="worker-config-section" data-config-section="' + esc(key) + '">'
     + '<div class="worker-config-section-head"><div class="worker-config-section-title">' + esc(title) + '</div>'
@@ -10934,6 +10984,7 @@ function _workerPrimaryConfigurationsHTML(name) {
   const runtime = [
     _workerConfigurationRow('worker_type', 'Worker type', wtype.label, 'Selects how turns run and how output is shown. Board, messages, groups, schedules and memory are unchanged; a running worker restarts on the new type.', typeButtons),
     _workerConfigurationRow('directory', 'Working directory', s.worktree_active && s.worktree_path ? s.worktree_path + ' (worktree)' : (s.dir || ''), 'Changing it restarts a running worker in the new directory.', edit('dir', s.dir || '')),
+    (s.worktree_active || s.worktree === '1') ? _workerWorktreeRow(s, q) : '',
     wtype.worktree === 'unsupported' ? '' : _workerConfigurationRow('branch', 'Git branch', s.branch || '', 'Blank follows the detected branch; “none” explicitly uses the main checkout.', edit('branch', s.branch || '')),
     _workerConfigurationRow('provider', 'Model provider', providerLabel(provider), s.isolated ? 'Changes the CLI provider without injecting harness context.' : 'Provider swaps preserve durable board state and restart only when required.', edit('provider', provider)),
     _workerConfigurationRow('model', 'Model version', model || 'Provider default', s.isolated ? 'Uses the native CLI conversation; no board context is added on restart.' : 'A supported live switch keeps the conversation; restart fallback rehydrates from board state.', edit('model', model || '', provider)),
@@ -13376,7 +13427,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1184';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1185';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -27152,6 +27203,7 @@ function openCreate() {
   document.getElementById('create-worktree-enabled').checked = false;
   document.getElementById('create-worktree-field').style.display = 'none';
   document.getElementById('create-worktree-info').style.display = 'none';
+  document.getElementById('create-worktree-profile-row').style.display = 'none';
   // Reset template state — section collapsed by default
   _selectedTemplate = null;
   document.getElementById('tmpl-section-body').style.display = 'none';
@@ -27355,8 +27407,27 @@ function _toggleIsolated(on) {
   if (el) el.style.display = on ? '' : 'none';
 }
 
+// Sparse worktree profiles (AMUX-5341): offered only when the repo ships
+// scripts/worktree.sh. The first option is the repo's own default, so leaving
+// it alone sends nothing and the script decides.
+async function _loadWorktreeProfiles() {
+  const row = document.getElementById('create-worktree-profile-row');
+  const sel = document.getElementById('create-worktree-profile');
+  const dir = document.getElementById('create-dir').value.trim();
+  row.style.display = 'none'; sel.innerHTML = '';
+  if (!dir || !document.getElementById('create-worktree-enabled').checked) return;
+  try {
+    const d = await (await fetch(API + '/api/worktree-profiles?dir=' + encodeURIComponent(dir))).json();
+    if (!d.supported || !(d.profiles || []).length) return;
+    if (document.getElementById('create-dir').value.trim() !== dir) return;
+    sel.innerHTML = '<option value="">Repo default</option>' + d.profiles.map(p =>
+      `<option value="${esc(p.name)}">${esc(p.name)} · ${Number(p.tracked_gb).toFixed(2)}G${p.full ? ' (everything)' : ''}</option>`).join('');
+    row.style.display = '';
+  } catch (e) { /* no picker: the worktree is created the repo's default way */ }
+}
 function _toggleWorktree(on) {
   document.getElementById('create-worktree-info').style.display = on ? '' : 'none';
+  _loadWorktreeProfiles();
   if (on) {
     // Worktree implies branch — enable and lock branch checkbox
     document.getElementById('create-branch-enabled').checked = true;
@@ -27371,6 +27442,7 @@ async function _checkDirGit(dir) {
     const d = await r.json();
     _createDirIsGit = !!d.is_git;
     document.getElementById('create-worktree-field').style.display = _createDirIsGit ? '' : 'none';
+    _loadWorktreeProfiles();
     if (!_createDirIsGit) {
       document.getElementById('create-worktree-enabled').checked = false;
       document.getElementById('create-worktree-info').style.display = 'none';
@@ -27444,7 +27516,11 @@ async function submitCreate() {
     ? ((_modelCustom && _modelCustom.value) || '').trim()
     : ((_modelSel && _modelSel.value) || '').trim();
   if (_model) createBody.model = _model;
-  if (worktreeEnabled) createBody.worktree = true;
+  if (worktreeEnabled) {
+    createBody.worktree = true;
+    const wtProfile = document.getElementById('create-worktree-profile')?.value || '';
+    if (wtProfile) createBody.worktree_profile = wtProfile;
+  }
   const _groups = _createGroupsFrom((document.getElementById('create-group') || {}).value);
   if (_groups.length) createBody.tags = _groups;
   // ISOLATED (Ethan, 2026-08-27). Sent only when true: the server writes

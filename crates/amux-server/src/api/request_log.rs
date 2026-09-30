@@ -2559,6 +2559,10 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         methods: &["GET"],
     },
     RouteEntry {
+        path: "/api/worktree-profiles",
+        methods: &["GET"],
+    },
+    RouteEntry {
         path: "/api/suggest-branch",
         methods: &["POST"],
     },

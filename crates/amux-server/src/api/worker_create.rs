@@ -49,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/templates", get(templates))
         .route("/api/git-check", get(git_check))
         .route("/api/git-branches", get(git_branches))
+        .route("/api/worktree-profiles", get(worktree_profiles))
         .route("/api/suggest-branch", post(suggest_branch))
         .route("/api/tmux-sessions", get(tmux_sessions))
         .route("/api/iterm2/sessions", get(iterm2_sessions))
@@ -112,6 +113,45 @@ async fn templates() -> Response {
         out.push(meta);
     }
     Json(Value::Array(out)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/worktree-profiles?dir=
+// ---------------------------------------------------------------------------
+
+/// The sparse profiles the create modal offers under "Use worktree"
+/// (AMUX-5341): the repo's own `scripts/worktree.sh profiles`, run from its
+/// committed bytes at origin/main. `supported: false` (not an error) for a
+/// repo without the script, which hides the picker.
+async fn worktree_profiles(RawQuery(q): RawQuery) -> Response {
+    use crate::api::session_verbs::{
+        parse_worktree_profiles, repo_toplevel, run_worktree_script, worktree_script_at,
+    };
+    let dir = qs_dir(&q);
+    if dir.is_empty() || !std::path::Path::new(&dir).is_dir() {
+        return Json(json!({"measured": false, "n_considered": 0, "supported": false,
+            "profiles": [], "why_unmeasured": "dir is not a directory"})).into_response();
+    }
+    let Some(repo) = repo_toplevel(&dir).await else {
+        return Json(json!({"measured": true, "n_considered": 0, "supported": false,
+            "profiles": [], "why": "not a git repository"})).into_response();
+    };
+    let Some(script) = worktree_script_at(&repo, "origin/main").await else {
+        return Json(json!({"measured": true, "n_considered": 0, "supported": false,
+            "profiles": [], "why": "no scripts/worktree.sh at origin/main"})).into_response();
+    };
+    let out = run_worktree_script(&script, &repo, &["profiles"], Duration::from_secs(30)).await;
+    let stdout = out
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let profiles = parse_worktree_profiles(&stdout);
+    Json(json!({
+        "measured": out.is_some(), "n_considered": profiles.len(), "supported": true,
+        "profiles": profiles, "repo": repo,
+        "why_unmeasured": if out.is_none() { json!("worktree.sh profiles timed out") } else { Value::Null },
+    }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------

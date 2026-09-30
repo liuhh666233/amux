@@ -13980,7 +13980,83 @@ pub(crate) async fn start_session(
             (!b.is_empty() && b != "none" && b != "HEAD").then_some(b)
         };
         let mut added = None;
-        if let Some(branch) = requested_branch.as_deref().filter(|_| !keep_existing) {
+        // SPARSE, WHEN THE REPO SHIPS scripts/worktree.sh (AMUX-5341). Only a
+        // NEW worktree: a kept one is the worker's workspace and keeps its
+        // sparse set. The script creates detached or on a NEW branch; an
+        // EXISTING branch goes through git below and is narrowed after.
+        let profile = {
+            let p = cfg.get_or("CC_WORKTREE_PROFILE", "").trim().to_string();
+            (!p.is_empty()).then_some(p)
+        };
+        let mut narrow_with = None;
+        if !keep_existing && !wt_dir.exists() {
+            match worktree_script_at(&work_dir, pinned_at).await {
+                Some(_) if profile.as_deref().is_some_and(|p| !valid_worktree_profile(p)) => {
+                    tracing::warn!(session = name, profile = ?profile, measured = true,
+                        n_considered = 1, verdict = "worktree_profile_invalid",
+                        "CC_WORKTREE_PROFILE is not a profile name; creating a full worktree");
+                }
+                Some(script) => {
+                    let branch_exists = match requested_branch.as_deref() {
+                        Some(b) => run_cmd(
+                            "git",
+                            &["-C", &work_dir, "rev-parse", "--verify", "--quiet",
+                              &format!("refs/heads/{b}")],
+                            OP_TIMEOUT,
+                        )
+                        .await
+                        .is_some_and(|o| o.status.success()),
+                        None => false,
+                    };
+                    let repo = repo_toplevel(&work_dir).await.unwrap_or_else(|| work_dir.clone());
+                    if branch_exists {
+                        narrow_with = Some((script, repo));
+                    } else {
+                        let mut args = vec!["add", wt_path.as_str(), "--ref", pinned_at];
+                        if let Some(p) = profile.as_deref() {
+                            args.extend(["--profile", p]);
+                        }
+                        if let Some(b) = requested_branch.as_deref() {
+                            args.extend(["--branch", b]);
+                        }
+                        let out = run_worktree_script(&script, &repo, &args, WORKTREE_ADD_TIMEOUT).await;
+                        if out.as_ref().is_some_and(|o| o.status.success()) && wt_dir.join(".git").exists() {
+                            // The script's `-b` tracks the ref it was cut from
+                            // (origin/main); the git path below uses --no-track,
+                            // so a worker's branch never pulls or pushes main.
+                            if requested_branch.is_some() {
+                                let _ = run_cmd("git", &["-C", &wt_path, "branch", "--unset-upstream"],
+                                    OP_TIMEOUT).await;
+                            }
+                            tracing::info!(session = name, profile = profile.as_deref().unwrap_or("(repo default)"),
+                                branch = requested_branch.as_deref().unwrap_or(""), measured = true,
+                                n_considered = 1, verdict = "worktree_sparse",
+                                "worktree created through the repo's scripts/worktree.sh");
+                            added = out;
+                        } else {
+                            let detail = out
+                                .as_ref()
+                                .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+                                .unwrap_or_else(|| "timed out".to_string());
+                            tracing::warn!(session = name, profile = ?profile, detail = %detail,
+                                measured = true, n_considered = 1, verdict = "worktree_sparse_failed",
+                                "scripts/worktree.sh could not create the worktree; falling back to a full git worktree");
+                            let _ = reclaim_worktree(&work_dir, &wt_path).await;
+                        }
+                    }
+                }
+                None if profile.is_some() => {
+                    tracing::warn!(session = name, profile = ?profile, measured = true,
+                        n_considered = 1, verdict = "worktree_profile_ignored",
+                        "CC_WORKTREE_PROFILE is set but this repo has no scripts/worktree.sh; creating a full worktree");
+                }
+                None => {}
+            }
+        }
+        if let Some(branch) = requested_branch
+            .as_deref()
+            .filter(|_| !keep_existing && added.is_none())
+        {
             let ref_name = format!("refs/heads/{branch}");
             let exists = run_cmd(
                 "git",
@@ -14012,6 +14088,29 @@ pub(crate) async fn start_session(
                     measured = true, n_considered = 1, verdict = "worktree_branch_unavailable",
                     "requested branch could not be checked out in the worktree; falling back to a detached worktree");
                 let _ = reclaim_worktree(&work_dir, &wt_path).await;
+            }
+        }
+        // An existing branch was checked out in full; narrow it to the profile.
+        // A failed narrow leaves a full, working worktree, so it only warns.
+        if let Some((script, repo)) = narrow_with.filter(|_| added.is_some()) {
+            let mut args = vec!["narrow", wt_path.as_str()];
+            if let Some(p) = profile.as_deref() {
+                args.extend(["--profile", p]);
+            }
+            let out = run_worktree_script(&script, &repo, &args, WORKTREE_ADD_TIMEOUT).await;
+            let ok = out.as_ref().is_some_and(|o| o.status.success());
+            let detail = out
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+                .unwrap_or_else(|| "timed out".to_string());
+            if ok {
+                tracing::info!(session = name, profile = profile.as_deref().unwrap_or("(repo default)"),
+                    measured = true, n_considered = 1, verdict = "worktree_sparse",
+                    "existing branch checked out, then narrowed by scripts/worktree.sh");
+            } else {
+                tracing::warn!(session = name, detail = %detail, measured = true, n_considered = 1,
+                    verdict = "worktree_narrow_failed",
+                    "scripts/worktree.sh narrow failed; the worktree stays a full checkout");
             }
         }
         // REUSE a surviving worktree from a previous run.
@@ -15589,6 +15688,178 @@ fn structured_resume_prompt(context: &StructuredResumeContext, reason: &str) -> 
 // stop_session (py:24943): record the resumable name, /exit gracefully, wait
 // for the shell, hard-kill on timeout. tmux stays alive.
 // ---------------------------------------------------------------------------
+
+// SPARSE WORKTREES (AMUX-5341, asked by mixpeek-cicd for Ethan). A repo that
+// ships `scripts/worktree.sh` names folder profiles in `.worktree-profiles`,
+// and a full Mixpeek worktree is ~3.6G where most lanes need a fraction. When
+// the repo has the script, a worker's worktree is created through it, with
+// the worker's CC_WORKTREE_PROFILE or the repo's default profile, and can be
+// widened later. A repo without it gets the plain `git worktree add` as before.
+//
+// The script is run from its COMMITTED bytes at the ref being checked out,
+// copied to a private temp file, never from the main checkout's working tree:
+// that tree is shared, and a peer mid-edit on the script would otherwise run
+// half an edit (CLAUDE.md, "run committed bytes").
+pub(crate) const WORKTREE_SCRIPT: &str = "scripts/worktree.sh";
+
+/// A profile argument the script accepts: names joined by commas.
+pub(crate) fn valid_worktree_profile(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() <= 128
+        && p.split(',').all(|w| {
+            // First char alphanumeric: a leading '-' would be read as a flag.
+            w.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+}
+
+/// The repo's worktree.sh as committed at `rev`, in a private temp file.
+/// None when the repo does not ship one at that ref.
+pub(crate) async fn worktree_script_at(repo: &str, rev: &str) -> Option<tempfile::TempPath> {
+    let spec = format!("{rev}:{WORKTREE_SCRIPT}");
+    let out = run_cmd("git", &["-C", repo, "show", &spec], OP_TIMEOUT).await?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    let mut f = tempfile::Builder::new()
+        .prefix("amux-worktree-sh-")
+        .suffix(".sh")
+        .tempfile()
+        .ok()?;
+    std::io::Write::write_all(&mut f, &out.stdout).ok()?;
+    Some(f.into_temp_path())
+}
+
+/// The top level of the repo `dir` belongs to, for the linked worktree case
+/// the MAIN checkout (the script's WT_REPO must be the repo, not the linked tree).
+pub(crate) async fn repo_toplevel(dir: &str) -> Option<String> {
+    let out = run_cmd(
+        "git",
+        &["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        OP_TIMEOUT,
+    )
+    .await?;
+    if !out.status.success() {
+        return None;
+    }
+    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let p = std::path::Path::new(&common);
+    // <repo>/.git -> <repo>; a bare common dir has no work tree to name.
+    (p.file_name().is_some_and(|n| n == ".git"))
+        .then(|| p.parent().map(|x| x.to_string_lossy().into_owned()))
+        .flatten()
+}
+
+/// Run a snapshot of worktree.sh against `repo`.
+pub(crate) async fn run_worktree_script(
+    script: &std::path::Path,
+    repo: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    let script = script.to_string_lossy();
+    let repo_env = format!("WT_REPO={repo}");
+    let mut argv: Vec<&str> = vec![repo_env.as_str(), "bash", script.as_ref()];
+    argv.extend_from_slice(args);
+    run_cmd("env", &argv, timeout).await
+}
+
+/// Parse `worktree.sh profiles`: `name  0.87G  dir dir ...` per line.
+pub(crate) fn parse_worktree_profiles(stdout: &str) -> Vec<serde_json::Value> {
+    let re = cached_re!(r"^(\S+)\s+([0-9.]+)G\s+(.*)$");
+    stdout
+        .lines()
+        .filter_map(|l| re.captures(l.trim_end()))
+        .map(|c| {
+            let rest = c[3].trim();
+            let full = rest == "(everything)" || rest == "*";
+            json!({
+                "name": &c[1],
+                "tracked_gb": c[2].parse::<f64>().unwrap_or(0.0),
+                "full": full,
+                "folders": if full { vec![] } else { rest.split_whitespace().collect::<Vec<_>>() },
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod worktree_profile_tests {
+    use super::*;
+
+    #[test]
+    fn profile_names_are_words_joined_by_commas() {
+        assert!(valid_worktree_profile("server"));
+        assert!(valid_worktree_profile("server,studio"));
+        assert!(valid_worktree_profile("full"));
+        for bad in ["", "a,,b", "../x", "--ref", "a b", "a;rm", "x/y"] {
+            assert!(!valid_worktree_profile(bad), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn profiles_output_parses_sizes_folders_and_full() {
+        let out = "server        0.87G  .githooks .github docs/api-reference server\n\
+                   full          3.93G  (everything)\n\
+                   (tracked bytes at origin/main; untracked build output is extra)\n";
+        let p = parse_worktree_profiles(out);
+        assert_eq!(p.len(), 2, "the trailing note is not a profile");
+        assert_eq!(p[0]["name"], "server");
+        assert_eq!(p[0]["tracked_gb"], 0.87);
+        assert_eq!(p[0]["folders"][3], "server");
+        assert_eq!(p[1]["full"], true);
+        assert_eq!(p[1]["folders"].as_array().unwrap().len(), 0);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let st = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(st.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&st.stderr));
+    }
+
+    /// The committed script runs against the repo named by WT_REPO, from a
+    /// snapshot, and its sparse set lands on the linked worktree only.
+    #[tokio::test]
+    async fn committed_script_creates_a_sparse_worktree_and_leaves_main_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::create_dir_all(repo.join("server")).unwrap();
+        std::fs::create_dir_all(repo.join("gtm")).unwrap();
+        std::fs::write(repo.join("server/a.txt"), "a").unwrap();
+        std::fs::write(repo.join("gtm/big.txt"), "b").unwrap();
+        // The smallest stand-in for Mixpeek's script: same argv and WT_REPO contract.
+        std::fs::write(
+            repo.join(WORKTREE_SCRIPT),
+            "set -eu\nREPO=\"$WT_REPO\"\ncmd=$1; shift\npath=$1; shift\nprofile=platform\nref=HEAD\n\
+             while [ $# -gt 0 ]; do case $1 in --profile) profile=$2; shift 2;; --ref) ref=$2; shift 2;; *) shift;; esac; done\n\
+             [ \"$cmd\" = add ] || exit 9\n\
+             git -C \"$REPO\" worktree add --no-checkout --detach \"$path\" \"$ref\" >/dev/null\n\
+             git -C \"$REPO\" config extensions.worktreeConfig true\n\
+             git -C \"$path\" sparse-checkout set --cone \"$profile\"\n\
+             git -C \"$path\" read-tree -mu HEAD\n",
+        )
+        .unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]);
+        git(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+        let r = repo.to_string_lossy().into_owned();
+        assert_eq!(repo_toplevel(&r).await.map(PathBuf::from), Some(repo.canonicalize().unwrap()));
+
+        let script = worktree_script_at(&r, "HEAD").await.expect("script is committed");
+        let wt = repo.join(".worktrees").join("w");
+        let w = wt.to_string_lossy().into_owned();
+        let out = run_worktree_script(&script, &r, &["add", &w, "--ref", "HEAD", "--profile", "server"],
+            WORKTREE_ADD_TIMEOUT).await.unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(wt.join("server/a.txt").exists());
+        assert!(!wt.join("gtm/big.txt").exists(), "gtm is outside the profile");
+        assert!(repo.join("gtm/big.txt").exists(), "the main checkout stays full");
+        // Linked worktree resolves to the MAIN repo, which WT_REPO must name.
+        assert_eq!(repo_toplevel(&w).await.map(PathBuf::from), Some(repo.canonicalize().unwrap()));
+        // A repo without the script: None, so creation falls back to git.
+        assert!(worktree_script_at(&r, "HEAD~0:nope").await.is_none());
+    }
+}
 
 /// Remove a git worktree registration AND its directory, locked or not.
 ///
@@ -22917,6 +23188,7 @@ async fn get_dispatch(
             j200(json!({"transcripts": list_session_transcripts(name)}))
         }
         "tracked-files" => tracked_files_verb(name),
+        "worktree" => worktree_get_verb(name, subid).await,
         "stats" => {
             let cfg = parse_env(name);
             j200(get_claude_stats(cfg.get_or("CC_DIR", "")))
@@ -23157,6 +23429,109 @@ fn log_get(name: &str, subid: &str, qs: &[(String, String)]) -> Response {
         data,
     )
         .into_response()
+}
+
+/// The worker's own worktree, where start_session puts it; None without one.
+fn worker_worktree(name: &str) -> Option<PathBuf> {
+    let path = crate::fanout_workspace::load(&home(), name)
+        .map(|w| PathBuf::from(w.path))
+        .unwrap_or_else(|| {
+            let cfg = parse_env(name);
+            Path::new(cfg.get_or("CC_DIR", "")).join(".worktrees").join(name)
+        });
+    path.join(".git").exists().then_some(path)
+}
+
+/// GET /api/sessions/<n>/worktree: the worktree's profile, the folders it
+/// checks out and its size on disk (AMUX-5341). `/profiles` lists the
+/// profiles the worker's repo offers, from its scripts/worktree.sh.
+async fn worktree_get_verb(name: &str, subid: &str) -> Response {
+    let cfg = parse_env(name);
+    let profile = cfg.get_or("CC_WORKTREE_PROFILE", "").to_string();
+    if subid == "profiles" {
+        let dir = cfg.get_or("CC_DIR", "").to_string();
+        let repo = repo_toplevel(&dir).await.unwrap_or(dir);
+        let Some(script) = worktree_script_at(&repo, "origin/main").await else {
+            return j200(json!({"measured": true, "n_considered": 0, "supported": false,
+                "profiles": [], "why": format!("{repo} has no {WORKTREE_SCRIPT} at origin/main")}));
+        };
+        let out = run_worktree_script(&script, &repo, &["profiles"], OP_TIMEOUT * 6).await;
+        let stdout = out.as_ref().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let profiles = parse_worktree_profiles(&stdout);
+        return j200(json!({
+            "measured": out.is_some(), "n_considered": profiles.len(), "supported": true,
+            "profiles": profiles, "current": profile,
+            "why_unmeasured": if out.is_none() { json!("worktree.sh profiles timed out") } else { Value::Null },
+        }));
+    }
+    let Some(path) = worker_worktree(name) else {
+        return j200(json!({"measured": true, "n_considered": 0, "worktree": false, "profile": profile}));
+    };
+    let p = path.to_string_lossy().into_owned();
+    // `sparse-checkout list` fails on a non-sparse worktree: that is a full one.
+    let sparse = run_cmd("git", &["-C", &p, "sparse-checkout", "list"], OP_TIMEOUT).await;
+    let folders: Vec<String> = sparse
+        .as_ref()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    let du = run_cmd("du", &["-sk", &p], OP_TIMEOUT * 6).await;
+    let size_kb = du
+        .as_ref()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next()?.parse::<u64>().ok());
+    j200(json!({
+        "measured": size_kb.is_some(), "n_considered": 1, "worktree": true, "path": p,
+        "profile": profile, "full": folders.is_empty(), "folders": folders,
+        "size_kb": size_kb,
+        "why_unmeasured": if size_kb.is_none() { json!("du did not finish") } else { Value::Null },
+    }))
+}
+
+/// POST /api/sessions/<n>/worktree {"widen": ["studio", "gtm/data"]}: add
+/// profiles or folders to the worker's sparse worktree through the repo's
+/// scripts/worktree.sh (`full` makes it a full checkout).
+async fn worktree_widen_verb(name: &str, body: &Value) -> Response {
+    let add: Vec<String> = match body.get("widen") {
+        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_string()).collect(),
+        Some(Value::String(s)) => s.split([',', ' ']).map(|x| x.trim().to_string()).collect(),
+        _ => vec![],
+    };
+    let add: Vec<String> = add.into_iter().filter(|s| !s.is_empty()).collect();
+    // A profile name or a repo-relative folder; nothing that could leave the tree.
+    let ok = |t: &str| {
+        !t.starts_with('/') && !t.starts_with('-') && !t.split('/').any(|seg| seg == "..")
+            && t.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+    };
+    if add.is_empty() || !add.iter().all(|t| ok(t)) {
+        return jresp(StatusCode::BAD_REQUEST, json!({"error":
+            "widen needs profile names or repo-relative folders, e.g. {\"widen\": [\"studio\"]}"}));
+    }
+    let Some(path) = worker_worktree(name) else {
+        return jresp(StatusCode::CONFLICT, json!({"error": format!("{name} has no worktree")}));
+    };
+    let p = path.to_string_lossy().into_owned();
+    let repo = repo_toplevel(&p).await.unwrap_or_default();
+    let Some(script) = worktree_script_at(&p, "HEAD").await else {
+        return jresp(StatusCode::CONFLICT, json!({"error": format!("this repo has no {WORKTREE_SCRIPT}")}));
+    };
+    let mut args = vec!["widen", p.as_str()];
+    args.extend(add.iter().map(String::as_str));
+    let out = run_worktree_script(&script, &repo, &args, WORKTREE_ADD_TIMEOUT).await;
+    let ok = out.as_ref().is_some_and(|o| o.status.success());
+    let text = |f: fn(&std::process::Output) -> &Vec<u8>| {
+        out.as_ref().map(|o| String::from_utf8_lossy(f(o)).trim().to_string()).unwrap_or_default()
+    };
+    let (stdout, stderr) = (text(|o| &o.stdout), text(|o| &o.stderr));
+    if ok {
+        tracing::info!(session = name, widen = ?add, measured = true, n_considered = 1,
+            verdict = "worktree_widened", "worktree widened through scripts/worktree.sh");
+        j200(json!({"ok": true, "output": stdout}))
+    } else {
+        tracing::warn!(session = name, widen = ?add, detail = %stderr, measured = true,
+            n_considered = 1, verdict = "worktree_widen_failed", "scripts/worktree.sh widen failed");
+        jresp(StatusCode::UNPROCESSABLE_ENTITY, json!({"ok": false, "error": if stderr.is_empty() { "widen timed out".to_string() } else { stderr }}))
+    }
 }
 
 /// GET git (+ commits / commit-detail / diff), py:75277-75361. The
@@ -23951,6 +24326,7 @@ async fn post_dispatch(
         "memory" => memory_post_verb(name, body),
         "git" => git_checkout_verb(name, body).await,
         "git-push" => git_push_verb(state, name).await,
+        "worktree" => worktree_widen_verb(name, body).await,
         "start" => {
             // RESPOND BEFORE THE CHOREOGRAPHY (AMUX-2557): validations
             // inline, launch in the background, instant 202.
@@ -30697,6 +31073,29 @@ async fn config_patch_with_liveness(
             // every send rather than caching it at launch, so no restart.
             "message": message,
         }));
+    }
+
+    // Sparse worktree profile (AMUX-5341): used the next time the worker's
+    // worktree is CREATED. An existing worktree keeps its folders; widen it
+    // with POST .../worktree instead.
+    if let Some(pv) = body.get("worktree_profile") {
+        let p = pv.as_str().unwrap_or("").trim();
+        if !p.is_empty() && !valid_worktree_profile(p) {
+            return jresp(StatusCode::BAD_REQUEST,
+                json!({"error": format!("worktree_profile {p:?} is not a profile name")}));
+        }
+        if p.is_empty() {
+            cfg.remove("CC_WORKTREE_PROFILE");
+        } else {
+            cfg.set("CC_WORKTREE_PROFILE", p);
+        }
+        if let Err(e) = cfg.write(&f) {
+            return jresp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": env_write_error(&f, &e)}),
+            );
+        }
+        return j200(json!({"ok": true, "message": "worktree profile updated; applies when the worktree is next created"}));
     }
 
     // Branch (py:76679).

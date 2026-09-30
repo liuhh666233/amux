@@ -4103,6 +4103,24 @@ pub async fn create_session_legacy(
     // file afterwards is too late, because the lane has already started in the
     // shared checkout by then.
     let worktree = body.get("worktree").and_then(serde_json::Value::as_bool) == Some(true);
+    let worktree_profile = body
+        .get("worktree_profile")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if !worktree_profile.is_empty()
+        && !crate::api::session_verbs::valid_worktree_profile(&worktree_profile)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!(
+                "worktree_profile {worktree_profile:?} is not a profile name: use letters, \
+                 digits, '-', '_', and ',' to combine profiles"
+            )})),
+        )
+            .into_response();
+    }
     let path = amux_home().join("sessions").join(format!("{name}.env"));
     if path.exists() {
         return (
@@ -4244,6 +4262,13 @@ pub async fn create_session_legacy(
     // (`cfg.get_or("CC_WORKTREE", "") == "1"` in session_verbs::start).
     if worktree {
         pairs.push(("CC_WORKTREE", "1".to_string()));
+        // SPARSE PROFILE (AMUX-5341): which folders the worktree checks out,
+        // for a repo that ships scripts/worktree.sh. Absent = the repo's own
+        // default profile. Only meaningful with a worktree, so only written
+        // with one.
+        if !worktree_profile.is_empty() {
+            pairs.push(("CC_WORKTREE_PROFILE", worktree_profile.clone()));
+        }
     }
     // ACCEPT tags AS AN ARRAY, which is what the dashboard and API send
     // (AMUX-3114). `s("tags")` only matched a STRING, so `{"tags":["gtm"]}` read
@@ -4818,6 +4843,8 @@ fn python_fleet_sessions(signals: &FleetSignals) -> Vec<serde_json::Value> {
         if let Some(v) = out.last_mut() {
             v["chat_companion"] = json!(env.get("AMUX_CHAT_COMPANION").is_some_and(|x| x == "1"));
             v["companion_of"] = json!(env.get("CC_COMPANION_OF").cloned().unwrap_or_default());
+            // Sparse worktree profile (AMUX-5341); empty = the repo's default.
+            v["worktree_profile"] = json!(env.get("CC_WORKTREE_PROFILE").cloned().unwrap_or_default());
         }
         // The projection is set outside the literal above, which is at the
         // json! macro's recursion limit.

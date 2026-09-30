@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2338,
+  "n_considered": 2343,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -3118,6 +3118,18 @@
     },
     "_workerTypeSet": {
       "kind": "command._workerTypeSet",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_workerWorktreeProfile": {
+      "kind": "command._workerWorktreeProfile",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_workerWorktreeWiden": {
+      "kind": "command._workerWorktreeWiden",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
