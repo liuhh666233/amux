@@ -178,7 +178,7 @@ pub(crate) async fn companion_route(
     if !is_post {
         let id = receipt_msg_id.unwrap_or("").trim();
         return if !id.is_empty() && seen.iter().any(|m| m == id) {
-            (StatusCode::OK, Json(json!({"ok": true, "accepted": true, "msg_id": id}))).into_response()
+            (StatusCode::OK, Json(json!({"ok": true, "accepted": true, "msg_id": id, "id": format!("chat:{id}")}))).into_response()
         } else {
             (StatusCode::NOT_FOUND, Json(json!({"ok": false, "accepted": false, "msg_id": id}))).into_response()
         };
@@ -205,7 +205,7 @@ pub(crate) async fn companion_route(
         update_meta(&key, &[("chat_seen_msg_ids", json!(keep[start..]))]);
     }
     tracing::info!(session = %key, worker, verdict = "chat_companion_send", "Chat tab message accepted");
-    (StatusCode::OK, Json(json!({"ok": true, "msg_id": msg_id, "message": message, "submission": "accepted"}))).into_response()
+    (StatusCode::OK, Json(json!({"ok": true, "msg_id": msg_id, "message": message, "submitted": true, "submission": "confirmed"}))).into_response()
 }
 
 /// Does this chat lane exist? A chat worker has an env file; a Chat tab
