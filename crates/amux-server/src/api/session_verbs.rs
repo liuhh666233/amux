@@ -30589,6 +30589,23 @@ async fn config_patch_inner(state: &AppState, name: &str, body: &Value) -> Respo
 
 // The observed liveness is an input so refusal tests exercise the whole config
 // branch, including its ordering, without restarting a real fleet worker.
+/// The settings a config PATCH body names. Keys handled together by one
+/// branch count as one setting: model with effort, send_allow with
+/// spans_groups, new_conversation with restart.
+fn config_patch_operations(body: &Value) -> Vec<String> {
+    const OPS: &[&[&str]] = &[
+        &["worktree_verify"], &["worktree_base"], &["rename"], &["worker_type"],
+        &["provider"], &["model", "effort"], &["dir"], &["task_summary"], &["desc"],
+        &["toggle_pin"], &["isolated"], &["toggle_yolo"], &["external_email_allowed"],
+        &["send_allow", "spans_groups"], &["worktree_profile"], &["branch"], &["tags"],
+        &["mcp"], &["new_conversation", "restart"],
+    ];
+    OPS.iter()
+        .filter(|keys| keys.iter().any(|k| body.get(*k).is_some()))
+        .map(|keys| keys.join("+"))
+        .collect()
+}
+
 async fn config_patch_with_liveness(
     state: &AppState,
     name: &str,
@@ -30599,6 +30616,25 @@ async fn config_patch_with_liveness(
         return jresp(
             StatusCode::BAD_REQUEST,
             json!({"error": "payload must be a JSON object"}),
+        );
+    }
+    // ONE SETTING PER PATCH, said out loud (2026-09-30). Every branch below
+    // applies its field and returns, so a body naming two settings applied the
+    // first one the branch order reached and answered ok:true. Measured:
+    // {"isolated":false,"tags":[...],"desc":"..."} on mixpeek-override
+    // updated the description and silently kept CC_ISOLATED=1 and the old
+    // tags. Refuse instead, naming every setting, so nothing is dropped.
+    let named = config_patch_operations(body);
+    if named.len() > 1 {
+        tracing::warn!(session = name, settings = ?named, verdict = "config_patch_multi_refused",
+            "a config PATCH named more than one setting; refused rather than applying one");
+        return jresp(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "error": format!("one setting per request: this body names {}; send each as its own PATCH", named.join(", ")),
+                "code": "one_setting_per_patch",
+                "settings": named,
+            }),
         );
     }
     let f = env_path(name);
@@ -48924,6 +48960,22 @@ mod commit_shape_tests {
         }
         assert!(super::worker_rules_args("ruled", "claude", false).is_empty());
         assert!(!super::worker_rules_file("ruled").exists());
+    }
+}
+
+#[cfg(test)]
+mod config_patch_operation_tests {
+    use serde_json::json;
+
+    #[test]
+    fn a_body_naming_two_settings_is_named_in_full_and_companions_count_once() {
+        let multi = super::config_patch_operations(&json!({"isolated": false, "tags": ["a"], "desc": "d"}));
+        assert_eq!(multi, vec!["desc", "isolated", "tags"]);
+        assert_eq!(super::config_patch_operations(&json!({"model": "m", "effort": "high"})), vec!["model+effort"]);
+        assert_eq!(super::config_patch_operations(&json!({"new_conversation": true, "restart": true})).len(), 1);
+        assert_eq!(super::config_patch_operations(&json!({"send_allow": "x", "spans_groups": true})).len(), 1);
+        assert_eq!(super::config_patch_operations(&json!({"branch": "b", "create": true})), vec!["branch"]);
+        assert!(super::config_patch_operations(&json!({})).is_empty());
     }
 }
 
