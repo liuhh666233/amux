@@ -23712,9 +23712,40 @@ async fn worktree_widen_verb(name: &str, body: &Value) -> Response {
     };
     let (stdout, stderr) = (text(|o| &o.stdout), text(|o| &o.stderr));
     if ok {
-        tracing::info!(session = name, widen = ?add, measured = true, n_considered = 1,
-            verdict = "worktree_widened", "worktree widened through scripts/worktree.sh");
-        j200(json!({"ok": true, "output": stdout}))
+        // THE SCRIPT'S EXIT 0 IS NOT THE CHECK (2026-09-30). All seven gs12
+        // worktrees reported "now checks out: ... research/goal-specs" while the
+        // directory stayed absent; a `git sparse-checkout reapply` materialised
+        // it. So every requested FOLDER that exists at HEAD must be on disk
+        // before this says ok: reapply once if not, and name what is still
+        // missing. Profile names are expanded by the script and are not paths.
+        let missing_now = |root: &std::path::Path, list: &[String]| -> Vec<String> {
+            list.iter().filter(|t| !root.join(t).exists()).cloned().collect()
+        };
+        let mut folders = Vec::new();
+        for t in &add {
+            let spec = format!("HEAD:{t}");
+            if git_out(&p, &["cat-file", "-e", &spec], Duration::from_secs(10)).await.is_some() {
+                folders.push(t.clone());
+            }
+        }
+        let mut missing = missing_now(&path, &folders);
+        let reapplied = !missing.is_empty();
+        if reapplied {
+            let _ = git_out(&p, &["sparse-checkout", "reapply"], Duration::from_secs(120)).await;
+            missing = missing_now(&path, &folders);
+        }
+        if !missing.is_empty() {
+            tracing::warn!(session = name, widen = ?add, missing = ?missing, measured = true,
+                n_considered = folders.len(), verdict = "worktree_widen_unmaterialized",
+                "widen reported success but these folders are not on disk, even after a reapply");
+            return jresp(StatusCode::UNPROCESSABLE_ENTITY, json!({"ok": false,
+                "error": format!("widen updated the sparse list but {} did not appear on disk", missing.join(", ")),
+                "missing": missing, "output": stdout}));
+        }
+        tracing::info!(session = name, widen = ?add, reapplied, measured = true, n_considered = folders.len().max(1),
+            verdict = if reapplied { "worktree_widened_after_reapply" } else { "worktree_widened" },
+            "worktree widened through scripts/worktree.sh; requested folders verified on disk");
+        j200(json!({"ok": true, "output": stdout, "verified": folders, "reapplied": reapplied}))
     } else {
         tracing::warn!(session = name, widen = ?add, detail = %stderr, measured = true,
             n_considered = 1, verdict = "worktree_widen_failed", "scripts/worktree.sh widen failed");
