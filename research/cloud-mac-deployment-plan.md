@@ -454,6 +454,64 @@ present.
 When this list passes on our own Mac, the first customer gets the same run with
 their accounts in place of ours.
 
+## Invariants: continuous validation on the cloud Mac
+
+The checklist above is run once. These checks run forever, on our dogfood Mac
+first and then on every customer Mac, so each promise in this plan is
+something that goes red the moment it stops being true.
+
+### How they run
+
+- **Outside-in checks** run on OUR amux as a `kind: shell` schedule every 5
+  minutes, probing the customer Mac over Tailscale. They see what a customer
+  sees, and they still report when the Mac is down.
+- **On-box checks** run on the customer Mac as a `kind: shell` schedule every
+  15 minutes, reading its own amux API and system state.
+- **Output contract.** Every check prints one JSON line:
+  `{"check":"CM-1","ok":true,"measured":true,"n_considered":1,"detail":"..."}`.
+  A check that could not run reports `measured:false`, and **unmeasured counts
+  as failing**, never as passing (amux ethos rule 4).
+- **Failure path.** A failing or unmeasured check opens or updates ONE card per
+  check on the amux-cloud board (deduped by check id and customer) and sends an
+  amux alert. It closes the card itself when the check passes again, with the
+  passing line as evidence.
+- **The checks are code in the IaC directory** (`checks/cloud-mac.sh` plus a
+  per-customer config naming the expected members, connectors and backup
+  targets), so a new customer gets the full set from `make up`.
+- **Each check must be able to fail.** When a check is added, break the thing
+  it watches once on the dogfood Mac and confirm it goes red, then restore.
+  Record that in the check's comment.
+
+### The invariants
+
+| ID | Promise | Where | How it is checked | Passes when |
+|---|---|---|---|---|
+| CM-1 | amux is up | Outside-in | `GET https://<mac>:8824/health` over Tailscale | 200, and `commit` equals the pinned commit for this customer |
+| CM-2 | Reachable only over Tailscale | Outside-in | Connect to ports 22, 5900 and 8824 on the Mac's PUBLIC address | All three refused or time out |
+| CM-3 | Remote screen works | Outside-in | Open port 5900 over Tailscale and read the greeting | Greeting starts with `RFB` |
+| CM-4 | Stays up 24/7 | Outside-in | Compare `/health` start time with the previous run | No restart outside an announced maintenance window |
+| CM-5 | People sign in by Tailscale login | Outside-in | Our probe device is an invited member; `GET /api/identity` from it | `is_local_member` true, with our probe's email (needs MP-1) |
+| CM-6 | A customer can reach only their Mac | Tailscale | `tests` block in the Tailscale policy file, checked by Tailscale on every policy change | Customer users are allowed to the Mac's ports and denied everything else |
+| CM-7 | Full service: credentials | On-box | `GET /api/connectors` against the customer's required list | No required connector reports missing keys |
+| CM-8 | Full service: email works | On-box, daily | Send to a canary address with a unique subject, then find it with `/api/email/search` | Found within 10 minutes |
+| CM-9 | Schedules fire | On-box | `GET /api/schedules/runs` | Every enabled schedule ran within its expected window |
+| CM-10 | None of our credentials on their Mac | On-box | Look up our key NAMES (a denylist in the config) in `server.env` and the vault | Zero matches |
+| CM-11 | Every action names a person or worker | On-box | Board and message history for the last 24 hours | No row with an empty or `api-anonymous` actor |
+| CM-12 | Backups are current | On-box | `restic snapshots --latest 1` and `tmutil latestbackup` | restic under 7 hours old, Time Machine under 2 hours |
+| CM-13 | Backups restore | On-box, weekly | Restore one known file from restic to a temp directory | Its hash matches the live file |
+| CM-14 | The machine stays ours to schedule | On-box | `softwareupdate --schedule` and `pmset -g` | Automatic updates off, sleep never, restart after power failure on |
+| CM-15 | Room to work | On-box | Free disk and memory pressure | Disk over 20% free, memory pressure normal |
+
+CM-6 is the only check Tailscale runs rather than us: a policy change that
+breaks isolation is rejected before it applies, which is stronger than a probe.
+
+### What "live" means for a customer
+
+A customer Mac counts as live when all fifteen checks have been green for 24
+hours in a row and the one-off drills in the dogfood checklist have passed.
+Before that the customer can use it, and the board shows which promise is not
+yet kept.
+
 ## Monthly cost, one customer
 
 | Item | Cost |
