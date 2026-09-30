@@ -1701,9 +1701,16 @@ const DELIVERED_MESSAGE_CARD_SQL: &str = "SELECT 1 FROM cmd_history h \
 fn eligible_todo_count(conn: &Connection, session: &str, now: f64) -> i64 {
     let fresh_cut = pickup_fresh_cut(now);
     let reclaim_cut = now - reclaim_cooldown_s();
+    // Same predicate as select_pickup_with's delegated-only filter, so the
+    // eligible count /api/debug/board-drive shows is what pickup would offer.
+    let delegated = if delegated_only_pickup(session) {
+        " AND COALESCE(i.requested_by,'')<>'' AND i.requested_by<>?1"
+    } else {
+        ""
+    };
     conn.query_row(
         &format!(
-            "SELECT COUNT(*) FROM legacy_execution_issues i WHERE {dw}",
+            "SELECT COUNT(*) FROM legacy_execution_issues i WHERE {dw}{delegated}",
             dw = dispatchable_where()
         ),
         rusqlite::params![session, fresh_cut, reclaim_cut],
@@ -14553,6 +14560,7 @@ mod tests {
             claimed(&select_pickup_with(&conn, "lane", now_f64(), false)).is_none(),
             "a card the lane filed for itself must not be dispatched under delegated-only"
         );
+        assert_eq!(eligible_todo_count(&conn, "lane", now_f64()), 0, "the eligible count shares the filter");
         add_card(&conn, "GM-6", "lane", "todo", "assigned by the orchestrator", "SCOPE: real\n- [ ] do it");
         conn.execute("UPDATE issues SET requested_by='orchestrator' WHERE id='GM-6'", []).unwrap();
         assert_eq!(
@@ -14560,6 +14568,7 @@ mod tests {
             Some("GM-6"),
             "a card another lane requested is still dispatched"
         );
+        assert_eq!(eligible_todo_count(&conn, "lane", now_f64()), 1);
     }
 
     #[test]
