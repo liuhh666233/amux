@@ -76,6 +76,11 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
         || has(&[
             "/mo", "per month", "a month", "spend ", "spending", " pay ", "purchase", " buy ",
             "top up", "fund ", "provision", "raise the spend", "spend limit", "gpu spend",
+            // AMUX-5367 (2026-09-29): "Picking a provider and paying for it is
+            // your call" was auto-approved as a judgment call. The turn-end
+            // recorder had already labelled it "Owner ask (money)"; honour that
+            // label, and the verbs a paid choice is phrased with.
+            "owner ask (money)", "paying", "pay for", "subscribe", "subscription", "renting", "rent a ",
             "on demand", "credits",
             // Paid compute with no figure in the ask: GCA-54 "the logo corpus
             // re-ingest ... 189,830 docs (5.1x)" went back to its worker.
@@ -764,6 +769,16 @@ mod tests {
         assert!(actor_is_owner("Ethan"));
         assert!(actor_is_owner("ethan (sign-in)"));
         assert!(!actor_is_owner("mvs-infra"));
+    }
+
+    #[test]
+    fn the_recorders_money_label_and_paying_verbs_are_money() {
+        // Live AMUX-5367: auto-approved as a judgment call; it is recurring spend.
+        let q = "May amux proceed with this: Picking a provider and paying for it is your call? Owner ask (money): May amux proceed with this: Picking a provider and paying for it is your call?";
+        assert_eq!(classify("budget", q).0, "money");
+        assert_eq!(classify("decision", "Should we subscribe to MacStadium or rent a Mac mini?").0, "money");
+        // Still not money: a design question that only mentions pricing.
+        assert_eq!(classify("decision", "Which name reads better?").0, "other");
     }
 
     #[test]
