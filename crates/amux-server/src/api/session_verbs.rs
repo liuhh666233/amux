@@ -23621,7 +23621,7 @@ fn log_get(name: &str, subid: &str, qs: &[(String, String)]) -> Response {
 }
 
 /// The worker's own worktree, where start_session puts it; None without one.
-fn worker_worktree(name: &str) -> Option<PathBuf> {
+pub(crate) fn worker_worktree(name: &str) -> Option<PathBuf> {
     let path = crate::fanout_workspace::load(&home(), name)
         .map(|w| PathBuf::from(w.path))
         .unwrap_or_else(|| {

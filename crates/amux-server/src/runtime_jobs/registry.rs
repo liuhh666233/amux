@@ -115,6 +115,7 @@ pub mod ids {
     pub const BOARD_DRIVE: &str = "board-drive";
     pub const CDC_POLLER: &str = "cdc-poller";
     pub const PANE_SIZE: &str = "pane_size";
+    pub const WORKTREE_HYGIENE: &str = "worktree-hygiene";
     pub const STORAGE: &str = "storage";
     pub const HEARTBEAT: &str = "heartbeat";
     pub const TAILNET_WATCH: &str = "tailnet-watch";
@@ -162,6 +163,7 @@ pub const ALL_IDS: &[&str] = &[
     ids::BOARD_DRIVE,
     ids::CDC_POLLER,
     ids::PANE_SIZE,
+    ids::WORKTREE_HYGIENE,
     ids::STORAGE,
     ids::HEARTBEAT,
     ids::TAILNET_WATCH,
@@ -384,6 +386,14 @@ pub const CATALOG: &[Doc] = &[
         env: NO_ENV,
         pref: None,
         detail: Some("/api/debug/logs"),
+    },
+    Doc {
+        id: ids::WORKTREE_HYGIENE,
+        name: "Worker worktree hygiene",
+        purpose: "Re-flags out-of-cone files that a sparse worker worktree shows as deleted, which otherwise refuse the worker's rebase.",
+        env: NO_ENV,
+        pref: None,
+        detail: None,
     },
     Doc {
         id: ids::PANE_SIZE,

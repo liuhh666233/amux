@@ -74,6 +74,7 @@ mod memory_consumers;
 pub mod message_capture;
 pub mod model_catalog_refresh;
 pub mod pane_size;
+pub mod worktree_hygiene;
 mod poll_watch;
 /// The live registry of the jobs below — see [`registry`] for why it is
 /// derived from the spawn sites rather than declared alongside them.

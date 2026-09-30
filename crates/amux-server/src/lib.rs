@@ -608,6 +608,8 @@ async fn async_main() {
     // repair at boot, then holds the line on a 20s sweep against an
     // expiring viewer lease.
     drop(runtime_jobs::pane_size::spawn());
+    // Phantom deletions in sparse worker worktrees (2026-09-30, gs12 workers).
+    drop(runtime_jobs::worktree_hygiene::spawn());
     // AUTOFIX (AMUX-2681) — notice, file, hand off. Runs in the SERVER, on
     // purpose: the thing that watches for breakage must not share fate with
     // the thing that breaks, so nothing in it touches a pane, a send or a turn
