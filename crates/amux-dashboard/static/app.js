@@ -13427,7 +13427,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1185';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1186';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -27416,14 +27416,16 @@ async function _loadWorktreeProfiles() {
   const dir = document.getElementById('create-dir').value.trim();
   row.style.display = 'none'; sel.innerHTML = '';
   if (!dir || !document.getElementById('create-worktree-enabled').checked) return;
+  // First read of a large repo takes seconds (the server caches it per commit).
+  sel.innerHTML = '<option value="">Loading folders…</option>'; row.style.display = '';
   try {
     const d = await (await fetch(API + '/api/worktree-profiles?dir=' + encodeURIComponent(dir))).json();
-    if (!d.supported || !(d.profiles || []).length) return;
     if (document.getElementById('create-dir').value.trim() !== dir) return;
+    if (!d.supported || !(d.profiles || []).length) { row.style.display = 'none'; sel.innerHTML = ''; return; }
     sel.innerHTML = '<option value="">Repo default</option>' + d.profiles.map(p =>
       `<option value="${esc(p.name)}">${esc(p.name)} · ${Number(p.tracked_gb).toFixed(2)}G${p.full ? ' (everything)' : ''}</option>`).join('');
     row.style.display = '';
-  } catch (e) { /* no picker: the worktree is created the repo's default way */ }
+  } catch (e) { row.style.display = 'none'; sel.innerHTML = ''; /* the worktree is created the repo's default way */ }
 }
 function _toggleWorktree(on) {
   document.getElementById('create-worktree-info').style.display = on ? '' : 'none';

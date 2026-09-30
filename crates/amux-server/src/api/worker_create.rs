@@ -136,6 +136,24 @@ async fn worktree_profiles(RawQuery(q): RawQuery) -> Response {
         return Json(json!({"measured": true, "n_considered": 0, "supported": false,
             "profiles": [], "why": "not a git repository"})).into_response();
     };
+    // CACHED PER (repo, origin/main sha): `profiles` sums tracked bytes over the
+    // whole tree (7.5s on Mixpeek, measured 2026-09-30), and its output only
+    // changes when origin/main moves. The sha lookup is the cheap part.
+    let sha = run("git", &["-C", &repo, "rev-parse", "--verify", "--quiet", "origin/main"], GIT_CHECK_TIMEOUT)
+        .await
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    static CACHE: std::sync::Mutex<Option<(String, String, Value)>> = std::sync::Mutex::new(None);
+    if !sha.is_empty() {
+        if let Some((r, s, v)) = CACHE.lock().ok().and_then(|g| g.clone()) {
+            if r == repo && s == sha {
+                let mut v = v;
+                v["cached"] = json!(true);
+                return Json(v).into_response();
+            }
+        }
+    }
     let Some(script) = worktree_script_at(&repo, "origin/main").await else {
         return Json(json!({"measured": true, "n_considered": 0, "supported": false,
             "profiles": [], "why": "no scripts/worktree.sh at origin/main"})).into_response();
@@ -146,12 +164,17 @@ async fn worktree_profiles(RawQuery(q): RawQuery) -> Response {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     let profiles = parse_worktree_profiles(&stdout);
-    Json(json!({
+    let body = json!({
         "measured": out.is_some(), "n_considered": profiles.len(), "supported": true,
-        "profiles": profiles, "repo": repo,
+        "profiles": profiles, "repo": repo, "at": sha,
         "why_unmeasured": if out.is_none() { json!("worktree.sh profiles timed out") } else { Value::Null },
-    }))
-    .into_response()
+    });
+    if out.is_some() && !sha.is_empty() {
+        if let Ok(mut g) = CACHE.lock() {
+            *g = Some((repo.clone(), sha.clone(), body.clone()));
+        }
+    }
+    Json(body).into_response()
 }
 
 // ---------------------------------------------------------------------------
