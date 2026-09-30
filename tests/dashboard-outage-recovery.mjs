@@ -23,7 +23,7 @@ function fixture(names = [], shared = {}) {
   const timers = new Map(); const timerDelays = new Map(); let tid = 0;
   const elements = new Map();
   const element = id => {
-    if (!elements.has(id)) elements.set(id, {value: '', textContent: '', innerHTML: '', style: {}, scrollHeight: 0, setAttribute() {}, classList: {add() {}, remove() {}, contains() {return false;}}});
+    if (!elements.has(id)) elements.set(id, {value: '', textContent: '', innerHTML: '', style: {}, scrollHeight: 0, setAttribute() {}, classList: {add() {}, remove() {}, toggle() {}, contains() {return false;}}});
     return elements.get(id);
   };
   const sandbox = { Response, AbortController, AbortSignal, DOMException, crypto: globalThis.crypto,
@@ -34,7 +34,10 @@ function fixture(names = [], shared = {}) {
       removeItem(k) { stored.delete(k); }, key(i) { return [...stored.keys()][i] ?? null; }, get length() { return stored.size; }},
     setTimeout(fn, delay) { timers.set(++tid, fn); timerDelays.set(tid, delay); return tid; }, clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
     API: '', offlineQueue: [], drafts: [], online: true, _syncFlight: null, _syncRetryTimer: null, _syncBackoffMs: 0, _SYNC_MIN_MS: 2000, _SYNC_MAX_MS: 60000, _OUTBOX_STALLED_MS:600000,
-    _interactionReplay:q => ({id:q.id}), _interactionAcknowledge:async () => {}, _interactionSet() {}, _upqList:async () => [], _uploadSyncPending:false, _syncChecklist:[], _localWriteError: '', window:{isSecureContext:true}, APP_VER:'test', _writeError: '', _outboxActive: new Set(), _bdSaveRequests: new Set(), consecutiveFailures: 0,
+    _interactionReplay:q => ({id:q.id}), _interactionAcknowledge:async () => {}, _interactionSet() {}, _upqList:async () => [], _uploadSyncPending:false, _syncChecklist:[], _localWriteError: '', _syncBannerRequested: false, _syncBannerAuto: false, _syncChecklistAt: 0, _syncPillText: '', peekSession: null, _swOfflineNotice: null,
+    // Chat tab (AMUX-5350): no chat open, every worker renders as a terminal.
+    _chat: {name: null}, _chatShowing: () => false, _workerRenderer: () => 'terminal', _workersAsOfNote: () => '',
+    window:{isSecureContext:true}, APP_VER:'test', _writeError: '', _outboxActive: new Set(), _bdSaveRequests: new Set(), consecutiveFailures: 0,
     _OUTBOX_SKIP: /\/api\/client-debug/, _OUTBOX_METHODS: {POST:1,PATCH:1,PUT:1,DELETE:1},
     _getDeviceName: () => 'test device', _authHeaders: h => h, esc: s => s, escJs: s => s, describeOp: q => q.url,
     showToast() {}, amuxTrack() {}, updateConnectionStatus() {}, fetchSessions() {}, fetchBoard() {},
@@ -46,7 +49,7 @@ function fixture(names = [], shared = {}) {
   const ctx = vm.createContext(sandbox);
   // Load production dependencies too: replay must execute, not fail on a stale fixture.
   for (const name of ['_outboxManualAction', '_syncBannerShownAt', '_RECEIPT_TIMEOUT_MSG', '_geoFix', '_GEO_FIX_MAX_AGE_MS']) vm.runInContext(declaration(name), ctx);
-  for (const name of ['_syncBannerBeacon', '_sendContext', '_pendingStop', '_localStorageBytes', '_writeUserStorage', '_outboxDiagnostic', '_outboxAgeMs', '_outboxIsStalled', '_outboxAgeLabel', '_outboxNeedsAttention', '_localWriteNotice', '_localMessageRequest', '_validateMessageAcknowledgement', '_validateBoardAcknowledgement', '_readQueue', '_outboxLock', '_mutateQueue', '_outboxQueueable', '_outboxMessageId', '_outboxUncertainMessage', '_outboxConfirmMessage', '_queueOp', '_boundedMutationFetch', '_syncOneDraft', '_syncBackoffReset', '_scheduleSyncRetry', '_clearSyncTransientToast', '_outboxPermanentRefusal', '_runSyncBanner', 'runSyncBanner', ...names]) vm.runInContext(code(name), ctx);
+  for (const name of ['_syncBannerBeacon', '_sendContext', '_pendingStop', '_localStorageBytes', '_writeUserStorage', '_outboxDiagnostic', '_outboxAgeMs', '_outboxIsStalled', '_outboxAgeLabel', '_outboxNeedsAttention', '_localWriteNotice', '_localMessageRequest', '_validateMessageAcknowledgement', '_validateBoardAcknowledgement', '_readQueue', '_outboxLock', '_mutateQueue', '_outboxQueueable', '_outboxMessageId', '_outboxMessageProgress', '_outboxUncertainMessage', '_outboxConfirmMessage', '_queueOp', '_boundedMutationFetch', '_syncOneDraft', '_syncBackoffReset', '_scheduleSyncRetry', '_clearSyncTransientToast', '_outboxPermanentRefusal', '_runSyncBanner', 'runSyncBanner', ...names]) vm.runInContext(code(name), ctx);
   return {ctx, stored, timers, timerDelays, element};
 }
 const patch = {method:'PATCH', body:'{"title":"saved","expect_rev":1}'};
@@ -189,7 +192,11 @@ test('connection status follows reads while pending write errors remain visible 
   assert.equal(ctx._writeError, '500: pool timeout', 'a live connection does not erase the failed write');
   ctx.offlineQueue = [{url:'/api/board/TASK-1',timestamp:Date.now(),error:ctx._writeError}];
   ctx.updateConnectionStatus(); assert.equal(connection.textContent, '1 pending');
-  assert.match(element('offline-ops').innerHTML, /500: pool timeout/, 'the failed operation retains its actionable error');
+  // Failed ops moved from the homepage banner to the status modal (07b42586,
+  // Ethan 2026-09-24). The error stays on the op the modal renders; the
+  // banner stays hidden and empty.
+  assert.equal(ctx.offlineQueue[0].error, '500: pool timeout', 'the failed operation retains its actionable error');
+  assert.equal(element('offline-ops').innerHTML, '');
   ctx._writeError = ''; ctx.offlineQueue = []; ctx._boardReadError = '500';
   ctx.updateConnectionStatus(); assert.equal(connection.textContent, 'Sync error');
   ctx._boardReadError = ''; ctx._syncReadError = 'network_error';
@@ -385,22 +392,25 @@ test('replay retries a durable message even while connectivity is believed offli
 });
 
 test('a newly queued send stays quiet while a stuck send shows its waiting state', () => {
+  // Waiting state lives in the status badge, never the homepage banner
+  // (07b42586, Ethan 2026-09-24: "it takes up too much real estate").
   const {ctx, element} = fixture(['updateConnectionStatus']);
-  ctx.document.querySelectorAll = () => [];
+  const badge = element('conn-status'); badge.id = 'conn-status';
+  ctx.document.querySelectorAll = () => [badge];
   Object.assign(ctx, {_sessionLoadError:null, _boardReadError:'', _syncReadError:'',
-    _liveSSE:true, _recordConnState() {}, _sessionReadNotice:() => ''});
+    _liveSSE:true, _recordConnState() {}, _sessionReadNotice:() => '', _workersAsOfNote:() => ''});
   const classes = new Set();
   element('offline-banner').classList = {add: x=>classes.add(x), remove:x=>classes.delete(x)};
   ctx.offlineQueue = [{url:'/api/sessions/worker/send',timestamp:Date.now()}];
   ctx.updateConnectionStatus();
-  assert.equal(classes.has('active'), false);
+  assert.equal(badge.textContent, 'Live', 'a fresh send is ordinary delivery, not a waiting state');
   ctx.offlineQueue[0].timestamp -= 600001;
   ctx.updateConnectionStatus();
-  assert.equal(classes.has('active'), true);
-  assert.match(element('offline-banner-title').innerHTML, /1 stalled/);
+  assert.equal(badge.textContent, '1 pending', 'a stuck send shows in the badge');
   ctx.online = false;
   ctx.updateConnectionStatus();
-  assert.match(element('offline-banner-title').innerHTML, /will send on reconnect/);
+  assert.equal(badge.textContent, '1 pending');
+  assert.equal(classes.has('active'), false, 'the homepage banner never opens');
 });
 
 
@@ -520,10 +530,11 @@ test('post-input terminal polling is lightweight, serial and bounded', async () 
   assert.equal(timerDelays.get(ctx.peekTimer),100);
   now=3000;await timers.get(ctx.peekTimer)();assert.deepEqual(refreshes,[true,false,true]);
   assert.ok(timerDelays.get(ctx.peekTimer)>100);
-  // AMUX-4802: the cadence is a PERIOD. A 1500ms setting with a 200ms request
-  // waits 1300, not 1500. The request's duration used to be added on top.
+  // AMUX-4802: the cadence is a PERIOD. The idle setting is 500ms since
+  // 6efbc8fc, so a 200ms request waits 300, not 500. The request's duration
+  // used to be added on top.
   now=20000;requestMs=200;await timers.get(ctx.peekTimer)();
-  assert.equal(timerDelays.get(ctx.peekTimer),1300);
+  assert.equal(timerDelays.get(ctx.peekTimer),300);
   // A request slower than the period still leaves a gap: serial and bounded.
   now=40000;requestMs=5000;await timers.get(ctx.peekTimer)();
   assert.equal(timerDelays.get(ctx.peekTimer),40);
@@ -557,32 +568,33 @@ test('distinct fast taps fire while synthetic click echoes remain suppressed', (
 
 
 test('offline banner distinguishes blocked work from changes that will retry', () => {
+  // The distinction now lives in the status badge (blocked wins: "N failed")
+  // and the status modal; the homepage banner is always hidden (07b42586).
   const {ctx, element} = fixture(['updateConnectionStatus']);
-  ctx.document.querySelectorAll = () => [];
+  const badge = element('conn-status'); badge.id = 'conn-status';
+  ctx.document.querySelectorAll = () => [badge];
   Object.assign(ctx, {_sessionLoadError:null, _boardReadError:'', _syncReadError:'',
-    _liveSSE:false, _recordConnState() {}, _sessionReadNotice:() => '', online:false});
+    _liveSSE:false, _recordConnState() {}, _sessionReadNotice:() => '', _workersAsOfNote:() => '', online:false});
   ctx.offlineQueue = [{id:'blocked',state:'blocked',error:'409: revision conflict',url:'/api/board/TASK-1',timestamp:Date.now()}];
   ctx.updateConnectionStatus();
-  let title = element('offline-banner-title').innerHTML;
-  assert.match(title, /Offline/);
-  assert.match(title, /1 failed op/);
-  assert.match(title, /review/);
-  assert.doesNotMatch(title, /will send on reconnect/);
+  assert.equal(badge.textContent, '1 failed');
   ctx.offlineQueue.push({id:'pending',url:'/api/board/TASK-2',timestamp:Date.now()});
   ctx.updateConnectionStatus();
-  title = element('offline-banner-title').innerHTML;
-  assert.match(title, /1 queued, will send on reconnect/);
-  assert.match(title, /1 failed/);
-  assert.doesNotMatch(title, /2 (ops|queued)/);
+  assert.equal(badge.textContent, '1 failed', 'a retryable op must not hide the one that needs review');
   ctx.online = true;
   ctx.updateConnectionStatus();
-  assert.match(element('offline-banner-title').innerHTML, /1 sending, 1 failed/);
+  assert.equal(badge.textContent, '1 failed');
+  ctx.offlineQueue = [{id:'pending',url:'/api/board/TASK-2',timestamp:Date.now()}];
+  ctx.updateConnectionStatus();
+  assert.equal(badge.textContent, 'Polling', 'online: a fresh queued op is ordinary delivery');
+  ctx.online = false;
+  ctx.updateConnectionStatus();
+  assert.equal(badge.textContent, '1 pending', 'offline: queued work reads as pending, not failed');
+  ctx.online = true;
   ctx.offlineQueue = [{id:'stalled',url:'/api/board/TASK-2',timestamp:Date.now()-3*60*60*1000}];
   ctx.updateConnectionStatus();
-  title = element('offline-banner-title').innerHTML;
-  assert.match(title, /1 stalled 3h/);
-  assert.match(title, /review/);
-  assert.doesNotMatch(title, /sending|_clearBlockedOps/);
+  assert.equal(badge.textContent, '1 pending', 'a stalled op keeps the badge in its waiting state');
+  assert.equal(element('offline-ops').innerHTML, '');
 });
 
 test('a stale failed-row dismiss cannot remove work another tab has resumed', async () => {
@@ -631,7 +643,10 @@ test('quiet batches show individual receipts while one ordinary send stays quiet
     for(let i=0;i<count;i++)await ctx._queueOp('/api/board/TASK-'+i,patch);
     ctx._origFetch=async url=>new Response(JSON.stringify({id:url.split('/').pop()}),{status:200});
     await ctx.runSyncBanner(true);
-    assert.equal(shown,count>=2);
+    // The checklist no longer opens on its own for any batch size (Ethan
+    // 2026-09-24: "keep it in the pending/live status at the top"); progress
+    // is the connection pill, and a tap on it opens the list.
+    assert.equal(shown,false);
     assert.equal(ctx.offlineQueue.length,0);
   }
 });
@@ -821,8 +836,9 @@ test('project workers have their own group and group actions target only eligibl
     {name:'project-paused',project:'mixpeek',lifecycle:'paused',running:false},
     {name:'review-only',project:'',lifecycle:'review',running:false},
     {name:'personal',project:'',lifecycle:'active',running:true},
-  ],_expiredWorkerInventory:new Map([['project-expired',{name:'project-expired',project:'mixpeek',lifecycle:'expired'}]]),boardItems:[]});
-  for(const name of ['_workerGroupMembers','_workerGroupActionNames']) vm.runInContext(code(name),ctx);
+  ],_expiredWorkerInventory:new Map([['project-expired',{name:'project-expired',project:'mixpeek',lifecycle:'expired'}]]),boardItems:[],
+    _workerListFilterPass:()=>true});  // no tag/provider/model filter active
+  for(const name of ['_workerGroupMembers','_workerGroupActionNames','_workerActionEligible']) vm.runInContext(code(name),ctx);
   assert.deepEqual(Array.from(ctx._workerGroupMembers('project'),s=>s.name).sort(),['project-expired','project-paused','project-running']);
   assert.deepEqual(Array.from(ctx._workerGroupActionNames('project','pause')),['project-running']);
   assert.deepEqual(Array.from(ctx._workerGroupActionNames('project','resume')).sort(),['project-expired','project-paused']);
