@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2354,
+  "n_considered": 2355,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -2846,14 +2846,20 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
-    "_steeringQueueDelayed": {
-      "kind": "command._steeringQueueDelayed",
+    "_steeringDelayPrompt": {
+      "kind": "command._steeringDelayPrompt",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
     "_steeringSendNow": {
       "kind": "command._steeringSendNow",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_steeringSetDelay": {
+      "kind": "command._steeringSetDelay",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

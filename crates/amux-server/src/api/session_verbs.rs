@@ -24463,6 +24463,47 @@ pub(crate) async fn steer_mutate(
             "no_board_refused": no_board_refusal_notice(skip_board, &text, peer_coordination),
         }));
     }
+    if *method == Method::PATCH {
+        let msg_id = body_str(body, "id");
+        if msg_id.is_empty() {
+            return jresp(StatusCode::BAD_REQUEST, json!({"error": "missing 'id'"}));
+        }
+        let delay_s = body
+            .get("delay_after_idle_s")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0);
+        let session = name.to_string();
+        let id2 = msg_id.clone();
+        let reply = state
+            .store
+            .write_async(move |conn| {
+                let changed = conn.execute(
+                    "UPDATE steering_queue SET delay_after_idle_s=?1 WHERE id=?2 AND session=?3",
+                    rusqlite::params![delay_s, id2, session],
+                )?;
+                Ok(crate::db::WriteOutcome {
+                    applied: changed > 0,
+                    events: vec![],
+                })
+            })
+            .await;
+        return match reply {
+            Ok(o) if o.applied => j200(json!({
+                "ok": true,
+                "id": msg_id,
+                "delay_after_idle_s": delay_s,
+            })),
+            Ok(_) => jresp(
+                StatusCode::NOT_FOUND,
+                json!({"error": "message not found in queue"}),
+            ),
+            Err(e) => jresp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        };
+    }
     jresp(
         StatusCode::METHOD_NOT_ALLOWED,
         json!({"error": "method not allowed"}),
