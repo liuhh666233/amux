@@ -231,6 +231,20 @@ fn apply(
     if !super::session_verbs::session_is_isolated(name) {
         crate::db::board_store::refresh_lease_heartbeat(conn, name, now as i64)?;
     }
+    // An owner `/clear` is "stop what you were going to do". Queued
+    // needs-input auto-approvals (`ni-auto-*`, `ni-back-*`) were otherwise
+    // delivered one per turn AFTER the clear, so the lane kept resuming work
+    // the owner had just cleared (amux-cloud, 2026-09-30: eight approvals
+    // from one tick, re-arriving after every /clear and Ctrl-C). The card
+    // note and the ledger row still record the approval; only the push is
+    // dropped. Owner-typed and other system rows are untouched.
+    if event["event"] == "SessionStart" && event["start_source"] == "clear" {
+        let dropped = conn.execute(
+            "DELETE FROM steering_queue WHERE session=?1 AND (id LIKE 'ni-auto-%' OR id LIKE 'ni-back-%')",
+            [name],
+        )?;
+        tracing::info!(session=name, verdict="steering_cleared_on_clear", dropped, "owner /clear dropped queued needs-input auto-approvals");
+    }
     super::sessions_legacy::invalidate_sessions_runtime_cache();
     tracing::debug!(session=name, verdict="native_status_applied", event=?event["event"], sequence=?event["sequence"], "applied provider lifecycle observation");
     Ok(WriteOutcome {
@@ -491,6 +505,45 @@ mod tests {
             .unwrap();
         assert!(!reports.contains("a private instruction"));
         assert!(!events.contains("a private instruction"));
+    }
+
+    #[test]
+    fn an_owner_clear_drops_only_queued_auto_approvals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::db::Store::open(&tmp.path().join("test.db")).unwrap();
+        let now = crate::config::now_f64();
+        let launch = json!({"run_id":"run","provider":"claude","started":now-20.0});
+        store
+            .write(|c| {
+                super::super::session_verbs::ensure_fleet_tables(c)?;
+                for id in ["ni-auto-a", "ni-back-b", "steer-owner"] {
+                    c.execute(
+                        "INSERT INTO steering_queue(id,session,text,queued_at) VALUES(?1,'native-clear',?1,1.0)",
+                        [id],
+                    )?;
+                }
+                Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+            })
+            .unwrap();
+        let left = |store: &crate::db::Store| -> Vec<String> {
+            let conn = store.read().unwrap();
+            let mut s = conn.prepare("SELECT id FROM steering_queue WHERE session='native-clear' ORDER BY id").unwrap();
+            s.query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        };
+        // A fresh start is not a clear: nothing is dropped.
+        let mut start = event(1, now - 2.0, "", "SessionStart");
+        start["provider"] = json!("claude");
+        start["state"] = json!("idle");
+        start["start_source"] = json!("startup");
+        let l = launch.clone();
+        store.write(move |c| apply(c, "native-clear", &start, &l)).unwrap();
+        assert_eq!(left(&store), ["ni-auto-a", "ni-back-b", "steer-owner"]);
+        let mut clear = event(2, now - 1.0, "", "SessionStart");
+        clear["provider"] = json!("claude");
+        clear["state"] = json!("idle");
+        clear["start_source"] = json!("clear");
+        store.write(move |c| apply(c, "native-clear", &clear, &launch)).unwrap();
+        assert_eq!(left(&store), ["steer-owner"], "owner-typed rows survive a /clear");
     }
 
     #[test]

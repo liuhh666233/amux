@@ -93,6 +93,10 @@ def observe(data, root, worker, run, provider, occurred_at):
         # server strips it before storing the status report (F8(c)).
         if data.get('hook_event_name') == 'UserPromptSubmit' and isinstance(data.get('prompt'), str):
             payload['prompt'] = data['prompt'][:20000]
+        # startup / resume / clear / compact: the server drops queued
+        # auto-approvals on an owner /clear.
+        if data.get('hook_event_name') == 'SessionStart' and isinstance(data.get('source'), str):
+            payload['start_source'] = data['source']
         target = folder / ('%020d.json' % seq)
         if agent:
             payload['subagent'] = True
