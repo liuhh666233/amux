@@ -9037,7 +9037,8 @@ fn any_non_zombie(stat_output: &str) -> bool {
 /// from `~/.claude/sessions/<pid>.json`, which Claude Code writes for every
 /// live process. None when no pane, no child, or no such file.
 async fn live_claude_conversation(name: &str) -> Option<String> {
-    let out = tmux(&["list-panes", "-t", &st(name), "-F", "#{pane_pid}"]).await?;
+    let stq = st(name);
+    let out = tmux(&["list-panes", "-t", &stq, "-F", "#{pane_pid}"]).await?;
     let pane = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
     let kids = run_cmd("pgrep", &["-P", &pane], OP_TIMEOUT).await?;
     String::from_utf8_lossy(&kids.stdout)
