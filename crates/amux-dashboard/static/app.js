@@ -13514,7 +13514,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1194';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1195';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -21985,6 +21985,36 @@ async function _peekMsgFetch(scope, offset, pageSize) {
   // happen ONCE in _peekMessagesLoad, on the full accumulated set — merging
   // per-page would prepend the same locally-queued sends to every page.
   return (await r.json()).map(_msgNorm);
+}
+
+// The Messages tab's Export button (added in 91b29ba2 with no function behind
+// it, so every click threw). Pages through this worker's WHOLE history from the
+// same /api/history source the tab reads, ignoring the tab's kind filter, and
+// downloads it as JSON. Fetches directly so the tab's own paging state is
+// untouched.
+async function _exportMessageHistory() {
+  const sess = peekSession;
+  if (!sess) return;
+  const PAGE = 500, MAX_PAGES = 400;
+  const rows = [];
+  try {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const r = await fetch(API + '/api/history?limit=' + PAGE + '&offset=' + (page * PAGE)
+        + '&session=' + encodeURIComponent(sess), { headers: _authHeaders() });
+      if (!r.ok) throw new Error('history ' + r.status);
+      const batch = await r.json();
+      rows.push(...batch);
+      if (batch.length < PAGE) break;
+    }
+    const blob = new Blob([JSON.stringify({ worker: sess, exported_at: new Date().toISOString(),
+      count: rows.length, messages: rows }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = sess + '-messages-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    showToast('Exported ' + rows.length + ' messages');
+  } catch (e) { showToast('Export failed: ' + ((e && e.message) || e)); }
 }
 
 async function _peekMessagesLoad(more) {
