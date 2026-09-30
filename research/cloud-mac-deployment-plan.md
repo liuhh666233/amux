@@ -28,10 +28,14 @@ minimum lease, so every provider bills by the day or month, never by the minute.
 | MacStadium | Mac mini M4, 24 GB, 512 GB | $199 to $249/mo | US and EU | |
 | AWS EC2 | mac-m4.metal, 24 GB | about $1.23/h, about $900/mo | Most regions | Fits if the customer must stay inside AWS. Six times the price. |
 
-**Recommendation: MacStadium Mac mini M4 (24 GB) for a US customer, Scaleway M4-M
-(32 GB) for an EU one.** The machine sits close to the people using it, so screen
-sharing feels responsive, and it costs about $200/month. AWS only makes sense
-when the customer's security review requires AWS.
+**Recommendation: Scaleway M4-M (32 GB, €199/month), because everything has to
+be infrastructure as code.** Scaleway's Terraform provider manages its Macs
+(`scaleway_apple_silicon_server`). MacStadium's dedicated Macs are ordered
+through a web portal and have no Terraform provider, so they fail that
+requirement. AWS is fully in Terraform too, at about 4.5 times the price. Use
+it when the customer's security review requires AWS, or when a US customer
+finds screen sharing to Paris too laggy (roughly 80 to 100 ms round trip from
+the US East Coast; worth testing in the first hour).
 
 16 GB is too tight once amux, a browser and two or three Claude Code panes run
 together. Start at 24 or 32 GB.
@@ -40,7 +44,41 @@ Can it stay up 24/7? Yes. These are dedicated physical machines with no idle
 shutdown. The risk is a macOS update rebooting it, so turn off automatic OS
 updates and let it boot straight into an unlocked account (step 2 below).
 
+## Infrastructure as code
+
+Everything below the provider order lives in the repo, one directory per
+customer, and a single `make up CUSTOMER=<name>` brings a machine from nothing
+to a working amux.
+
+| Layer | Tool | What it covers |
+|---|---|---|
+| Machine | Terraform, `scaleway` provider (`scaleway_apple_silicon_server`) or `aws` provider (`aws_ec2_host` plus `aws_instance` with a macOS AMI) | Rent, size, region, firewall, teardown |
+| Network | Terraform, `tailscale` provider (`tailscale_acl`, `tailscale_tailnet_key`) | ACL policy as a reviewed file, a one-use auth key for the Mac, device tags |
+| macOS | Ansible over SSH (`community.general.homebrew`, `osx_defaults`, plain `command` tasks) | Users (`sysadminctl -addUser`), energy settings (`pmset`), update policy, Screen Sharing service, Homebrew packages from a `Brewfile`, Tailscale join |
+| amux | Same Ansible playbook | Runs `install.sh` and `make install-cli` from a pinned commit, writes `server.env` from vault values, creates workers and board |
+| Backup | Same Ansible playbook | restic launchd job and B2 bucket key, `tmutil setdestination` for Time Machine |
+| Secrets | amux vault, read at apply time | Admin password, Tailscale key, B2 key. Never in the repo |
+
+Terraform state goes in a remote backend (a B2 or GCS bucket), with one state
+file per customer, so any lane can run `plan` against the real machine.
+
+**Steps that cannot be scripted, and the honest workaround for each:**
+
+- **Granting remote screen control.** Since macOS 12.1 Apple blocks scripting
+  the permission that lets a remote user control the screen; only MDM or a
+  person clicking in System Settings can grant it. Viewing can be scripted.
+  Workaround: one click through the provider's web console on day one, or enroll
+  the Mac in an MDM (Jamf, Kandji, or the free MicroMDM) and push it as a
+  profile. MDM is the fully coded path and worth it from the second customer on.
+- **The same restriction covers Full Disk Access** for restic and the terminal
+  apps amux drives. Same fix: one click on day one, or an MDM profile.
+- **FileVault unlock after a reboot** needs a person at the provider console,
+  which is why the runbook leaves FileVault off unless the customer requires it.
+
 ## Day-one runbook
+
+The steps below are what the Terraform and Ansible code does. Run them by hand
+only for the first machine, while the code is being written.
 
 Target: about 4 hours of our time, most of it waiting on the provider.
 
@@ -165,9 +203,12 @@ Tailscale come back up.
 
 1. Card: per-person attribution on the amux dashboard (the open question
    above). This blocks any promise of "full provenance".
-2. Card: bootstrap script and Brewfile in the repo.
-3. After spending approval: rent one Mac and run the day-one runbook against it
-   ourselves before the first customer.
+2. Card: the IaC directory (Terraform for Scaleway and Tailscale, the Ansible
+   playbook, the Brewfile, `make up` and `make down`).
+3. After spending approval: rent one Mac, run `make up` against it ourselves,
+   then `make down` and `make up` again from scratch. A second clean run is the
+   proof that nothing depends on a manual step we forgot to write down.
+4. Decide on MDM before the second customer.
 
 ## Sources
 
@@ -175,3 +216,5 @@ Tailscale come back up.
 - AWS EC2 Mac instances: https://aws.amazon.com/ec2/instance-types/mac/
 - mac-m4.metal on-demand price: https://instances.vantage.sh/aws/ec2/mac-m4.metal?currency=USD
 - MacStadium pricing: https://macstadium.com/pricing
+- Scaleway Terraform provider: https://registry.terraform.io/providers/scaleway/scaleway/latest/docs
+- MacStadium bare metal (portal ordering): https://docs.macstadium.com/docs/bare-metal-hosts
