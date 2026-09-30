@@ -87,6 +87,13 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
             "re ingest", "reingest", "re extract", "reextract", "re embed", "gpu ", "cost basis",
             // MFEM1-51 "Materialise iconik-ad-library's 4,206,893 objects into MVS".
             "materialis", "materializ",
+            // GC-12 (2026-09-30): "May the ephemeral-plane workflow bring up a
+            // throwaway GCP plane ... and what is the per-run dollar budget?"
+            // had no $-figure and no listed verb, read as `other`, and was
+            // auto-approved; the worker then picked its own $20/run, $100/month
+            // cap. Standing infrastructure up is spend, and a question asking
+            // for a dollar figure cannot be answered by "approved".
+            "dollar", "per run budget", "spin up", "bring up a", "stand up a",
         ]);
     if has(&[
         "prod data",
@@ -707,6 +714,8 @@ mod tests {
         // Live 2026-09-27 specimens: real spend stays money...
         assert_eq!(classify("budget", "Do you approve a TS indexer node (about $90-130/mo spot or $390-425/mo on-demand), or hold?"), ("money", 0));
         assert_eq!(classify("budget", "Do you approve GPU spend to re-extract the two broken TubeScience indexes?"), ("money", 0));
+        // GC-12, auto-approved as `other` on 2026-09-30 before this was money.
+        assert_eq!(classify("budget", "May the ephemeral-plane workflow bring up a throwaway GCP plane (pools from 0, Mongo, MVS and Ray for one run, torn down after), and what is the per-run dollar budget?"), ("money", 0));
         // ...money-adjacent words do not.
         assert_eq!(classify("decision", "Should POST /v1/organizations/billing/estimate be reachable without an API key?"), ("other", 1));
         assert_eq!(classify("budget", "What are the per-million rates for the codex and gemini model families?"), ("other", 1));
