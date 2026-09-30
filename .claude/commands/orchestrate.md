@@ -93,7 +93,7 @@ The orchestrator keeps responsibility for decomposition, assignment, dependencie
 
 ## Closed loop
 
-Use the scheduler to re-enter on a fixed cadence. Target this orchestrator worker with a `tmux` schedule and a one-line prompt: "Orchestration tick: read board and repo state, act, record state on your cards." You keep your conversation between ticks, so the tick does not need a full brief. Set the cadence on purpose, since every tick costs a full turn. Also set a Claude Code `/goal` whose condition is every completion-proof card at `verified`; the goal keeper re-prompts you while it is unmet.
+Use the scheduler to re-enter on a fixed cadence. Target this orchestrator worker with a `tmux` schedule and a one-line prompt: "Orchestration tick: read board and repo state, act, record state on your cards." You keep your conversation between ticks, so the tick does not need a full brief. Set the cadence on purpose, since every tick costs a full turn. Ethan launches you with a Claude Code `/goal` whose condition is every completion-proof card at `verified` (you cannot type a slash command yourself); the goal keeper re-prompts you while it is unmet. If you were started without one, ask him for it on a `needsyou` card.
 
 On each tick:
 
