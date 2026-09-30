@@ -4861,6 +4861,12 @@ fn python_fleet_sessions(signals: &FleetSignals) -> Vec<serde_json::Value> {
         if let Some(row) = out.last_mut() {
             row["worker_type"] = json!(worker_type);
             row["renderer"] = json!(worker_type.descriptor().renderer);
+            row["auto_continue_raw"] = json!(crate::api::session_verbs::auto_continue_on(
+                crate::api::session_verbs::scoped_setting_in(&home, &name, "CC_AUTO_CONTINUE").as_deref()));
+            row["auto_pickup_raw"] = json!(crate::api::session_verbs::auto_continue_on(
+                crate::api::session_verbs::scoped_setting_in(&home, &name, "CC_AUTO_PICKUP").as_deref()));
+            row["standing_orders_raw"] = json!(crate::api::session_verbs::auto_continue_on(
+                crate::api::session_verbs::scoped_setting_in(&home, &name, "CC_STANDING_ORDERS").as_deref()));
         }
     }
     out
@@ -4876,7 +4882,8 @@ fn steering_with_transport(
     let mut stmt = conn.prepare(
         "SELECT id, session, text, queued_at, COALESCE(guard,''),
         (SELECT substr(msg_id,7) FROM send_dedup d WHERE d.session=steering_queue.session
-          AND d.receipt_id=steering_queue.id AND d.msg_id LIKE 'steer:%' LIMIT 1)
+          AND d.receipt_id=steering_queue.id AND d.msg_id LIKE 'steer:%' LIMIT 1),
+        COALESCE(delay_after_idle_s,0)
         FROM steering_queue ORDER BY queued_at ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -4887,10 +4894,11 @@ fn steering_with_transport(
             r.get::<_, f64>(3)?,
             r.get::<_, String>(4)?,
             r.get::<_, Option<String>>(5)?,
+            r.get::<_, i64>(6)?,
         ))
     })?;
     for row in rows {
-        let (id, session, text, queued_at, guard, transport_id) = row?;
+        let (id, session, text, queued_at, guard, transport_id, delay_after_idle_s) = row?;
         let system = crate::api::session_verbs::steer_guard_is_system(&guard);
         let held = crate::api::projects::steering_delivery_hold(conn, &session, &id)
             .unwrap_or_else(|_| Some("project_delivery_identity_unavailable".into()));
@@ -4898,7 +4906,8 @@ fn steering_with_transport(
             .entry(session)
             .or_default()
             .push(json!({"id":id,"text":text,"queued_at":queued_at,
-            "guard":guard,"system":system,"transport_id":transport_id,"blocked_reason":held}));
+            "guard":guard,"system":system,"transport_id":transport_id,"blocked_reason":held,
+            "delay_after_idle_s":delay_after_idle_s}));
     }
     Ok(steering)
 }

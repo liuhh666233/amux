@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2352,
+  "n_considered": 2354,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -2842,6 +2842,12 @@
     },
     "_steeringClearAll": {
       "kind": "command._steeringClearAll",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_steeringQueueDelayed": {
+      "kind": "command._steeringQueueDelayed",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
