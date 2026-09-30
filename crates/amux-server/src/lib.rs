@@ -556,6 +556,7 @@ async fn async_main() {
         let state = state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            crate::api::session_verbs::purge_stale_rules_from_memory();
             let (workers, interrupted, resumed) =
                 crate::api::chat_worker::recover_all(&state).await;
             tracing::info!(workers, interrupted, resumed, measured = true, n_considered = workers,

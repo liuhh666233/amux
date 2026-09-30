@@ -27613,6 +27613,29 @@ pub(crate) fn worker_rules_args(name: &str, provider: &str, isolated: bool) -> V
     args
 }
 
+/// Recompose every worker's MEMORY.md once if any still carries a binding
+/// rules block from before AH-233. Those blocks were written per DIRECTORY, so
+/// a stale one keeps handing a neighbour's rules to every lane sharing it until
+/// something happens to recompose. Returns the number of stale files found.
+/// Logs verdict=stale_rules_memory_purged when it acts.
+pub(crate) fn purge_stale_rules_from_memory() -> usize {
+    let Ok(rd) = std::fs::read_dir(claude_home().join("projects")) else {
+        return 0;
+    };
+    let stale = rd
+        .flatten()
+        .map(|e| e.path().join("memory").join("MEMORY.md"))
+        .filter(|f| std::fs::read_to_string(f).is_ok_and(|t| t.contains("# Rules — binding")))
+        .count();
+    if stale > 0 {
+        let refreshed = refresh_fleet_rosters();
+        tracing::info!(stale, refreshed, measured = true, n_considered = stale,
+            verdict = "stale_rules_memory_purged",
+            "recomposed worker memory: rules now ride each worker's launch, not a shared MEMORY.md");
+    }
+    stale
+}
+
 /// The non-archived workers a scope level covers: every worker for `global`,
 /// the members of group `name`, or the one worker `name`.
 pub(crate) fn workers_in_scope(level: &str, name: &str) -> Vec<String> {
