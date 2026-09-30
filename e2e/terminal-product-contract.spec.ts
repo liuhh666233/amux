@@ -148,12 +148,21 @@ test('terminal controls stay compact and the bottom affordance distinguishes nav
   const state = await boot(page, { transcript, live: 'latest output\n' });
 
   const layout = await page.evaluate(() => {
-    const controls = document.querySelector('.peek-output-controls')!.getBoundingClientRect();
+    const el = document.querySelector('.peek-output-controls')!;
+    const controls = el.getBoundingClientRect();
     const body = document.getElementById('peek-body')!.getBoundingClientRect();
-    return { controlsWidth: controls.width, bodyWidth: body.width, controlsRight: controls.right, bodyRight: body.right };
+    return { shown: getComputedStyle(el).display !== 'none', controlsWidth: controls.width,
+      bodyWidth: body.width, controlsRight: controls.right, bodyRight: body.right };
   });
-  expect(layout.controlsWidth).toBeLessThan(260);
-  expect(Math.abs(layout.controlsRight - layout.bodyRight)).toBeLessThan(12);
+  // The floating controls hold only the subagent navigator (2f238d67 removed
+  // the copy button from them), so with no subagents nothing floats at all.
+  // When they do show, they stay compact and pinned to the body's right edge.
+  if (layout.shown) {
+    expect(layout.controlsWidth).toBeLessThan(260);
+    expect(Math.abs(layout.controlsRight - layout.bodyRight)).toBeLessThan(12);
+  } else {
+    expect(layout.controlsWidth).toBe(0);
+  }
 
   await readEarlier(page, !!testInfo.project.use.hasTouch);
   await page.evaluate(() => {
