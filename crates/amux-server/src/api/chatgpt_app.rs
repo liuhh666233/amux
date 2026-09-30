@@ -129,8 +129,10 @@ fn extra_redirects() -> String {
 
 /// The public origin this request was addressed to. The tunnel relay stamps
 /// `x-amux-public-base` (after stripping any inbound copy); otherwise it is
-/// the Host the client used.
-pub(crate) fn public_base(headers: &HeaderMap) -> String {
+/// the host the client used: the `Host` header on HTTP/1.1, the `:authority`
+/// (carried in the request URI) on HTTP/2, which sends no `Host` header. The
+/// first live run fell back to `localhost` over HTTP/2 for exactly that reason.
+pub(crate) fn public_base(headers: &HeaderMap, uri: &Uri) -> String {
     if let Some(b) = headers
         .get(PUBLIC_BASE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -139,10 +141,12 @@ pub(crate) fn public_base(headers: &HeaderMap) -> String {
     {
         return b.to_string();
     }
+    let ok = |h: &&str| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c));
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)))
+        .filter(ok)
+        .or_else(|| uri.authority().map(|a| a.as_str()).filter(ok))
         .unwrap_or("localhost");
     format!("https://{host}")
 }
@@ -502,8 +506,8 @@ pub(crate) fn protected_resource_body(base: &str) -> Value {
     })
 }
 
-async fn protected_resource_meta(headers: HeaderMap) -> Response {
-    Json(protected_resource_body(&public_base(&headers))).into_response()
+async fn protected_resource_meta(headers: HeaderMap, uri: Uri) -> Response {
+    Json(protected_resource_body(&public_base(&headers, &uri))).into_response()
 }
 
 pub(crate) fn auth_server_body(base: &str) -> Value {
@@ -522,8 +526,8 @@ pub(crate) fn auth_server_body(base: &str) -> Value {
     })
 }
 
-async fn auth_server_meta(headers: HeaderMap) -> Response {
-    Json(auth_server_body(&public_base(&headers))).into_response()
+async fn auth_server_meta(headers: HeaderMap, uri: Uri) -> Response {
+    Json(auth_server_body(&public_base(&headers, &uri))).into_response()
 }
 
 async fn register(State(state): State<AppState>, body: Bytes) -> Response {
@@ -578,7 +582,7 @@ fn html_page(title: &str, body: &str) -> Response {
     r
 }
 
-async fn authorize(State(state): State<AppState>, headers: HeaderMap, RawQuery(q): RawQuery) -> Response {
+async fn authorize(State(state): State<AppState>, headers: HeaderMap, uri: Uri, RawQuery(q): RawQuery) -> Response {
     let kv = super::fs::parse_qs(q.as_deref().unwrap_or(""));
     let (client_id, redirect_uri) = (kv_get(&kv, "client_id").to_string(), kv_get(&kv, "redirect_uri").to_string());
     let store = state.store.clone();
@@ -603,7 +607,7 @@ async fn authorize(State(state): State<AppState>, headers: HeaderMap, RawQuery(q
             "{redirect_uri}{sep}error={}&error_description={}&state={}&iss={}",
             err, crate::integrations::email::urlencode(desc),
             crate::integrations::email::urlencode(kv_get(&kv, "state")),
-            crate::integrations::email::urlencode(&public_base(&headers))
+            crate::integrations::email::urlencode(&public_base(&headers, &uri))
         );
         (StatusCode::FOUND, [(axum::http::header::LOCATION, loc)]).into_response()
     };
@@ -617,7 +621,7 @@ async fn authorize(State(state): State<AppState>, headers: HeaderMap, RawQuery(q
     let Some(scope) = normalize_scope(kv_get(&kv, "scope")) else {
         return bounce("invalid_scope", "supported scopes: amux:read amux:write", "chatgpt_authorize_bad_scope");
     };
-    let base = public_base(&headers);
+    let base = public_base(&headers, &uri);
     let resource = resource_of(&base);
     let asked_res = kv_get(&kv, "resource");
     if !asked_res.is_empty() && asked_res.trim_end_matches('/') != resource {
@@ -653,7 +657,7 @@ async fn authorize(State(state): State<AppState>, headers: HeaderMap, RawQuery(q
     html_page("Approve amux connection", &body)
 }
 
-async fn authorize_status(State(state): State<AppState>, headers: HeaderMap, RawQuery(q): RawQuery) -> Response {
+async fn authorize_status(State(state): State<AppState>, headers: HeaderMap, uri: Uri, RawQuery(q): RawQuery) -> Response {
     let kv = super::fs::parse_qs(q.as_deref().unwrap_or(""));
     let (id, k) = (kv_get(&kv, "id").to_string(), kv_get(&kv, "k").to_string());
     let now = now_f64();
@@ -662,7 +666,7 @@ async fn authorize_status(State(state): State<AppState>, headers: HeaderMap, Raw
         Ok(PollOutcome::Approved(ruri, st, code)) => {
             let sep = if ruri.contains('?') { '&' } else { '?' };
             let enc = crate::integrations::email::urlencode;
-            json!({"status": "approved", "redirect": format!("{ruri}{sep}code={}&state={}&iss={}", enc(&code), enc(&st), enc(&public_base(&headers)))})
+            json!({"status": "approved", "redirect": format!("{ruri}{sep}code={}&state={}&iss={}", enc(&code), enc(&st), enc(&public_base(&headers, &uri)))})
         }
         Ok(PollOutcome::Pending) => json!({"status": "pending"}),
         Ok(PollOutcome::Denied) => json!({"status": "denied", "message": "The owner declined this connection."}),
@@ -737,8 +741,8 @@ async fn mcp_not_allowed() -> Response {
     (StatusCode::METHOD_NOT_ALLOWED, [(axum::http::header::ALLOW, "POST")], "This MCP endpoint is stateless: POST JSON-RPC only.").into_response()
 }
 
-async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    let base = public_base(&headers);
+async fn mcp(State(state): State<AppState>, headers: HeaderMap, uri: Uri, body: Bytes) -> Response {
+    let base = public_base(&headers, &uri);
     let resource = resource_of(&base);
     let Some(tok) = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -1389,6 +1393,16 @@ mod tests {
         let mut req = rpc("tools/list", Some(at));
         req.headers_mut().insert("host", HeaderValue::from_static("elsewhere.test"));
         assert_eq!(call(&a, req).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn public_base_reads_the_http2_authority_when_there_is_no_host_header() {
+        let uri: Uri = "https://amux.example:8824/mcp".parse().unwrap();
+        assert_eq!(public_base(&HeaderMap::new(), &uri), "https://amux.example:8824");
+        let mut h = HeaderMap::new();
+        h.insert("host", HeaderValue::from_static("lan.example"));
+        assert_eq!(public_base(&h, &uri), "https://lan.example", "an HTTP/1.1 Host header wins");
+        assert_eq!(public_base(&HeaderMap::new(), &"/mcp".parse().unwrap()), "https://localhost");
     }
 
     #[tokio::test]
