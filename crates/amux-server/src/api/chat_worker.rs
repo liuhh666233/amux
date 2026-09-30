@@ -204,6 +204,16 @@ pub(crate) async fn companion_route(
         let start = keep.len().saturating_sub(64);
         update_meta(&key, &[("chat_seen_msg_ids", json!(keep[start..]))]);
     }
+    super::session_verbs::cmd_hist_record_full(
+        state,
+        worker,
+        &text,
+        "chat",
+        "chat-companion",
+        true,
+        super::session_verbs::DeliveryMeta::default(),
+    )
+    .await;
     tracing::info!(session = %key, worker, verdict = "chat_companion_send", "Chat tab message accepted");
     (StatusCode::OK, Json(json!({"ok": true, "msg_id": msg_id, "message": message, "submitted": true, "submission": "confirmed"}))).into_response()
 }

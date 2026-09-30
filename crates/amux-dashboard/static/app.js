@@ -11730,6 +11730,7 @@ function setPeekTab(tab) {
     if (tab === 'terminal') refreshPeek(false);
   }
   _peekComposerSwap();
+  _peekAgentsPaint();
   const bodyShown = tab === 'terminal' || !!chatTarget;
   document.getElementById('peek-terminal-panel').style.display = bodyShown ? '' : 'none';
   document.getElementById('peek-split-wrap').style.display = bodyShown ? '' : 'none';
@@ -13513,7 +13514,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1191';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1192';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -13901,16 +13902,13 @@ async function _chatPaintCached(name, reason) {
 function _chatUnmount() {
   if (_chat.es) { try { _chat.es.close(); } catch (e) {} }
   if (_chat.raf) { cancelAnimationFrame(_chat.raf); clearTimeout(_chat.raf); }
+  clearInterval(_chatWatchdog); _chatWatchdog = 0;
   const body = document.getElementById('peek-body');
   if (body && _chat.onScroll) body.removeEventListener('scroll', _chat.onScroll);
   _chat.es = null; _chat.name = null; _chat.messages = []; _chat.streaming = null; _chat.gen++;
   _chat.cursor = ''; _chat.stick = true; _chat.unseen = false; _chat.raf = 0; _chat.onScroll = null; _chat.live = null;
   _chat.loadedAt = 0; _chat.offlineNote = ''; _chat.pendingShown = 0;
   if (body && body.classList.contains('peek-chat')) {
-    // Leaving the Chat tab for Terminal: the terminal frame repaints only when
-    // it CHANGES, so an idle worker's frame matched the last one painted and
-    // the chat bubbles stayed on screen under the Terminal tab (Ethan
-    // 2026-09-30, "still"). Forget the painted frame so the next poll paints.
     body.classList.remove('peek-chat');
     body.innerHTML = '';
     lastPeekHTML = ''; _lastLiveHTML = '';
@@ -13981,19 +13979,47 @@ function _chatApply(a, ev) {
   }
 }
 
+let _chatRetries = 0;
+let _chatLastData = 0;
+let _chatWatchdog = 0;
 function _chatConnect(name) {
   if (_chat.es) { try { _chat.es.close(); } catch (e) {} }
-  // `after` is where the history snapshot left off. A browser reconnect sends
-  // Last-Event-ID instead, which the server prefers, so this URL never
-  // replays from a stale point.
+  _chat.es = null;
   const q = _chat.cursor ? '?after=' + encodeURIComponent(_chat.cursor) : '';
   const es = new EventSource(_authUrl(API + '/api/sessions/' + encodeURIComponent(name) + '/chat/stream' + q));
   _chat.es = es;
+  _chatLastData = Date.now();
+  _chatStartWatchdog(name);
   es.onmessage = (ev) => {
     if (_chat.es !== es || _chat.name !== name) return;
+    _chatLastData = Date.now();
+    _chatRetries = 0;
     let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
     _chatOnEvent(name, m);
   };
+  es.onerror = () => {
+    if (_chat.es !== es || _chat.name !== name) return;
+    try { es.close(); } catch (e) {}
+    if (_chat.es === es) _chat.es = null;
+    _chatRetries++;
+    const delay = Math.min(2000 * _chatRetries, 30000);
+    setTimeout(() => {
+      if (_chat.name === name && !_chat.es) {
+        _chatLoad(name);
+      }
+    }, delay);
+  };
+}
+function _chatStartWatchdog(name) {
+  clearInterval(_chatWatchdog);
+  _chatWatchdog = setInterval(() => {
+    if (_chat.name !== name) { clearInterval(_chatWatchdog); return; }
+    if (_chat.es && Date.now() - _chatLastData > 20000) {
+      try { _chat.es.close(); } catch (e) {}
+      _chat.es = null;
+      _chatLoad(name);
+    }
+  }, 5000);
 }
 
 function _chatOnEvent(name, m) {
@@ -14081,6 +14107,14 @@ async function _chatRetryTurn(name, text) {
   if (!text) return;
   await doSend(name, text);
   if (_chat.name === name) _chatLoad(name);
+}
+function _chatReconnect() {
+  const name = _chat.name;
+  if (!name) return;
+  if (_chat.es) { try { _chat.es.close(); } catch (e) {} _chat.es = null; }
+  _chatRetries = 0;
+  showToast('Reconnecting chat...');
+  _chatLoad(name);
 }
 
 function _chatBubble(role, html, meta, cls, attrs) {
@@ -14191,7 +14225,12 @@ function _chatRender(errorText) {
   const chatOf = _chatCompanionOf(_chat.name);
   let html = '';
   if (_chat.offlineNote) html += '<div class="chat-offline-note" role="status">' + esc(_chat.offlineNote) + '</div>';
-  if (errorText) html += '<div class="chat-empty">' + esc(errorText) + '</div>';
+  if (errorText) html += '<div class="chat-empty">' + esc(errorText)
+    + ' <button class="btn" style="margin-top:8px;font-size:0.78rem;" onclick="_chatReconnect()">Reconnect</button></div>';
+  if (!errorText && !_chat.es && _chat.name && !_chat.streaming) {
+    html += '<div class="chat-offline-note" role="status" style="cursor:pointer;" onclick="_chatReconnect()">'
+      + 'Stream disconnected. <u>Reconnect</u></div>';
+  }
   const pendingSends = _pendingSendsFor(_chat.name);
   if (!_chat.messages.length && !_chat.streaming && !errorText && !pendingSends.length) {
     html += '<div class="chat-empty">' + (chatOf
@@ -14646,7 +14685,8 @@ function _peekAgentsPaint() {
   const nav = document.getElementById('peek-agent-nav');
   if (!nav) return;
   const state = _peekAgents;
-  nav.hidden = !state.items.length && !state.error;
+  const isChat = _peekTab === 'chat' || (typeof _peekChatTarget === 'function' && !!_peekChatTarget());
+  nav.hidden = isChat || (!state.items.length && !state.error);
   const index = state.selected ? state.items.findIndex(s=>s.id===state.selected.id && s.conversation===state.selected.conversation)+1 : 0;
   const label = document.getElementById('peek-agent-label');
   label.textContent = state.error ? 'Agents unavailable' : (index ? 'Agent '+index : 'Main') + ' · '+(index+1)+'/'+(state.items.length+1);
