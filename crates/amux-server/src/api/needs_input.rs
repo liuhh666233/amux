@@ -94,6 +94,10 @@ pub fn classify(ask_type: &str, text: &str) -> (&'static str, u8) {
             // cap. Standing infrastructure up is spend, and a question asking
             // for a dollar figure cannot be answered by "approved".
             "dollar", "per run budget", "spin up", "bring up a", "stand up a",
+            // SP-1090, same day: "This spends money (3 extra paid canary
+            // batches, cents each)" read as `other`: "spend " needs the space
+            // and nothing matched "paid".
+            "spends", " paid ",
         ]);
     if has(&[
         "prod data",
@@ -714,6 +718,7 @@ mod tests {
         // Live 2026-09-27 specimens: real spend stays money...
         assert_eq!(classify("budget", "Do you approve a TS indexer node (about $90-130/mo spot or $390-425/mo on-demand), or hold?"), ("money", 0));
         assert_eq!(classify("budget", "Do you approve GPU spend to re-extract the two broken TubeScience indexes?"), ("money", 0));
+        assert_eq!(classify("budget", "This spends money (3 extra paid canary batches, cents each): may mixpeek-cicd raise today's allowance so the P0 credential-leak fix ships before 00:00?"), ("money", 0));
         // GC-12, auto-approved as `other` on 2026-09-30 before this was money.
         assert_eq!(classify("budget", "May the ephemeral-plane workflow bring up a throwaway GCP plane (pools from 0, Mongo, MVS and Ray for one run, torn down after), and what is the per-run dollar budget?"), ("money", 0));
         // ...money-adjacent words do not.
