@@ -340,8 +340,33 @@ with its log signal (a verdict field or WARN line), per the amux two-fix rule.
   the demo script below. It runs in CI so the claim stays true after later
   changes.
 
-Order: MP-1, then MP-2, then MP-3 to MP-7 in parallel, then MP-8. About 12
-lane-days in total, which fits in two weeks for one lane or one week for two.
+**MP-9. Switching servers shows who you are on each one (S).**
+- The switcher in the dashboard (`amux_connections`, `_switchServerUrl` in
+  `app.js`) lists servers but not whether you are signed in on them. Ask each
+  listed server's `/api/identity` and show "you: alice@customer.com" or "not
+  signed in" beside it, so a switch never lands on a sign-in wall by surprise.
+- After a switch, the header shows the server name and your identity on it.
+- Done when: from one browser, switching across three servers (ours, a
+  customer's, a second customer's) lands signed in on each, with the right name
+  shown, and no token typed anywhere.
+
+**MP-10. Every dashboard action is attributed from the browser (M).**
+- MP-2 proves attribution at the API. This proves it at the CLIENT: a
+  Playwright test signed in as a member clicks through every dashboard action
+  that writes (send, card create/edit/move, schedule, note, file save, settings)
+  and then reads the board log and message history.
+- It fails on any write recorded as `api-anonymous`, as the owner, or with no
+  person.
+- It also runs after a server switch, so attribution holds on the second server
+  too.
+- Done when: the test passes, and removing the member stamp from any one route
+  makes it fail.
+
+Order: MP-1, then MP-2, then MP-3 to MP-7 and MP-9 in parallel, then MP-8 and
+MP-10. About 15 lane-days in total, which fits in three weeks for one lane or
+under two weeks for two.
+
+MP-1 shipped 2026-09-30 (`46c9b4cb`, AC-439).
 
 For a first customer who cannot wait, MP-1 to MP-4 are the minimum: people sign
 in, every action names them, the worker knows who is talking, and conflicts
@@ -360,6 +385,34 @@ Two people, two laptops, both on the tailnet, one worker:
   the first person, and re-applies.
 - The board log and message history show the right person on every one of the
   above, not the session name alone.
+
+## Switching between servers
+
+A person will use several amux servers: ours, and one per customer. Switching
+has to be one click, land signed in, and keep attribution.
+
+**What already works.** The dashboard keeps a list of servers in the browser
+and switches by opening the other server's own address. The list it carries
+holds only names and addresses, never a credential, so each server signs you
+in itself.
+
+**Signing in on each server** is MP-1: if you are an invited member there, your
+Tailscale login signs you in with nothing to paste. For the owner on their own
+servers, `AMUX_TRUST_TAILNET_OWNER=1` does the same.
+
+**One Tailscale login reaching every customer.** A device is signed in to one
+tailnet at a time, and the plan gives each customer their own tailnet. So each
+customer Mac is SHARED into our tailnet with Tailscale's device sharing:
+
+- The Mac lives in the customer's tailnet, where their people reach it.
+- It is shared into ours, so our team reaches every customer Mac without
+  switching Tailscale accounts.
+- The customer's people see only their own Mac; nothing of ours is shared back.
+- To confirm in the dogfood run: `whois` on the customer Mac reports our
+  person's own login for a shared-in connection, so MP-1 signs us in as the
+  right member there too.
+
+**Tests.** MP-9 and MP-10 above, plus invariant CM-16.
 
 ## Tailscale acceptance
 
@@ -534,6 +587,7 @@ something that goes red the moment it stops being true.
 | CM-13 | Backups restore | On-box, weekly | Restore one known file from restic to a temp directory | Its hash matches the live file |
 | CM-14 | The machine stays ours to schedule | On-box | `softwareupdate --schedule` and `pmset -g` | Automatic updates off, sleep never, restart after power failure on |
 | CM-15 | Room to work | On-box | Free disk and memory pressure | Disk over 20% free, memory pressure normal |
+| CM-16 | Switching lands signed in | Outside-in | From our probe device, `GET /api/identity` on EVERY server in our switcher list | Each answers with our probe's member identity, not a sign-in wall and not the owner |
 
 CM-6 is the only check Tailscale runs rather than us: a policy change that
 breaks isolation is rejected before it applies, which is stronger than a probe.
@@ -563,7 +617,7 @@ yet kept.
 
 ## Next steps
 
-1. One card per multiplayer work item, MP-1 to MP-8, starting with MP-1. It
+1. One card per multiplayer work item, MP-1 to MP-10 (MP-1 is shipped). MP-2
    blocks any promise of "full provenance".
 2. Card: the IaC directory (Terraform for Scaleway and Tailscale, the Ansible
    playbook, the Brewfile, `make up` and `make down`).
