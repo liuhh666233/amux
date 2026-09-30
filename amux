@@ -812,7 +812,7 @@ if "profiles" in d:
         print(d.get("why") or "this repo has no scripts/worktree.sh"); sys.exit(0)
     for p in d["profiles"]:
         mark = "*" if p["name"] == d.get("current") else " "
-        print(f"{mark} {p[\"name\"]:<12} {p[\"tracked_gb\"]:5.2f}G  " + ("(everything)" if p["full"] else " ".join(p["folders"])))
+        print("%s %-12s %5.2fG  %s" % (mark, p["name"], p["tracked_gb"], "(everything)" if p["full"] else " ".join(p["folders"])))
 elif "worktree" in d:
     if not d["worktree"]:
         print("no worktree (profile for next create: %s)" % (d.get("profile") or "repo default")); sys.exit(0)
