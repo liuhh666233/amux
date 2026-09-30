@@ -1024,6 +1024,20 @@ fn ci_backfill_max() -> usize {
     env_i64("AMUX_CI_BACKFILL_MAX", 3).clamp(0, 10) as usize
 }
 
+/// How long a JUDGED CI card keeps a still-red workflow quiet (AMUX-5371).
+///
+/// The streak anchor alone latched: a workflow red since before the fetch
+/// window keys on the constant `since-beyond-window`, and one whose streak
+/// never ends keeps its first failure's run id, so after its card was
+/// discarded or closed nothing ever filed again. Measured 2026-09-30: `rust`
+/// red for its last 100 runs and `rust-nightly-deep` red since 09-01, both
+/// with only discarded cards, while done cards across the fleet could not
+/// reach verified behind them. The signature now also carries this bucket;
+/// an OPEN card still suppresses every bucket (`fault_identity`), and a judged
+/// one is followed by a fresh card once the bucket turns over.
+fn ci_refile_h() -> f64 {
+    env_f64("AMUX_CI_REFILE_H", 48.0).clamp(1.0, 24.0 * 90.0)
+}
 fn ci_run_limit() -> i64 {
     env_i64("AMUX_CI_RUN_LIMIT", 200).clamp(10, 600)
 }
@@ -7110,7 +7124,9 @@ pub fn ci_findings(runs: &[CiRun], now: f64) -> (Vec<Finding>, Vec<Suppressed>) 
             // key cannot drift as runs age out; the evidence says so out loud.
             None => "since-beyond-window".to_string(),
         };
-        let signature = format!("ci|{repo}|{workflow}|{anchor}");
+        let bucket_s = ci_refile_h() * 3600.0;
+        let bucket = ((now / bucket_s).floor() * bucket_s) as i64;
+        let signature = format!("ci|{repo}|{workflow}|{anchor}|{bucket}");
         let first_seen = oldest.created_at;
         let step = newest
             .failing_step
@@ -7622,7 +7638,8 @@ fn fault_identity(signature: &str) -> Option<&str> {
     if !(signature.starts_with("5xx|")
         || signature.starts_with("latency|outlier|")
         || signature.starts_with("latency|p95|")
-        || signature.starts_with("silent|schedule-errors|"))
+        || signature.starts_with("silent|schedule-errors|")
+        || signature.starts_with("ci|"))
     {
         return None;
     }
@@ -7748,13 +7765,15 @@ fn open_card_for_fault(conn: &Connection, signature: &str) -> Option<String> {
     conn.query_row(
         &format!(
             "SELECT id FROM issues \
-              WHERE source_ref LIKE ?1 \
+              WHERE (source_ref LIKE ?1 OR source_ref = ?2) \
                 AND status IN ({live}) \
                 AND archived = 0 AND deleted IS NULL \
               ORDER BY id DESC LIMIT 1",
             live = crate::db::board_store::live_work_status_list()
         ),
-        rusqlite::params![format!("autofix:{ident}|%")],
+        // `= ?2` covers a card filed before its signature grew a trailing
+        // epoch (the CI bucket, AMUX-5371): its source_ref IS the identity.
+        rusqlite::params![format!("autofix:{ident}|%"), format!("autofix:{ident}")],
         |r| r.get::<_, String>(0),
     )
     .ok()
@@ -9164,6 +9183,7 @@ async fn debug_autofix(
             "ci_repos": ci_repos(),
             "ci_poll_min": ci_poll_min(),
             "ci_min_failures": ci_min_failures(),
+            "ci_refile_h": ci_refile_h(),
             "ci_run_limit": ci_run_limit(),
             "ci_timeout_s": ci_cmd_timeout_s(),
         },
@@ -16945,7 +16965,7 @@ mod tests {
             "a second outage must not be deduped against the first"
         );
         assert!(
-            sig_new.ends_with("|200"),
+            sig_new.contains("|200|"),
             "the anchor is the streak's OLDEST failure: {sig_new}"
         );
     }
@@ -17028,7 +17048,7 @@ mod tests {
             "a cancelled run must not mask the outage behind it"
         );
         assert!(
-            f[0].signature.ends_with("|2"),
+            f[0].signature.contains("|2|"),
             "cancel must not move the anchor: {}",
             f[0].signature
         );
@@ -17450,6 +17470,31 @@ mod tests {
     /// shipped — 77 incidents frozen, still failing up to 25 days after their
     /// card was minted, including the one that pinned three lanes for four
     /// hours on 2026-09-18.
+    /// AMUX-5371. A streak that never ends kept one signature for good, so a
+    /// judged card silenced the workflow forever. The bucket moves the
+    /// signature on; the identity stays put so an open card still suppresses.
+    #[test]
+    fn a_still_red_workflow_refiles_after_its_card_is_judged() {
+        let runs = vec![
+            ci_run("rust", 901, "failure", 400.0),
+            ci_run("rust", 902, "failure", 300.0),
+        ];
+        let bucket_s = ci_refile_h() * 3600.0;
+        let t0 = 1_790_000_000.0_f64;
+        let now = (t0 / bucket_s).floor() * bucket_s + 10.0;
+        let a = ci_findings(&runs, now).0[0].signature.clone();
+        let same_bucket = ci_findings(&runs, now + 60.0).0[0].signature.clone();
+        let next_bucket = ci_findings(&runs, now + bucket_s).0[0].signature.clone();
+        assert_eq!(a, same_bucket, "one card per bucket, not per tick");
+        assert_ne!(a, next_bucket, "a judged card must not latch the workflow forever");
+        assert_eq!(
+            fault_identity(&a),
+            fault_identity(&next_bucket),
+            "an OPEN card for the streak suppresses every later bucket"
+        );
+        assert!(fault_identity(&a).is_some_and(|id| id.starts_with("ci|") && !id.ends_with('|')));
+    }
+
     #[test]
     fn a_reopened_incident_earns_a_new_card_and_a_continuing_one_does_not() {
         let id = "hooks.report_hook_matches_committed";

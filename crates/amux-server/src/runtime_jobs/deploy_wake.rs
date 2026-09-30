@@ -177,8 +177,29 @@ pub fn plan_wakes(commits: &[DeployedCommit]) -> BTreeMap<String, LaneWake> {
     out
 }
 
-/// The text the lane receives.
-pub fn wake_text(served: &str, w: &LaneWake) -> String {
+/// Open "CI red" cards the autofix CI detector filed (AMUX-5371), newest first.
+///
+/// A red main blocks every card behind it from reaching `verified`, and the
+/// card that says so is routed through board-drive, which skips any lane with
+/// standing orders off (40 of 41 lanes on 2026-09-30). The wake is the one
+/// message a lane that just shipped is sure to read, and that lane is the
+/// likeliest cause, so the CI state rides on it. A board read, no network.
+pub fn open_ci_red(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+    let Ok(mut st) = conn.prepare(&format!(
+        "SELECT id, title FROM issues WHERE source_ref LIKE 'autofix:ci|%' \
+           AND status IN ({live}) AND COALESCE(archived,0)=0 AND deleted IS NULL \
+         ORDER BY created DESC LIMIT 4",
+        live = crate::db::board_store::live_work_status_list()
+    )) else {
+        return Vec::new();
+    };
+    st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// The text the lane receives. `ci_red` is [`open_ci_red`]'s answer.
+pub fn wake_text(served: &str, w: &LaneWake, ci_red: &[(String, String)]) -> String {
     let short = &served[..served.len().min(12)];
     let n = w.shas.len();
     let listed: Vec<&str> = w.shas.iter().take(8).map(|s| &s[..s.len().min(10)]).collect();
@@ -196,8 +217,21 @@ pub fn wake_text(served: &str, w: &LaneWake) -> String {
         "[amux] {short} is live on this server. It includes {n} commit(s) of yours: {}{more}. \
          Run your UI/prod check for {cards} now; nothing else will prompt you. If the change \
          is not visible, hard-reload the dashboard first (the service worker caches). \
-         (deploy-wake, AMUX-5239; opt out with AMUX_DEPLOY_WAKE=0 in your scope)",
-        listed.join(", ")
+         (deploy-wake, AMUX-5239; opt out with AMUX_DEPLOY_WAKE=0 in your scope){ci}",
+        listed.join(", "),
+        ci = if ci_red.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " CI on main is RED: {}. A done card cannot reach verified while it is; \
+                 read the failing jobs and fix what is yours.",
+                ci_red
+                    .iter()
+                    .map(|(id, t)| format!("{id} ({t})"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        }
     )
 }
 
@@ -353,6 +387,10 @@ pub async fn run_once(state: &AppState, home: &Path, served: &str) -> Vec<String
     commits.truncate(MAX_COMMITS);
     let unattributed = commits.iter().filter(|c| c.lanes.is_empty()).count();
     let plan = plan_wakes(&commits);
+    let ci_red = match state.store.read() {
+        Ok(conn) => open_ci_red(&conn),
+        Err(_) => Vec::new(),
+    };
     let mut woken = Vec::new();
     for (lane, w) in &plan {
         let idem = format!("deploy-wake:{lane}:{served}");
@@ -372,12 +410,12 @@ pub async fn run_once(state: &AppState, home: &Path, served: &str) -> Vec<String
                 "deploy-wake: lane not woken (AMUX-5239)");
             continue;
         }
-        let text = wake_text(served, w);
+        let text = wake_text(served, w, &ci_red);
         match crate::api::session_verbs::steer_enqueue(state, lane, &text, GUARD, "").await {
             Ok(queue_id) => {
                 record_woken(state, lane, served, &idem, &queue_id).await;
                 tracing::info!(lane = %lane, served, commits = w.shas.len(), cards = ?w.cards,
-                    queue_id = %queue_id, verdict = "deploy_wake_sent",
+                    ci_red = ci_red.len(), queue_id = %queue_id, verdict = "deploy_wake_sent",
                     "deploy-wake: lane told its commits are live (AMUX-5239)");
                 woken.push(lane.clone());
             }
@@ -443,9 +481,14 @@ mod tests {
         let w = &plan["amux-helper"];
         assert_eq!(w.shas, vec![sha('a'), sha('b')]);
         assert_eq!(w.cards, vec!["AMUX-5100".to_string()], "SHA-256 is not a card");
-        let text = wake_text(&sha('b'), w);
+        let text = wake_text(&sha('b'), w, &[]);
         assert!(text.starts_with("[amux] bbbbbbbbbbbb is live on this server"), "{text}");
         assert!(text.contains("AMUX-5100") && text.contains("2 commit(s)"), "{text}");
+        assert!(!text.contains("CI on main is RED"), "no open CI card, no claim: {text}");
+        // AMUX-5371: an open CI-red card rides on the wake, by id.
+        let red = [("AMUX-5358".to_string(), "CI red: checks — 2x consecutive".to_string())];
+        let text = wake_text(&sha('b'), w, &red);
+        assert!(text.contains("CI on main is RED: AMUX-5358 (CI red: checks"), "{text}");
     }
 
     #[test]
