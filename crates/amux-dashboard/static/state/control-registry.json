@@ -494,8 +494,26 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_chatMount": {
+      "kind": "command._chatMount",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_chatRefresh": {
+      "kind": "command._chatRefresh",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_chatRetryTurn": {
       "kind": "command._chatRetryTurn",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_chatUnmount": {
+      "kind": "command._chatUnmount",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

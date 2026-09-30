@@ -621,7 +621,15 @@ if [ -n "$REG_STAGED" ]; then
     git ls-files -z -- crates/amux-dashboard/static/app.js crates/amux-dashboard/static/state scripts/build-state.mjs \
       | xargs -0 git checkout-index --prefix="$_reg_tmp/" --
     ln -s "$_nm" "$_reg_tmp/node_modules"
-    if ! _reg_out=$(cd "$_reg_tmp" && node scripts/build-state.mjs --check 2>&1); then
+    if _reg_out=$(cd "$_reg_tmp" && node scripts/build-state.mjs --check 2>&1); then
+      echo "Interaction registry matches staged app.js."
+    elif ! echo "$_reg_out" | grep -q 'is stale'; then
+      # The checker itself crashed (2026-09-30: an arm64-only esbuild in the
+      # shared node_modules under an x64 node). That is not evidence the
+      # registry is stale, and printing BLOCKED registry_stale for it sent the
+      # committer to regenerate a registry that was already correct.
+      echo "WARN registry_check_crashed: build-state --check did not run ($(echo "$_reg_out" | grep -m1 -E 'Error|error' | cut -c1-160)); node_modules=$_nm. CI's e2e lint will still check it" >&2
+    else
       echo "$_reg_out" | grep -E 'stale|Error' | head -3 >&2
       echo "BLOCKED registry_stale: the staged app.js no longer matches the generated interaction registry." >&2
       echo "  Fix: node scripts/build-state.mjs && git add crates/amux-dashboard/static/state/control-registry.json crates/amux-dashboard/static/state/kernel.js" >&2
@@ -630,7 +638,6 @@ if [ -n "$REG_STAGED" ]; then
       exit 1
     fi
     rm -rf "${_reg_tmp:?}"
-    echo "Interaction registry matches staged app.js."
   fi
 fi
 

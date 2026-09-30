@@ -13514,7 +13514,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1193';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1194';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -13908,6 +13908,11 @@ function _chatUnmount() {
   _chat.es = null; _chat.name = null; _chat.messages = []; _chat.streaming = null; _chat.gen++;
   _chat.cursor = ''; _chat.stick = true; _chat.unseen = false; _chat.raf = 0; _chat.onScroll = null; _chat.live = null;
   _chat.loadedAt = 0; _chat.offlineNote = ''; _chat.pendingShown = 0;
+  if (_peekChatPaintSkips && typeof _peekPollBeacon === 'function') {
+    // Before the guard these ticks replaced the chat with terminal output.
+    _peekPollBeacon('chat-terminal-paint-refused', _chat.name || peekSession, { n: _peekChatPaintSkips, verdict: 'chat_kept', measured: true });
+  }
+  _peekChatPaintSkips = 0;
   if (body && body.classList.contains('peek-chat')) {
     body.classList.remove('peek-chat');
     body.innerHTML = '';
@@ -16057,17 +16062,28 @@ function _wrapToolCalls(html) {
 // under its text. Each indented or bulleted line gets a hanging indent equal
 // to its own visible prefix. Box blocks keep their own horizontal scroller and
 // are left alone; so are lines carrying block markup.
+const _PTC_BODY_OPEN = '<div class="ptc-body">';
 function _hangIndent(html) {
   let inBox = false;
   return String(html).split('\n').map(line => {
     if (inBox) { if (line.includes('</div>')) inBox = false; return line; }
     if (line.startsWith('<div class="peek-box">')) { if (!line.includes('</div>')) inBox = true; return line; }
-    if (line.includes('<div') || line.includes('</div')) return line;
+    // A collapsible reply block opens on its FIRST text line and closes on its
+    // LAST (_wrapToolCalls joins them), so those two lines carry div markup
+    // and used to be skipped: the reply's final line wrapped to the left edge
+    // (Ethan, 2026-09-30, "see the bottom"). Peel that markup off and indent
+    // the text between.
+    let pre = '', post = '';
+    const bi = line.lastIndexOf(_PTC_BODY_OPEN);
+    if (bi >= 0) { pre = line.slice(0, bi + _PTC_BODY_OPEN.length); line = line.slice(pre.length); }
+    const close = line.match(/(?:<\/div>)+$/);
+    if (close) { post = close[0]; line = line.slice(0, line.length - post.length); }
+    if (line.includes('<div') || line.includes('</div')) return pre + line + post;
     const text = line.replace(/<[^>]*>/g, '').replace(/&(?:[a-z]+|#\d+);/gi, 'x');
     const m = text.match(/^\s*(?:(?:[-*\u2022\u25cf\u23fa\u23bf]|\d{1,3}[.)])\s+)?/);
     const n = m ? m[0].length : 0;
-    if (n < 2 || n > 24 || n >= text.length) return line;
-    return '<span class="pk-hang" style="--h:' + n + 'ch">' + line + '</span>';
+    if (n < 2 || n > 24 || n >= text.length) return pre + line + post;
+    return pre + '<span class="pk-hang" style="--h:' + n + 'ch">' + line + '</span>' + post;
   }).join('\n');
 }
 // True when a terminal ❯ draft is really a steering message shown elsewhere:
@@ -16943,6 +16959,11 @@ async function _refreshPeekFrame(liveOnly, request) {
     _lastLiveHTML = newHTML;
     lastPeekHTML = _peekEarlierHTML() + _peekHistoryHTML + _lastLiveHTML;
     const hasSearch = peekSearchQuery.trim().length > 0;
+    // Chat tab owns #peek-body: keep the terminal data fresh, touch no DOM
+    // and no scroll position (the chat was being replaced by terminal output).
+    const chatOwnsBody = body.classList.contains('peek-chat');
+    if (chatOwnsBody) _peekChatPaintSkips++;
+    else {
     if (_peekScrollLocked || hasSearch) _peekBufferedOutput = true;
     // When user has scrolled up, skip DOM update to avoid fidgeting the view.
     // Buffer in lastPeekHTML and flush when they resume.
@@ -16983,6 +17004,7 @@ async function _refreshPeekFrame(liveOnly, request) {
         _hideScrollLockBadge(body);
       });
     }
+    }   // !chatOwnsBody
     if (performance.now() > _peekGeoHold) statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
     acceptFrame();
     // Cache peek output for offline browsing
@@ -17017,11 +17039,15 @@ async function _refreshPeekFrame(liveOnly, request) {
   } finally { clearTimeout(_peekTimeout); }
 }
 
+let _peekChatPaintSkips = 0;   // terminal paints refused while the Chat tab owned #peek-body
 // Split DOM: history lives in a stable container and the live frame in its own,
 // so a live tick swaps ONLY #pk-live (a few hundred bytes) instead of
 // re-innerHTML'ing the whole ~100K-char scrollback every 900ms — that wholesale
 // reflow was the visible "janky" churn when watching an active session.
 function _paintPeekRegions(body) {
+  // The Chat tab renders into this same element. A terminal tick must not
+  // overwrite it; the transcript repaints when the tab switches back.
+  if (body.classList.contains('peek-chat')) { _peekChatPaintSkips++; return; }
   if (_peekAgents.selected) { body.innerHTML=lastPeekHTML; _peekReclassifyPrompts(); return; }
   const hist = _peekEarlierHTML() + _peekHistoryHTML;
   if (!hist && !_lastLiveHTML && lastPeekHTML) { body.innerHTML = lastPeekHTML; _peekReclassifyPrompts(); return; }  // IDB cached open paint
@@ -17032,6 +17058,7 @@ function applyPeekSearch(keepIndex, doScroll) {
   const body = document.getElementById('peek-body');
   const countEl = document.getElementById('peek-search-count');
   if (!body) return;
+  if (body.classList.contains('peek-chat')) { _peekChatPaintSkips++; return; }
   const q = peekSearchQuery.trim();
   if (!q) {
     _peekPendingFindScroll = false;

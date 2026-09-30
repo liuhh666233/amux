@@ -7772,3 +7772,6 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
 .file-video { width: 100%; max-height: calc(100dvh - 220px); background: #000; border-radius: 8px; }
 .file-video-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--dim); font-size: 0.8rem; }
 .file-video-meta .btn { min-height: 44px; }
+/* Continue/Enter/Up/Down are terminal keystrokes; the Chat tab has its own
+   composer, so the terminal quick chips do not belong under it. */
+#peek-overlay:has(#peek-body.peek-chat) #peek-chips { display: none; }
