@@ -346,7 +346,7 @@ mod clear_sw_landing_tests {
     }
 }
 
-mod tailnet_auth;
+pub(crate) mod tailnet_auth;
 
 async fn serve_shell(
     state: &AppState,

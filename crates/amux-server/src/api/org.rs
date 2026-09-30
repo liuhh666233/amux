@@ -411,8 +411,12 @@ pub async fn local_member_identity(
     req.headers_mut().remove(MEMBER_TEAM_NAME_B64_HEADER);
     req.headers_mut().remove("x-amux-user-id");
     req.headers_mut().remove("x-amux-user-email");
-    let Some(token) = member_cookie(req.headers()).map(str::to_string) else {
-        return next.run(req).await;
+    let token = match member_cookie(req.headers()).map(str::to_string) {
+        Some(token) => token,
+        None => match tailnet_member_token(&state, tailnet_request_facts(&req)).await {
+            Some(token) => token,
+            None => return next.run(req).await,
+        },
     };
     let store = state.store.clone();
     let identity = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemberIdentity>> {
@@ -503,6 +507,127 @@ pub async fn local_member_identity(
         }
     }
     next.run(req).await
+}
+
+// ---- tailnet sign-in (AC-439, MP-1) ---------------------------------------
+//
+// A person on the tailnet whose Tailscale login matches an accepted member
+// signs in as that member with no cookie. Off unless
+// AMUX_TAILNET_MEMBER_AUTH=1. The login comes from the local tailscaled
+// (`whois` on the socket peer), never from a header. No cookie is minted:
+// the answer is cached per address for TAILNET_LOGIN_TTL, so removing a
+// person from the tailnet revokes them within that window even where the
+// server is reachable another way. Deleting the member revokes at once,
+// because the token is looked up on every request.
+
+const TAILNET_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+type LoginCache = std::collections::HashMap<std::net::IpAddr, (std::time::Instant, Option<String>)>;
+
+fn login_cache() -> &'static Mutex<LoginCache> {
+    static CACHE: std::sync::OnceLock<Mutex<LoginCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(LoginCache::new()))
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test seam: (peer, login) as tailscaled would report them.
+    pub(crate) static TEST_TAILNET_LOGIN: (std::net::IpAddr, String);
+}
+
+/// `Some((peer, login, fresh))` when the request is a tailnet request and the
+/// lookup completed; `fresh` is false for a cache hit.
+/// What the tailnet sign-in needs from a request, read before any await so
+/// the middleware future does not hold the (non-Sync) request across one.
+struct TailnetFacts {
+    owner_credential: bool,
+    peer: Option<std::net::IpAddr>,
+}
+
+fn tailnet_request_facts(req: &Request) -> TailnetFacts {
+    let owner_query = req
+        .uri()
+        .query()
+        .is_some_and(|q| q.split('&').any(|kv| kv.starts_with("_token=")));
+    TailnetFacts {
+        owner_credential: req.headers().contains_key(header::AUTHORIZATION) || owner_query,
+        peer: req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| info.0.ip()),
+    }
+}
+
+async fn tailnet_login(facts: &TailnetFacts) -> Option<(std::net::IpAddr, Option<String>, bool)> {
+    #[cfg(test)]
+    if let Ok((peer, login)) = TEST_TAILNET_LOGIN.try_with(|v| v.clone()) {
+        return Some((peer, Some(login), true));
+    }
+    if !std::env::var("AMUX_TAILNET_MEMBER_AUTH").is_ok_and(|v| v == "1") {
+        return None;
+    }
+    let peer = facts.peer?;
+    if !super::static_files::tailnet_auth::tailnet_ip(peer) {
+        return None;
+    }
+    let now = std::time::Instant::now();
+    let cached = login_cache().lock().ok()?.get(&peer).cloned();
+    if let Some((at, login)) = cached {
+        if now.duration_since(at) < TAILNET_LOGIN_TTL {
+            return Some((peer, login, false));
+        }
+    }
+    match super::static_files::tailnet_auth::peer_login(peer).await {
+        Ok(login) => {
+            if let Ok(mut cache) = login_cache().lock() {
+                cache.retain(|_, (at, _)| now.duration_since(*at) < TAILNET_LOGIN_TTL);
+                cache.insert(peer, (now, login.clone()));
+            }
+            Some((peer, login, true))
+        }
+        Err(reason) => {
+            tracing::warn!(target: "amux::local_invite", verdict = "tailnet_member_auth", outcome = "whois_failed", measured = false, %peer, %reason, "tailnet member sign-in could not ask tailscaled; ordinary sign-in still works");
+            None
+        }
+    }
+}
+
+/// The invite token of the accepted member whose email is this request's
+/// tailnet login. Owner credentials always stay the owner.
+async fn tailnet_member_token(state: &AppState, facts: TailnetFacts) -> Option<String> {
+    if facts.owner_credential {
+        return None;
+    }
+    let (peer, login, fresh) = tailnet_login(&facts).await?;
+    let Some(login) = login else {
+        if fresh {
+            tracing::info!(target: "amux::local_invite", verdict = "tailnet_member_auth", outcome = "no_person", measured = true, %peer, "tailnet device is tagged, expired or the server owner's; not a member sign-in");
+        }
+        return None;
+    };
+    let store = state.store.clone();
+    let email = login.clone();
+    let token = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+        let conn = store.read()?;
+        Ok(conn
+            .query_row(
+                "SELECT i.token FROM org_members m JOIN org_invites i ON i.used_by=m.id \
+                 WHERE lower(m.email)=?1 AND i.used_at IS NOT NULL \
+                 ORDER BY i.used_at DESC LIMIT 1",
+                [&email],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .flatten();
+    if fresh {
+        let outcome = if token.is_some() { "matched" } else { "unmatched" };
+        tracing::info!(target: "amux::local_invite", verdict = "tailnet_member_auth", outcome, measured = true, %peer, login = %login, "tailnet login checked against accepted members");
+    }
+    token
 }
 
 // ---- shared helpers -------------------------------------------------------
@@ -2049,6 +2174,97 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM org_invites", [], |r| r.get(0))
             .unwrap();
         assert_eq!((m, i), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_login_matching_an_accepted_member_signs_in_without_a_cookie() {
+        let (app, _dir) = full_app();
+        let (created, _, body) = raw_send(
+            &app,
+            "POST",
+            "/api/org/invites",
+            r#"{"email":"alice@example.com","scope_level":"global","grant_host_access":true}"#,
+            &[
+                ("authorization", "Bearer owner-token"),
+                ("content-type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(created, StatusCode::CREATED, "{body}");
+        let token = serde_json::from_str::<Value>(&body).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let peer: std::net::IpAddr = "100.64.7.8".parse().unwrap();
+        // Before acceptance the login matches nobody.
+        let (status, _, _) = TEST_TAILNET_LOGIN
+            .scope((peer, "alice@example.com".into()), raw_send(&app, "GET", "/api/identity", "", &[]))
+            .await;
+        let before: Value = serde_json::from_str(
+            &TEST_TAILNET_LOGIN
+                .scope((peer, "alice@example.com".into()), raw_send(&app, "GET", "/api/identity", "", &[]))
+                .await
+                .2,
+        )
+        .unwrap_or(Value::Null);
+        assert_ne!(before["is_local_member"], true, "{status} {before}");
+        let (accepted, _, _) = raw_send(
+            &app,
+            "POST",
+            &format!("/invite/{token}"),
+            "email=alice%40example.com&name=Alice",
+            &[("content-type", "application/x-www-form-urlencoded")],
+        )
+        .await;
+        assert_eq!(accepted, StatusCode::SEE_OTHER);
+
+        // No cookie: the tailnet login alone is the credential.
+        let (status, headers, body) = TEST_TAILNET_LOGIN
+            .scope((peer, "alice@example.com".into()), raw_send(&app, "GET", "/api/identity", "", &[]))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let identity: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(identity["email"], "alice@example.com");
+        assert_eq!(identity["is_local_member"], true);
+        assert!(headers.get(header::SET_COOKIE).is_none(), "no long-lived cookie is minted");
+
+        // Another person's login is not Alice.
+        let (_, _, body) = TEST_TAILNET_LOGIN
+            .scope((peer, "mallory@example.com".into()), raw_send(&app, "GET", "/api/identity", "", &[]))
+            .await;
+        let identity: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        assert_ne!(identity["email"], "alice@example.com", "{identity}");
+
+        // The owner's bearer stays the owner even from Alice's device.
+        let (_, _, body) = TEST_TAILNET_LOGIN
+            .scope(
+                (peer, "alice@example.com".into()),
+                raw_send(&app, "GET", "/api/identity", "", &[("authorization", "Bearer owner-token")]),
+            )
+            .await;
+        let identity: Value = serde_json::from_str(&body).unwrap();
+        assert_ne!(identity["is_local_member"], true, "{identity}");
+
+        // Deleting the member revokes the tailnet sign-in at once.
+        let (_, _, members) = raw_send(&app, "GET", "/api/org/members", "", &[("authorization", "Bearer owner-token")]).await;
+        let members: Value = serde_json::from_str(&members).unwrap();
+        let list = members.get("members").unwrap_or(&members);
+        let id = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["email"] == "alice@example.com")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (deleted, _, _) = raw_send(&app, "DELETE", &format!("/api/org/members/{id}"), "", &[("authorization", "Bearer owner-token")]).await;
+        assert_eq!(deleted, StatusCode::OK);
+        let (_, _, body) = TEST_TAILNET_LOGIN
+            .scope((peer, "alice@example.com".into()), raw_send(&app, "GET", "/api/identity", "", &[]))
+            .await;
+        let identity: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        assert_ne!(identity["is_local_member"], true, "{identity}");
     }
 
     #[tokio::test]
