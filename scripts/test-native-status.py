@@ -75,6 +75,24 @@ class NativeStatus(unittest.TestCase):
             values=[json.loads(p.read_text())['state'] for p in sorted((root/'status-events/worker/abc').glob('0*.json'))]
             self.assertEqual(values, ['waiting','waiting','waiting','active','blocked'])
 
+    def test_subagent_prompt_blocks_the_lane_and_only_its_own_edge_clears_it(self):
+        # tubescience-parity 2026-09-30: a subagent's permission prompt read as
+        # WORKING because every subagent edge was dropped.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seen = [observer.observe(data, root, 'worker', 'abc', 'claude', float(i)) for i, data in enumerate([
+                {'hook_event_name':'PreToolUse'},
+                {'hook_event_name':'PreToolUse','agent_id':'a1'},
+                {'hook_event_name':'PermissionRequest','tool_name':'Bash','agent_id':'a1'},
+                {'hook_event_name':'PreToolUse','agent_id':'a2'},
+                {'hook_event_name':'PostToolUse','agent_id':'a1'},
+                {'hook_event_name':'Stop','agent_id':'a1'},
+            ], 1)]
+            self.assertEqual(seen, [True, False, True, False, True, False])
+            values=[json.loads(p.read_text()) for p in sorted((root/'status-events/worker/abc').glob('0*.json'))]
+            self.assertEqual([v['state'] for v in values], ['active','blocked','active'])
+            self.assertEqual([v.get('subagent', False) for v in values], [False, True, True])
+
     def test_installer_preserves_other_hooks_idempotently_without_trust_changes(self):
         for provider in ('claude','codex'):
             other={'type':'command','command':'echo other'}

@@ -59,7 +59,15 @@ def deliver(root, worker, run):
 
 def observe(data, root, worker, run, provider, occurred_at):
     state = state_for(data)
-    if state is None or data.get('agent_id') or data.get('subagent_id'):
+    if state is None:
+        return False
+    # A subagent's lifecycle is not the lane's: its Stop must not mark a
+    # working lane idle. But a subagent's permission prompt or question
+    # blocks the whole lane on the human, so those edges ARE the lane's
+    # (tubescience-parity, 2026-09-30: WORKING over a subagent's "Do you want
+    # to proceed?"). The same subagent's next active edge clears its own block.
+    agent = data.get('agent_id') or data.get('subagent_id') or ''
+    if agent and state not in ('blocked', 'waiting', 'active'):
         return False
     folder = root / 'status-events' / worker / run
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -67,6 +75,9 @@ def observe(data, root, worker, run, provider, occurred_at):
         fcntl.flock(lock, fcntl.LOCK_EX)
         counter = folder / 'counter.json'
         previous = json.loads(counter.read_text()) if counter.exists() else {}
+        if agent and state == 'active' and not (
+                previous.get('state') in ('blocked', 'waiting') and previous.get('agent') == agent):
+            return False
         # Claude also calls an AskUserQuestion notification 'permission_prompt'.
         # Preserve the explicit tool's waiting state until a real next edge.
         if data.get('hook_event_name') == 'Notification' and previous.get('state') == 'waiting':
@@ -83,7 +94,9 @@ def observe(data, root, worker, run, provider, occurred_at):
         if data.get('hook_event_name') == 'UserPromptSubmit' and isinstance(data.get('prompt'), str):
             payload['prompt'] = data['prompt'][:20000]
         target = folder / ('%020d.json' % seq)
-        for path, value in ((counter, {'sequence': seq, 'state': state}), (target, payload)):
+        if agent:
+            payload['subagent'] = True
+        for path, value in ((counter, {'sequence': seq, 'state': state, 'agent': agent}), (target, payload)):
             temp = path.with_suffix('.tmp')
             with temp.open('w') as out:
                 json.dump(value, out)
