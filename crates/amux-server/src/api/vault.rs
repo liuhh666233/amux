@@ -89,6 +89,12 @@ fn save_items(home: &Path, items: &[Value]) -> std::io::Result<()> {
     std::fs::rename(&tmp, items_path(home))
 }
 
+/// The one audit writer for every vault item kind (cards here, secrets in
+/// vault_secrets.rs), so there is one file to read.
+pub(crate) fn audit_line(home: &Path, entry: Value) {
+    audit(home, entry)
+}
+
 fn audit(home: &Path, entry: Value) {
     use std::io::Write;
     let path = audit_path(home);

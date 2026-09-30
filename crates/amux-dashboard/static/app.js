@@ -11267,13 +11267,43 @@ async function _scopeLoad(scope, targetId) {
     // because the generic env tile masks values and these two never are secret.
     const _bpId = 'scope-bp-' + lvl + '-' + String(w || 'global').replace(/[^A-Za-z0-9_-]/g, '_');
     h += '<div class="scope-bp" id="' + _bpId + '" data-level="' + esc(lvl) + '" data-name="' + esc(w || '') + '"></div>';
+    const _vaultId = 'scope-vault-' + lvl + '-' + String(w || 'global').replace(/[^A-Za-z0-9_-]/g, '_');
+    h += '<div class="scope-vault" id="' + _vaultId + '"></div>';
     const dst = document.getElementById(targetId || 'peek-scope-body') || el;
     dst.innerHTML = h;
     _scopeBpLoad(lvl, w || '', _bpId);
+    _scopeVaultLoad(lvl, w || '', _vaultId);
   } catch (e) {
     const dst = document.getElementById(targetId || 'peek-scope-body') || el;
     dst.textContent = 'Could not load configurations: ' + e.message;
   }
+}
+
+// ── Vault secrets in the Scope tab (AMUX-5375): names and where they come
+// from, never values. Editing lives in Settings -> Vault, one place for it.
+async function _scopeVaultLoad(lvl, name, id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  try {
+    const q = lvl === 'worker' ? '?worker=' + encodeURIComponent(name) : '';
+    const r = await fetch(API + '/api/vault/secrets' + q, { headers: _authHeaders() });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.why_unmeasured || d.error || r.status);
+    const rows = lvl === 'worker'
+      ? (d.resolved || []).map(x => '<li><code>' + esc(x.key) + '</code> · from ' + esc(_vaultScopeLabel(x))
+          + (x.shadows?.length ? ' <span class="ui-help">(overrides ' + x.shadows.map(s => esc(_vaultScopeLabel(s))).join(', ') + ')</span>' : '') + '</li>')
+      : (d.items || []).filter(i => i.scope === lvl && (lvl === 'global' || i.target === String(name).toLowerCase() || i.target === name))
+          .map(i => '<li><code>' + esc(i.key) + '</code></li>');
+    el.innerHTML = '<div class="settings-section-label">Vault secrets</div>'
+      + (rows.length ? '<ul class="scope-vault-list">' + rows.join('') + '</ul>'
+        : '<p class="ui-help">' + (lvl === 'worker' ? 'This worker receives no vault secrets.' : 'None set at this scope.') + '</p>')
+      + '<button class="btn" onclick="event.stopPropagation();_scopeVaultManage()">Manage in Settings \u2197</button>';
+  } catch (e) { el.innerHTML = '<p class="ui-help">Vault secrets unavailable: ' + esc(e.message || String(e)) + '</p>'; }
+}
+function _scopeVaultManage() {
+  document.getElementById('settings-menu')?.classList.add('open');
+  _settingsTab('integrations');
+  setTimeout(() => document.getElementById('vault-secrets')?.scrollIntoView({ block: 'start' }), 60);
 }
 
 // ── Browser profile access editor (AMUX-5307) ────────────────────────────
@@ -13425,7 +13455,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1188';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1189';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -39685,8 +39715,96 @@ async function _vaultRemove(id) {
   showToast(r.ok ? 'Removed' : 'Remove failed');
   _vaultLoad();
 }
+// ── Vault secrets (vault_secrets.rs, AMUX-5375): encrypted env values ──────
+// No response carries a value, so nothing here can show one. Replace-only.
+function _vaultScopeLabel(i) {
+  return i.scope === 'global' ? 'Global' : (i.scope === 'group' ? 'Group ' : 'Worker ') + i.target;
+}
+async function _vaultSecretsLoad() {
+  const el = document.getElementById('vault-secrets');
+  if (!el) return;
+  try {
+    const r = await fetch(API + '/api/vault/secrets', { headers: _authHeaders() });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.why_unmeasured || d.error || r.status);
+    const items = (d.items || []).slice().sort((a, b) => a.key.localeCompare(b.key) || a.scope.localeCompare(b.scope));
+    const help = document.getElementById('vault-secrets-help');
+    if (help) help.dataset.keystore = d.keystore || '';
+    el.innerHTML = (d.keystore === 'file'
+      ? '<p class="connection-help vault-pending">The encryption key is a file beside the store (no Keychain on this machine), so a copy of ~/.amux carries both.</p>' : '')
+      + (items.length ? items.map(i => '<div class="vault-item vault-secret" data-id="' + esc(i.id) + '">'
+        + '<div class="vault-item-head"><code>' + esc(i.key) + '</code> · ' + esc(_vaultScopeLabel(i))
+        + ' · <span class="ui-help">updated ' + esc(timeAgo(i.updated)) + '</span>'
+        + (i.source ? ' · <span class="ui-help">imported from ' + esc(i.source) + '</span>' : '') + '</div>'
+        + '<div class="vault-actions">'
+        + '<button class="btn" onclick="_vaultSecretReplace(\'' + escJs(i.id) + '\',\'' + escJs(i.key) + '\')">Replace value</button>'
+        + '<button class="btn danger" onclick="_vaultSecretRemove(\'' + escJs(i.id) + '\',\'' + escJs(i.key) + '\')">Delete</button>'
+        + '</div></div>').join('') : '<p class="connection-help">No secrets yet.</p>');
+  } catch (e) { el.textContent = 'Secrets unavailable: ' + (e.message || e); }
+}
+async function _vaultSecretScopeChanged() {
+  const scope = document.getElementById('vault-secret-scope').value;
+  const row = document.getElementById('vault-secret-target-row');
+  const sel = document.getElementById('vault-secret-target');
+  row.hidden = scope === 'global';
+  if (scope === 'global') return;
+  // Settings can open before the worker list has loaded; ask for it rather
+  // than offering an empty choice.
+  let list = (typeof sessions !== 'undefined' && sessions && sessions.length) ? sessions : null;
+  if (!list) {
+    try { list = await (await fetch(API + '/api/sessions', { headers: _authHeaders() })).json(); } catch (e) { list = []; }
+  }
+  const names = scope === 'group'
+    ? [...new Set((list || []).flatMap(s => (s.tags || []).map(t => String(t).toLowerCase())))].sort()
+    : (list || []).map(s => s.name).sort();
+  sel.innerHTML = names.length
+    ? names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('')
+    : '<option value="" disabled selected>' + (scope === 'group' ? 'No groups yet' : 'No workers yet') + '</option>';
+}
+async function _vaultSecretAdd() {
+  const key = document.getElementById('vault-secret-key');
+  const value = document.getElementById('vault-secret-value');
+  const scope = document.getElementById('vault-secret-scope').value;
+  const target = scope === 'global' ? '' : document.getElementById('vault-secret-target').value;
+  const errEl = document.getElementById('vault-secret-error');
+  const btn = document.getElementById('vault-secret-add-btn');
+  errEl.textContent = ''; key.removeAttribute('aria-invalid');
+  btn.disabled = true; btn.setAttribute('aria-busy', 'true');
+  try {
+    const r = await fetch(API + '/api/vault/secrets', { method: 'POST',
+      headers: _authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ key: key.value.trim(), scope, target, value: value.value }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { errEl.textContent = d.error || ('Not saved (' + r.status + ')'); key.setAttribute('aria-invalid', 'true'); return; }
+    // The value leaves the page as soon as it is saved.
+    value.value = ''; key.value = '';
+    showToast('Saved ' + d.item.key + ' · workers get it at their next start');
+    _vaultSecretsLoad();
+  } finally { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+}
+async function _vaultSecretReplace(id, key) {
+  const ok = await showFormModal('Replace ' + key,
+    '<label class="ui-field">New value <input id="vault-secret-replace" class="input" type="password" autocomplete="new-password" spellcheck="false"'
+    + ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();_modalClose(true)}"></label>'
+    + '<p class="ui-help">Workers pick it up at their next start.</p>', 'Replace');
+  const input = document.getElementById('vault-secret-replace');
+  const v = input ? input.value : '';
+  if (input) input.value = '';
+  if (!ok || !v) return;
+  const r = await fetch(API + '/api/vault/secrets/' + encodeURIComponent(id), { method: 'PUT',
+    headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ value: v }) });
+  const d = await r.json().catch(() => ({}));
+  showToast(r.ok ? 'Replaced ' + key : ('Not replaced: ' + (d.error || r.status)));
+  _vaultSecretsLoad();
+}
+async function _vaultSecretRemove(id, key) {
+  if (!await showConfirm('Delete ' + key + ' from the vault? Workers lose it at their next start.', 'Delete', true)) return;
+  const r = await fetch(API + '/api/vault/secrets/' + encodeURIComponent(id), { method: 'DELETE', headers: _authHeaders() });
+  showToast(r.ok ? 'Deleted ' + key : 'Delete failed');
+  _vaultSecretsLoad();
+}
 function _settingsTab(name) {
-  if (name === 'integrations') setTimeout(_vaultLoad, 0);
+  if (name === 'integrations') setTimeout(() => { _vaultLoad(); _vaultSecretsLoad(); _vaultSecretScopeChanged(); }, 0);
   const menu = document.getElementById('settings-menu');
   if (!menu) return;
   menu.querySelectorAll('.settings-tab-btn').forEach(b =>

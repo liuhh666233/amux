@@ -14674,6 +14674,45 @@ pub(crate) async fn start_session(
         }
     }
 
+    // VAULT SECRETS (AMUX-5375): the worker's keys, worker > group > global,
+    // decrypted here and handed over the same way as the provider keys above:
+    // set-environment on the control socket, then imported BY NAME. They are
+    // imported after the scope env files are sourced, so for its keys the
+    // vault wins over a plaintext line that is still there mid-migration.
+    // Keys delivered last launch and deleted since are unset.
+    let vault_values = match super::vault_secrets::launch_values(&home(), name) {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::warn!(session = name, %error, measured = false, n_considered = 0,
+                verdict = "vault_delivery_failed",
+                "vault: secrets could not be resolved; the worker launches without them (AMUX-5375)");
+            Vec::new()
+        }
+    };
+    let vault_keys: Vec<String> = vault_values.iter().map(|(k, _)| k.clone()).collect();
+    // WHAT THE LAST LAUNCH DELIVERED lives in the tmux session itself
+    // (AMUX_VAULT_KEYS, names only), not in worker meta: a create-time
+    // autostart racing an explicit start overwrote a meta list with an empty
+    // one, and a deleted key then survived the relaunch (caught by
+    // e2e/chaos/vault-secrets.mjs). The session holds the values, so it is the
+    // one record that cannot disagree with them.
+    let mut stale_vault_keys: Vec<String> = Vec::new();
+    // Names only, sh-safe by construction (valid_key admits [A-Z0-9_]).
+    let vault_import = |target: &str, stale_vault_keys: &[String]| -> String {
+        let mut line = vault_keys
+            .iter()
+            .map(|k| format!("eval \"$(tmux show-environment -s -t {} {k})\"", sh_quote(target)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !stale_vault_keys.is_empty() {
+            if !line.is_empty() {
+                line.push_str("; ");
+            }
+            line.push_str(&format!("unset {}", stale_vault_keys.join(" ")));
+        }
+        line
+    };
+
     let tmux_sess = tmux_name(name);
     let tmux_exists = tmux_sessions_set().await.contains(&tmux_sess);
     if tmux_exists {
@@ -14769,6 +14808,28 @@ pub(crate) async fn start_session(
                 );
             }
         }
+        for (key, value) in &vault_values {
+            if !tmux(&["set-environment", "-t", &st, key, value]).await.is_some_and(|o| o.status.success()) {
+                tracing::warn!(session = name, key, measured = true, n_considered = 1,
+                    verdict = "vault_env_refresh_failed",
+                    "vault: a secret could not be handed to the existing tmux session (AMUX-5375)");
+            }
+        }
+        let prev = tmux(&["show-environment", "-t", &st, "AMUX_VAULT_KEYS"]).await
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        stale_vault_keys = prev
+            .strip_prefix("AMUX_VAULT_KEYS=")
+            .unwrap_or("")
+            .split(',')
+            .filter(|k| !k.is_empty() && super::vault_secrets::valid_key(k).is_ok() && !vault_keys.iter().any(|v| v == k))
+            .map(str::to_string)
+            .collect();
+        for key in &stale_vault_keys {
+            let _ = tmux(&["set-environment", "-u", "-t", &st, key]).await;
+        }
+        let _ = tmux(&["set-environment", "-t", &st, "AMUX_VAULT_KEYS", &vault_keys.join(",")]).await;
     }
     // Setup completion and launch admission share one receipt-based transport.
     // Never submit the next line after a timeout or a failed tmux operation.
@@ -14825,6 +14886,10 @@ pub(crate) async fn start_session(
         shell_step!(&profile_rc, false);
         // Scope settings and workspace isolation, as a fresh start applies them.
         shell_step!(&surviving_shell_scope_rc(name), false);
+        let vault_line = vault_import(&target, &stale_vault_keys);
+        if !vault_line.is_empty() {
+            shell_step!(&vault_line, false);
+        }
         // The surviving shell skips shell_rc, so give it the same isolated
         // server CLI priority as a fresh shell after the environment import.
         if local_cli_dir.join("amux").is_file() {
@@ -14919,7 +14984,19 @@ pub(crate) async fn start_session(
                 false
             );
         }
+        for (key, value) in &vault_values {
+            if !tmux(&["set-environment", "-t", &stq, key, value]).await.is_some_and(|o| o.status.success()) {
+                tracing::warn!(session = name, key, measured = true, n_considered = 1,
+                    verdict = "vault_env_refresh_failed",
+                    "vault: a secret could not be handed to the new tmux session (AMUX-5375)");
+            }
+        }
+        let _ = tmux(&["set-environment", "-t", &stq, "AMUX_VAULT_KEYS", &vault_keys.join(",")]).await;
         shell_step!(&shell_rc, false);
+        let vault_line = vault_import(&stq, &stale_vault_keys);
+        if !vault_line.is_empty() {
+            shell_step!(&vault_line, false);
+        }
     }
     if has_oauth && provider != "codex" && provider != "gemini" && provider != "muse" {
         shell_step!("unset ANTHROPIC_API_KEY", false);
@@ -49791,6 +49868,29 @@ mod spawn_argv_secret_tests {
             block.contains("\"ANTHROPIC_API_KEY=\""),
             "the empty ANTHROPIC_API_KEY suppression must stay in argv"
         );
+    }
+
+    /// AMUX-5375. Vault values never travel in the new-session argv, and they
+    /// are imported AFTER the scope env files are sourced, on both the fresh
+    /// and the surviving shell, so the vault wins over a plaintext line for
+    /// the same key.
+    #[test]
+    fn vault_secrets_are_deferred_and_imported_after_the_scope_files() {
+        let src = include_str!("session_verbs.rs");
+        let fresh_rc = src.find("        shell_step!(&shell_rc, false);\n        let vault_line = vault_import(&stq, &stale_vault_keys);")
+            .expect("fresh shell: vault import directly after shell_rc");
+        assert!(fresh_rc > 0);
+        let surviving = src.find("        shell_step!(&surviving_shell_scope_rc(name), false);\n        let vault_line = vault_import(&target, &stale_vault_keys);")
+            .expect("surviving shell: vault import directly after the scope rc");
+        assert!(surviving > 0);
+        let new_session = src.find("\"new-session\".into(),").expect("new-session argv");
+        let argv_end = src[new_session..].find("args.push(user_shell());").expect("argv ends at the shell");
+        let argv_block = &src[new_session..new_session + argv_end];
+        assert!(!argv_block.contains("vault_values"), "vault values must not reach new-session argv");
+        let import_fn = src.find("let vault_import = |target: &str, stale_vault_keys: &[String]|").expect("importer");
+        let body = &src[import_fn..import_fn + 600];
+        assert!(body.contains("show-environment -s -t") && !body.contains("value"),
+            "the typed import names keys only: {body}");
     }
 
     /// Deferring is only half of it: a set-environment nobody imports leaves the

@@ -12,12 +12,15 @@ plus one launch record per process, written before anything is painted:
   {"event": "launch", "cwd": <os.getcwd()>, "pid": <pid>, "argv": [...], "t": ...}
 The launch cwd is the agent's own report of where it runs, which is what a
 worktree test has to prove (not what amux believes it passed to tmux).
+With $FAKE_CLAUDE_ENV_KEYS (comma-separated names) the launch record also
+carries "env_sha256": {name: sha256 of its value, or null when unset}, so a
+test can prove a secret arrived without any log holding the secret.
 
 It ignores every argument amux passes (--model, --resume, ...), because the
 point is to exercise amux's paste, Enter and submission-verification path,
 not the model.
 """
-import json, os, select, sys, time, termios, tty
+import hashlib, json, os, select, sys, time, termios, tty
 
 LOG = os.environ.get("FAKE_CLAUDE_LOG")
 # Optional: every raw input byte, for diagnosing what the harness actually typed.
@@ -76,9 +79,14 @@ def submit():
 
 def main():
     with open(LOG, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"event": "launch", "bin": os.path.basename(sys.argv[0]),
-                            "cwd": os.getcwd(), "pid": os.getpid(),
-                            "argv": sys.argv[1:], "t": time.time()}) + "\n")
+        rec = {"event": "launch", "bin": os.path.basename(sys.argv[0]),
+               "cwd": os.getcwd(), "pid": os.getpid(),
+               "argv": sys.argv[1:], "t": time.time()}
+        keys = [k for k in (os.environ.get("FAKE_CLAUDE_ENV_KEYS") or "").split(",") if k]
+        if keys:
+            rec["env_sha256"] = {k: (hashlib.sha256(os.environ[k].encode()).hexdigest()
+                                     if k in os.environ else None) for k in keys}
+        f.write(json.dumps(rec) + "\n")
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     tty.setraw(fd)

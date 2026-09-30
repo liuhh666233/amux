@@ -1922,6 +1922,18 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         methods: &["POST"],
     },
     RouteEntry {
+        path: "/api/vault/secrets",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/vault/secrets/import",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/vault/secrets/{id}",
+        methods: &["PUT", "DELETE"],
+    },
+    RouteEntry {
         path: "/api/metrics/fleet",
         methods: &["GET"],
     },

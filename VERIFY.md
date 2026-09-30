@@ -118,6 +118,22 @@ Pass: the spec name and `N passed`. If e2e infra is genuinely unavailable, say
 so in the evidence and why — that is a legitimate `verified` note, not a failure
 to hide.
 
+## Vault secrets (`api/vault_secrets.rs`)
+
+```bash
+AMUX_CHAOS_BINARY=$CARGO_TARGET_DIR/debug/amux-server node e2e/chaos/vault-secrets.mjs
+```
+
+Pass: `VERDICT: PASS` with `28 checks, 0 failed` (the JSON's `n_considered` and
+`failed`). It launches real workers under a fake agent that reports only the
+SHA-256 of each delivered variable, so it proves the worker > group > global
+resolution, the vault winning over a plaintext line, a replaced value arriving
+and a deleted key being unset on relaunch, and it sweeps the server log, audit,
+store, `ps` argv, pane history and database for any value. It runs on the file
+keystore; the Keychain backend is checked once on the live server by adding a
+throwaway item and running `security find-generic-password -s amux-vault-master`
+WITHOUT `-w`, which prints the item's attributes and never the key.
+
 ## A deployed server change
 
 A fix in `git log` is not live until the running binary carries it.

@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2343,
+  "n_considered": 2351,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -2696,6 +2696,12 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_scopeVaultManage": {
+      "kind": "command._scopeVaultManage",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_selectProvider": {
       "kind": "command._selectProvider",
       "feedback_required": true,
@@ -3064,6 +3070,24 @@
     },
     "_vaultSave": {
       "kind": "command._vaultSave",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_vaultSecretAdd": {
+      "kind": "command._vaultSecretAdd",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_vaultSecretRemove": {
+      "kind": "command._vaultSecretRemove",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_vaultSecretReplace": {
+      "kind": "command._vaultSecretReplace",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

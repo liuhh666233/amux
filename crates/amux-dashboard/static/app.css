@@ -7599,6 +7599,16 @@ select.input { height:var(--control-height); }
 .vault-pending { color: var(--yellow, #d29922); }
 .vault-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .vault-actions .btn { min-height: 44px; }
+.vault-sub-label { margin-top: 14px; }
+.scope-vault { margin-top: 10px; }
+.scope-vault-list { margin: 4px 0 8px; padding-left: 18px; font-size: 0.8rem; overflow-wrap: anywhere; }
+.scope-vault .btn { min-height: 44px; }
+.vault-secret-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 10px; align-items: end; margin-top: 10px; }
+.vault-secret-form .input { min-height: 44px; width: 100%; box-sizing: border-box; }
+.vault-secret-form .btn { min-height: 44px; }
+.vault-secret-form .ui-error { grid-column: 1 / -1; margin: 0; }
+.vault-secret-form .ui-error:empty { display: none; }
+@media (max-width: 600px) { .vault-secret-form { grid-template-columns: 1fr; } }
 .tag-filter.tag-reset-btn { font: inherit; font-size: 0.72rem; cursor: pointer; color: var(--accent); }
 @media (max-width: 600px) { .tag-filter.tag-reset-btn { min-height: 44px; } }
 

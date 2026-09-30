@@ -475,6 +475,17 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
           <div class="settings-section-label">Vault</div>
           <p class="connection-help">Cards workers can use without seeing. amux types the card into the worker's checkout page; the number never reaches a prompt or a log. A charge above an item's limit waits for your approval in the approvals banner.</p>
           <div id="vault-items">Loading…</div>
+          <div class="settings-section-label vault-sub-label">Secrets</div>
+          <p class="connection-help ui-help" id="vault-secrets-help">Values workers receive as environment variables when they start, encrypted on this machine. The most specific scope wins: worker, then group, then global. A saved value is never shown again; replace it to change it.</p>
+          <div id="vault-secrets">Loading…</div>
+          <form id="vault-secret-form" class="vault-secret-form" onsubmit="event.preventDefault();_vaultSecretAdd()">
+            <label class="ui-field">Key <input id="vault-secret-key" class="input" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="GITHUB_TOKEN" aria-describedby="vault-secret-error"></label>
+            <label class="ui-field">Scope <select id="vault-secret-scope" class="input" onchange="_vaultSecretScopeChanged()"><option value="global">Global (every worker)</option><option value="group">A group</option><option value="worker">One worker</option></select></label>
+            <label class="ui-field" id="vault-secret-target-row" hidden>Which <select id="vault-secret-target" class="input"></select></label>
+            <label class="ui-field">Value <input id="vault-secret-value" class="input" type="password" autocomplete="new-password" spellcheck="false"></label>
+            <p id="vault-secret-error" class="ui-error" role="status"></p>
+            <button class="btn primary" type="submit" id="vault-secret-add-btn">Add secret</button>
+          </form>
         </section>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-apikeys-section">

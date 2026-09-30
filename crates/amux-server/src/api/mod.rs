@@ -43,6 +43,7 @@ pub mod gmail_auth;
 pub mod google_sa;
 pub mod grants;
 pub mod vault;
+pub mod vault_secrets;
 pub mod graph;
 pub mod groups;
 pub mod habits;
@@ -317,6 +318,7 @@ pub fn router(state: AppState) -> Router {
         .merge(needs_input::routes())
         .merge(needs_input_auto::routes())
         .merge(vault::routes())
+        .merge(vault_secrets::routes())
         .merge(self_update::routes())
         .nest("/api/proxies", proxies::routes())
         // AMUX-2888: the client controls the SPA and CLI already call. Status
