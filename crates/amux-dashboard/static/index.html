@@ -2374,6 +2374,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <!-- Focus mode minimal bar (visible only in focus mode) -->
   <div class="peek-focus-bar" id="peek-focus-bar">
     <h3 id="peek-focus-title"></h3>
+    <button class="peek-copy-btn" type="button" onclick="copyPeekContent()" title="Copy terminal output" aria-label="Copy terminal output">&#x2398;</button>
     <button class="btn" onclick="togglePeekFocus()" title="Show controls">&#x25BE; Expand</button>
     <button class="btn" onclick="closePeek()" style="font-size:1.1rem;line-height:1;padding:4px 8px;">&#x2715;</button>
   </div>
@@ -2408,6 +2409,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <span style="flex-shrink:0;opacity:0.6;">&#x1F4C1;</span>
     <span id="peek-dir-text" onclick="peekSession&&_browseWorkerFiles(peekSession,'peek-directory')" title="Browse directory" style="cursor:pointer;text-decoration:underline;text-decoration-color:var(--dim);text-underline-offset:2px;"></span>
     <span id="peek-dir-branch" class="peek-dir-branch" style="display:none;"></span>
+    <!-- Copy lives on this row, not floating over the terminal (Ethan,
+         2026-09-30: "the copy button should be less obtrusive"). -->
+    <button class="peek-copy-btn" id="peek-copy-btn" type="button" onclick="copyPeekContent()" title="Copy terminal output" aria-label="Copy terminal output">&#x2398;</button>
   </div>
   <!-- Split wrap: terminal + optional file browser side-by-side -->
   <div id="peek-split-wrap" class="peek-split-wrap">
@@ -2424,7 +2428,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     </div>
     <div class="peek-output-wrap">
       <div class="peek-output-controls">
-      <button class="peek-copy-btn" id="peek-copy-btn" onclick="copyPeekContent()" title="Copy all">&#x2398; Copy</button>
       <nav class="peek-agent-nav" id="peek-agent-nav" aria-label="Worker and subagent output" hidden>
         <span id="peek-agent-label" aria-live="polite"></span>
         <button type="button" onclick="_peekAgentStep(-1)" aria-label="Previous agent" title="Previous agent">&#x2191;</button>

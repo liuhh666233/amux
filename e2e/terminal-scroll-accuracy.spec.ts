@@ -32,7 +32,9 @@ async function readable(page: import('@playwright/test').Page, selector: string)
     if (node) range.selectNodeContents(node);
     const glyph = node ? range.getClientRects()[0] : target;
 
-    const controls = [...document.querySelectorAll('.peek-copy-btn,.peek-agent-nav')]
+    // Only the subagent navigator floats over the output now; the copy button
+    // moved to the directory row above it (2026-09-30).
+    const controls = [...document.querySelectorAll('.peek-output-controls .peek-agent-nav')]
       .filter(e => e.getClientRects().length).map(e => e.getBoundingClientRect().bottom);
     return { top: target.top, bottom: bounds.bottom, safe: Math.max(bounds.top, ...controls),
       left: glyph.left, bodyLeft: bounds.left, bodyRight: bounds.right,

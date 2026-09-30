@@ -28,7 +28,6 @@
     --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --border: #30363d;
     --green: #3fb950; --red: #f85149; --yellow: #d29922; --cyan: #39d2c0;
   }
-  body.light .peek-copy-btn,
   body.light .peek-agent-nav button {
     background: #1c2128; border-color: rgba(255,255,255,0.2); color: #cdd9e5;
   }
@@ -1088,7 +1087,7 @@
     padding:3px; background:rgba(13,17,23,0.94); border:1px solid rgba(255,255,255,0.12);
     border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.22);
   }
-  #peek-body { touch-action:pan-x pan-y pinch-zoom; min-width:0; width:100%; box-sizing:border-box; border-radius:8px; padding-top:46px; }
+  #peek-body { touch-action:pan-x pan-y pinch-zoom; min-width:0; width:100%; box-sizing:border-box; border-radius:8px; padding-top:10px; }
   .overlay-body {
     flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto;
     background: #010409; border-radius: 8px;
@@ -1099,16 +1098,26 @@
     -webkit-touch-callout: default; cursor: text;
     touch-action: pan-y;
   }
+  /* A quiet icon on the directory row (and the focus bar), not a boxed
+     button floating over the terminal. Dim until hovered or focused. */
   .peek-copy-btn {
-    position: static;
-    height: 28px; border-radius: 6px; padding: 0 8px;
-    border: 1px solid rgba(255,255,255,0.15); background: #0d1117;
-    color: var(--dim); font-size: 0.75rem; cursor: pointer;
-    display: flex; align-items: center; gap: 4px;
-    -webkit-tap-highlight-color: transparent; transition: all 0.15s;
-    white-space: nowrap;
+    flex: 0 0 auto; margin-left: auto;
+    min-width: 32px; min-height: 28px; border-radius: 6px; padding: 0 6px;
+    border: 0; background: transparent;
+    color: var(--dim); opacity: 0.55; font-size: 0.95rem; line-height: 1; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: transparent; transition: opacity 0.15s, background 0.15s;
   }
-  .peek-copy-btn:active { background: var(--accent); color: #fff; }
+  .peek-copy-btn:hover, .peek-copy-btn:focus-visible { opacity: 1; background: rgba(127,127,127,0.12); }
+  .peek-copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .peek-copy-btn.copied { opacity: 1; color: var(--green); }
+  .peek-focus-bar .peek-copy-btn { margin-left: 0; }
+  /* The floating controls now hold only the subagent navigator; with it
+     hidden there is nothing to float, and no box should show. */
+  .peek-output-controls:not(:has(.peek-agent-nav:not([hidden]))) { display: none; }
+  @media (max-width: 600px) {
+    .peek-copy-btn { min-width: 44px; min-height: 44px; }
+  }
   .peek-agent-nav {
     position: static;
     display: flex; gap: 4px;
@@ -2848,7 +2857,8 @@
        more specific than the generic mobile body rule above or the 46px
        desktop clearance is collapsed to 6px and the first output row sits
        underneath the controls. */
-    #peek-overlay #peek-body { padding: 60px 6px 6px; }
+    #peek-overlay #peek-body { padding: 6px; }
+    #peek-overlay .peek-output-wrap:has(.peek-agent-nav:not([hidden])) #peek-body { padding-top: 60px; }
     /* Reclaim the "Updated … · vX" status line on mobile — its ~20px is
        better spent on the terminal. (The version/updated info is still
        visible on desktop and via the layout-debug tap on the body.) */

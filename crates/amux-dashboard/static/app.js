@@ -13427,7 +13427,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1186';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1187';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -14635,10 +14635,13 @@ function copyPeekContent() {
   if (!body) return;
   const text = body.innerText || body.textContent || '';
   navigator.clipboard.writeText(text).then(() => {
-    const btn = document.getElementById('peek-copy-btn');
-    btn.innerHTML = '&#x2713; Copied';
-    btn.style.color = '#4ade80';
-    setTimeout(() => { btn.innerHTML = '&#x2398; Copy'; btn.style.color = ''; }, 1500);
+    // Every copy button (directory row and focus bar) shows the tick.
+    document.querySelectorAll('.peek-copy-btn').forEach(btn => {
+      btn.innerHTML = '&#x2713;';
+      btn.classList.add('copied');
+      btn.setAttribute('aria-label', 'Copied');
+      setTimeout(() => { btn.innerHTML = '&#x2398;'; btn.classList.remove('copied'); btn.setAttribute('aria-label', 'Copy terminal output'); }, 1500);
+    });
   }).catch(() => showToast('Copy failed'));
 }
 
@@ -17258,7 +17261,7 @@ function _peekJumpGeometry(el) {
   // Padding protects the first line at rest; explicit jumps must also respect
   // the controls that float above the scrolling output.
   let inset = Math.max(12, parseFloat(getComputedStyle(body).paddingTop) || 0);
-  for (const control of document.querySelectorAll('#peek-overlay .peek-copy-btn, #peek-overlay .peek-agent-nav')) {
+  for (const control of document.querySelectorAll('#peek-overlay .peek-agent-nav')) {
     if (!control.getClientRects().length) continue;
     const r = control.getBoundingClientRect();
     if (r.bottom > viewportTop && r.top < bounds.bottom) inset = Math.max(inset, (r.bottom - viewportTop) / scale + 6);
