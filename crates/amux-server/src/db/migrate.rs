@@ -548,6 +548,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "0097_steering_delay_after_idle",
         sql: include_str!("../../migrations/0097_steering_delay_after_idle.sql"),
     },
+    Migration {
+        version: 98,
+        name: "0098_chatgpt_app_oauth",
+        sql: include_str!("../../migrations/0098_chatgpt_app_oauth.sql"),
+    },
 ];
 
 /// Migrations embedded in THIS binary that the DB has not recorded yet.

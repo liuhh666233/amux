@@ -488,6 +488,12 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
           </form>
         </section>
         <div class="settings-sep"></div>
+        <section class="settings-section" id="settings-chatgpt-section">
+          <div class="settings-section-label">ChatGPT</div>
+          <p class="connection-help ui-help">Connect ChatGPT to this amux so it can list workers, read their output, message them and manage board cards. Nothing can delete or stop a worker from ChatGPT. Every connection waits here for your approval.</p>
+          <div id="chatgpt-app">Loading…</div>
+        </section>
+        <div class="settings-sep"></div>
         <div class="settings-section" id="settings-apikeys-section">
           <div class="settings-section-label">API Keys</div>
           <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Also used to fetch each vendor's own live model list instead of amux's static fallback.</div>

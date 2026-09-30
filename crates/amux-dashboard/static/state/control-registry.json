@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2358,
+  "n_considered": 2362,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -514,6 +514,24 @@
     },
     "_chatUnmount": {
       "kind": "command._chatUnmount",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_chatgptDecide": {
+      "kind": "command._chatgptDecide",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_chatgptPublish": {
+      "kind": "command._chatgptPublish",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_chatgptRevoke": {
+      "kind": "command._chatgptRevoke",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

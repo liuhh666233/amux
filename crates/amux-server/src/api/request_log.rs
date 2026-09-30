@@ -1934,6 +1934,58 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         methods: &["PUT", "DELETE"],
     },
     RouteEntry {
+        path: "/api/chatgpt-app",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/chatgpt-app/requests/{id}/approve",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/chatgpt-app/requests/{id}/deny",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/chatgpt-app/grants/{id}/revoke",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/mcp",
+        methods: &["GET", "POST", "DELETE"],
+    },
+    RouteEntry {
+        path: "/oauth/register",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/oauth/authorize",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/oauth/authorize/status",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/oauth/token",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/.well-known/oauth-protected-resource",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/.well-known/oauth-protected-resource/mcp",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/.well-known/oauth-authorization-server",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/.well-known/openid-configuration",
+        methods: &["GET"],
+    },
+    RouteEntry {
         path: "/api/metrics/fleet",
         methods: &["GET"],
     },

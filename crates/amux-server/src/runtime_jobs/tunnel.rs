@@ -99,6 +99,9 @@ pub struct TunnelState {
     pub requests: u64,
     pub gen: u64,
     pub proxy_id: Option<String>,
+    /// MCP-only mode (AMUX-5396): the relay targets amux itself but forwards
+    /// only the ChatGPT app's OAuth and `/mcp` paths. See `mcp_path_allowed`.
+    pub mcp_only: bool,
 }
 
 fn state() -> &'static Mutex<TunnelState> {
@@ -181,7 +184,39 @@ pub fn refuses_self_port(port: u16, self_port: u16, allow: bool) -> bool {
 
 /// Start the relay. Returns the state after a brief wait for first
 /// registration, or an error string the caller renders.
+/// The paths an MCP-only relay forwards. Everything else is answered 404 by
+/// the relay itself and never reaches amux, so `/api/*` (which the loopback
+/// bypass would admit) is not reachable from the internet in this mode. Each
+/// of these authenticates for itself: see `api::chatgpt_app`'s trust rule.
+pub fn mcp_path_allowed(path: &str) -> bool {
+    matches!(
+        path,
+        "/mcp"
+            | "/oauth/register"
+            | "/oauth/authorize"
+            | "/oauth/authorize/status"
+            | "/oauth/token"
+            | "/.well-known/oauth-protected-resource"
+            | "/.well-known/oauth-protected-resource/mcp"
+            | "/.well-known/oauth-authorization-server"
+            | "/.well-known/openid-configuration"
+    )
+}
+
+/// Headers a relayed request must never carry in from the internet: the two
+/// the relay itself asserts. Compared lowercase.
+const RELAY_ASSERTED: &[&str] = &["x-amux-tunnel-relay", "x-amux-public-base"];
+
+/// Start the relay in MCP-only mode: amux's own port, allow-listed paths.
+pub async fn start_mcp() -> Result<TunnelState, String> {
+    start_mode(None, true).await
+}
+
 pub async fn start(target_port: Option<u16>) -> Result<TunnelState, String> {
+    start_mode(target_port, false).await
+}
+
+async fn start_mode(target_port: Option<u16>, mcp_only: bool) -> Result<TunnelState, String> {
     {
         let s = state().lock().unwrap_or_else(|e| e.into_inner());
         if s.running {
@@ -195,8 +230,8 @@ pub async fn start(target_port: Option<u16>) -> Result<TunnelState, String> {
         );
     }
     let self_port = crate::legacy_port::canonical_port();
-    let port = target_port.unwrap_or(self_port);
-    if refuses_self_port(port, self_port, allow_self()) {
+    let port = if mcp_only { self_port } else { target_port.unwrap_or(self_port) };
+    if !mcp_only && refuses_self_port(port, self_port, allow_self()) {
         return Err(format!(
             "refusing to tunnel amux itself (port {port}) — its control plane is unauthenticated. \
              Point the proxy at a specific app port instead, or set AMUX_TUNNEL_ALLOW_SELF=1 to \
@@ -216,6 +251,7 @@ pub async fn start(target_port: Option<u16>) -> Result<TunnelState, String> {
         s.requests = 0;
         s.url = None;
         s.tid = None;
+        s.mcp_only = mcp_only;
         s.gen
     };
     DROPPED.store(0, Ordering::Relaxed);
@@ -230,7 +266,7 @@ pub async fn start(target_port: Option<u16>) -> Result<TunnelState, String> {
     let _handle = super::registry::spawn_loop(
         super::registry::ids::TUNNEL,
         None,
-        run(token, gateway(), target_base, generation),
+        run(token, gateway(), target_base, generation, mcp_only),
     );
 
     // Wait briefly for the first registration so the caller's response can
@@ -298,6 +334,34 @@ fn local_client() -> reqwest::Client {
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap_or_default()
+}
+
+static MCP_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// Paths an MCP-only relay refused since start (surfaced on /api/tunnel/status).
+pub fn mcp_refused() -> u64 {
+    MCP_REFUSED.load(Ordering::Relaxed)
+}
+
+/// The request as the local app should see it: any inbound copy of a header
+/// the relay asserts is dropped, then the relay's own stamp is added, so amux
+/// can tell a relayed request from a local one and knows its public origin.
+pub fn relay_stamped(req: &serde_json::Value, public_base: &str) -> serde_json::Value {
+    let mut out = req.clone();
+    let mut hs = serde_json::Map::new();
+    if let Some(src) = req.get("headers").and_then(|v| v.as_object()) {
+        for (k, v) in src {
+            if !RELAY_ASSERTED.contains(&k.to_lowercase().as_str()) {
+                hs.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    hs.insert("X-Amux-Tunnel-Relay".into(), serde_json::Value::String("1".into()));
+    if public_base.starts_with("https://") {
+        hs.insert("X-Amux-Public-Base".into(), serde_json::Value::String(public_base.into()));
+    }
+    out["headers"] = serde_json::Value::Object(hs);
+    out
 }
 
 /// Fetch one relayed request against the local target and pack the reply.
@@ -392,7 +456,7 @@ async fn reply(
 
 /// One tunnel session: register, then long-poll and serve until the generation
 /// is fenced or `running` clears.
-async fn run(token: String, gw: String, target_base: String, generation: u64) {
+async fn run(token: String, gw: String, target_base: String, generation: u64, mcp_only: bool) {
     let gwc = gateway_client();
     let localc = local_client();
     let inflight = Arc::new(tokio::sync::Semaphore::new(max_concurrent().max(1) as usize));
@@ -524,7 +588,20 @@ async fn run(token: String, gw: String, target_base: String, generation: u64) {
                     .await;
                     return;
                 };
-                let payload = serve_one(&localc2, &item2, &target2).await;
+                let payload = if mcp_only {
+                    let path = item2.get("path").and_then(|v| v.as_str()).unwrap_or("/");
+                    if mcp_path_allowed(path) {
+                        let base = snapshot().url.unwrap_or_default();
+                        serve_one(&localc2, &relay_stamped(&item2, base.trim_end_matches('/')), &target2).await
+                    } else {
+                        MCP_REFUSED.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(target: "amux::tunnel", verdict = "tunnel_mcp_path_refused", path,
+                            "tunnel: MCP-only relay refused a path outside the ChatGPT app surface");
+                        reply_payload(404, "not found", 0)
+                    }
+                } else {
+                    serve_one(&localc2, &relay_stamped(&item2, ""), &target2).await
+                };
                 reply(&gwc2, &gw2, &token2, &rid, payload).await;
             });
         }
@@ -549,6 +626,19 @@ pub async fn maybe_boot_start() -> &'static str {
         return "no token";
     }
     let Some(port) = boot_target_port() else {
+        // AMUX_TUNNEL_MCP=1 publishes only the ChatGPT app surface (AMUX-5396).
+        if std::env::var("AMUX_TUNNEL_MCP").is_ok_and(|v| v.trim() == "1") {
+            return match start_mcp().await {
+                Ok(s) => {
+                    tracing::info!(url = ?s.url, "tunnel: auto-started in MCP-only mode from AMUX_TUNNEL_MCP");
+                    "started mcp-only"
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, verdict = "tunnel_mcp_boot_refused", "tunnel: MCP-only auto-start refused");
+                    "refused"
+                }
+            };
+        }
         return "no AMUX_TUNNEL_PORT";
     };
     match start(Some(port)).await {
@@ -566,6 +656,33 @@ pub async fn maybe_boot_start() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MCP-only mode publishes the ChatGPT app surface and nothing else: the
+    /// control plane under /api stays unreachable, because the loopback bypass
+    /// would admit anything the relay forwards.
+    #[test]
+    fn mcp_only_relay_forwards_the_app_surface_and_never_the_api() {
+        for ok in ["/mcp", "/oauth/token", "/oauth/authorize", "/oauth/authorize/status", "/oauth/register",
+            "/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"] {
+            assert!(mcp_path_allowed(ok), "{ok}");
+        }
+        for no in ["/", "/api/sessions", "/api/sessions/amux/send", "/api/chatgpt-app/requests/x/approve",
+            "/mcp/../api/board", "/oauth/../api/board", "/app.js", "/api/tunnel/start"] {
+            assert!(!mcp_path_allowed(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn the_relay_strips_inbound_copies_of_its_own_stamps() {
+        let req = serde_json::json!({"path": "/mcp", "headers": {
+            "X-Amux-Public-Base": "https://evil.example", "x-amux-tunnel-relay": "0", "Authorization": "Bearer t"}});
+        let out = relay_stamped(&req, "https://ab12.t.amux.io");
+        let h = out["headers"].as_object().unwrap();
+        assert_eq!(h["X-Amux-Public-Base"], "https://ab12.t.amux.io");
+        assert_eq!(h["X-Amux-Tunnel-Relay"], "1");
+        assert_eq!(h["Authorization"], "Bearer t");
+        assert!(!h.contains_key("x-amux-tunnel-relay"), "the inbound lowercase copy is gone");
+    }
 
     /// The refusal whose failure mode is not "the feature is broken" but "the
     /// box is owned": amux's control plane has no request auth, and

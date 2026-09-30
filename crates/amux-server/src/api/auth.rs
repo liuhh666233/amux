@@ -217,7 +217,7 @@ pub(crate) fn has_owner_query_token(state: &AppState, uri: &Uri) -> bool {
     }
 }
 
-fn provided_owner_token<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
+pub(crate) fn provided_owner_token<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

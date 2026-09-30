@@ -44,6 +44,7 @@ pub mod google_sa;
 pub mod grants;
 pub mod vault;
 pub mod vault_secrets;
+pub mod chatgpt_app;
 pub mod graph;
 pub mod groups;
 pub mod habits;
@@ -319,6 +320,7 @@ pub fn router(state: AppState) -> Router {
         .merge(needs_input_auto::routes())
         .merge(vault::routes())
         .merge(vault_secrets::routes())
+        .merge(chatgpt_app::routes())
         .merge(self_update::routes())
         .nest("/api/proxies", proxies::routes())
         // AMUX-2888: the client controls the SPA and CLI already call. Status
@@ -578,6 +580,10 @@ pub fn router(state: AppState) -> Router {
         // a revocable member cookie; the outer identity layer below resolves
         // it before auth and request logging.
         .merge(org::public_routes())
+        // The ChatGPT app (AMUX-5396): /mcp and its OAuth server. Outside
+        // require_bearer on purpose; each route authenticates for itself and
+        // the loopback bypass earns nothing here (chatgpt_app.rs, trust rule).
+        .merge(chatgpt_app::public_routes())
         .merge(connection::routes(
             crate::config::ServerConfig::from_process_env().tls_dir(),
         ))

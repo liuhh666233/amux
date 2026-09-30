@@ -58,6 +58,9 @@ fn status_body() -> Value {
         "dropped": tun::dropped(),
         "error": s.error,
         "proxy_id": s.proxy_id,
+        "mcp_only": s.mcp_only,
+        "mcp_url": if s.mcp_only { s.url.as_deref().map(|u| format!("{}/mcp", u.trim_end_matches('/'))) } else { None },
+        "mcp_paths_refused": tun::mcp_refused(),
         "configured": tun::configured(),
         "gateway": tun::gateway(),
         "rate_per_min": tun::rate_per_min(),
@@ -78,7 +81,9 @@ async fn start(State(_state): State<AppState>, body: Option<Json<Value>>) -> Res
                 .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
         })
         .and_then(|p| u16::try_from(p).ok());
-    match tun::start(port).await {
+    let mcp = body.as_ref().and_then(|Json(b)| b.get("mcp")).and_then(Value::as_bool).unwrap_or(false);
+    let started = if mcp { tun::start_mcp().await } else { tun::start(port).await };
+    match started {
         Ok(s) => (
             StatusCode::OK,
             Json(json!({

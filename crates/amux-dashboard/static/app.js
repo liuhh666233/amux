@@ -13514,7 +13514,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1195';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1196';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -39918,6 +39918,56 @@ async function _vaultRemove(id) {
   showToast(r.ok ? 'Removed' : 'Remove failed');
   _vaultLoad();
 }
+// ── ChatGPT app (chatgpt_app.rs, AMUX-5396): approve the connections ChatGPT
+// asks for. A pending request shows the same code ChatGPT's approval page shows.
+async function _chatgptAppLoad() {
+  const el = document.getElementById('chatgpt-app');
+  if (!el) return;
+  try {
+    const r = await fetch(API + '/api/chatgpt-app', { headers: _authHeaders() });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.why || d.error || r.status);
+    const pending = (d.items || []).filter(i => i.status === 'pending');
+    const live = (d.items || []).filter(i => i.status === 'approved');
+    const url = d.public_mcp_url;
+    let h = url
+      ? '<p class="connection-help">Connector URL for ChatGPT: <code class="chatgpt-url">' + esc(url) + '</code> '
+        + '<button class="btn" onclick="_tunnelCopyURL(this,\'' + escJs(url) + '\')">Copy</button></p>'
+      : '<p class="connection-help">Not published. ChatGPT needs a public HTTPS address; this publishes only the connector (not the dashboard) through your amux cloud tunnel.</p>'
+        + '<button class="btn primary" onclick="_chatgptPublish(this)">Publish connector</button>';
+    h += pending.map(i => '<div class="vault-item chatgpt-pending">'
+      + '<div class="vault-item-head"><b>' + esc(i.client_name || 'ChatGPT') + '</b> wants access (' + esc(i.scope) + '). Code <code>' + esc(i.user_code) + '</code></div>'
+      + '<p class="ui-help">Approve only if this code matches the page ChatGPT opened for you.</p>'
+      + '<div class="vault-actions"><button class="btn primary" onclick="_chatgptDecide(\'' + escJs(i.id) + '\',\'approve\')">Approve</button>'
+      + '<button class="btn" onclick="_chatgptDecide(\'' + escJs(i.id) + '\',\'deny\')">Deny</button></div></div>').join('');
+    h += live.map(i => '<div class="vault-item">'
+      + '<div class="vault-item-head"><b>' + esc(i.client_name || 'ChatGPT') + '</b> · ' + esc(i.scope)
+      + ' · <span class="ui-help">' + (i.last_used ? 'used ' + esc(timeAgo(i.last_used)) : 'not used yet') + '</span></div>'
+      + '<div class="vault-actions"><button class="btn danger" onclick="_chatgptRevoke(\'' + escJs(i.id) + '\')">Disconnect</button></div></div>').join('');
+    if (!pending.length && !live.length) h += '<p class="connection-help">No connections.</p>';
+    el.innerHTML = h;
+    if (pending.length) setTimeout(() => { const e = document.getElementById('chatgpt-app'); if (e && e.offsetParent) _chatgptAppLoad(); }, 4000);
+  } catch (e) { el.textContent = 'ChatGPT connections unavailable: ' + (e.message || e); }
+}
+async function _chatgptDecide(id, action) {
+  const r = await fetch(API + '/api/chatgpt-app/requests/' + encodeURIComponent(id) + '/' + action, { method: 'POST', headers: _authHeaders() });
+  const d = await r.json().catch(() => ({}));
+  showToast(r.ok ? (action === 'approve' ? 'Approved. ChatGPT continues by itself.' : 'Denied.') : ('Not done: ' + (d.error || r.status)));
+  _chatgptAppLoad();
+}
+async function _chatgptRevoke(id) {
+  if (!await showConfirm('Disconnect this ChatGPT connection? Its tokens stop working immediately.', 'Disconnect', true)) return;
+  const r = await fetch(API + '/api/chatgpt-app/grants/' + encodeURIComponent(id) + '/revoke', { method: 'POST', headers: _authHeaders() });
+  showToast(r.ok ? 'Disconnected.' : 'Not done: ' + r.status);
+  _chatgptAppLoad();
+}
+async function _chatgptPublish(btn) {
+  btn.disabled = true; btn.textContent = 'Publishing…';
+  const r = await fetch(API + '/api/tunnel/start', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, _authHeaders()), body: '{"mcp":true}' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) showToast('Not published: ' + (d.error || r.status));
+  _chatgptAppLoad();
+}
 // ── Vault secrets (vault_secrets.rs, AMUX-5375): encrypted env values ──────
 // No response carries a value, so nothing here can show one. Replace-only.
 function _vaultScopeLabel(i) {
@@ -40007,7 +40057,7 @@ async function _vaultSecretRemove(id, key) {
   _vaultSecretsLoad();
 }
 function _settingsTab(name) {
-  if (name === 'integrations') setTimeout(() => { _vaultLoad(); _vaultSecretsLoad(); _vaultSecretScopeChanged(); }, 0);
+  if (name === 'integrations') setTimeout(() => { _vaultLoad(); _vaultSecretsLoad(); _vaultSecretScopeChanged(); _chatgptAppLoad(); }, 0);
   const menu = document.getElementById('settings-menu');
   if (!menu) return;
   menu.querySelectorAll('.settings-tab-btn').forEach(b =>
