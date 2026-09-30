@@ -24,7 +24,7 @@ enum AmuxClient {
                                             delegate: TrustAll(),
                                             delegateQueue: nil)
 
-    struct Worker: Identifiable, Hashable {
+    struct Worker: Identifiable, Hashable, Codable {
         let name: String
         let status: String
         /// `active` | `paused` | `archived`. Distinct from `status`: a worker
@@ -36,6 +36,8 @@ enum AmuxClient {
         let lastActivity: Int
         let dir: String
         let task: String
+        /// The worker's groups (`tags` on /api/sessions: amux, ops, gtm...).
+        var groups: [String] = []
         var id: String { name }
 
         /// One word for the row. `status` is EMPTY on most rows (measured: 156
@@ -231,7 +233,8 @@ enum AmuxClient {
                 running: (row["running"] as? Bool) ?? false,
                 lastActivity: (row["last_activity"] as? Int) ?? 0,
                 dir: row["dir"] as? String ?? "",
-                task: row["task_name"] as? String ?? "")
+                task: row["task_name"] as? String ?? "",
+                groups: (row["tags"] as? [String]) ?? [])
         }
     }
 

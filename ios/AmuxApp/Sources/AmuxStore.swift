@@ -57,4 +57,33 @@ enum AmuxStore {
         get { defaults.string(forKey: lastWorkerKey) }
         set { defaults.set(newValue, forKey: lastWorkerKey) }
     }
+
+    // SHARE SHEET MEMORY (Ethan, 2026-09-29: "default sort by the most commonly
+    // shared", "cache workers so it doesn't take a while").
+
+    /// The last worker list the share sheet loaded, encoded by the extension.
+    /// Shown instantly on the next share while a fresh copy loads.
+    static let shareWorkersCacheKey = "shareWorkersCache"
+    static var shareWorkersCache: Data? {
+        get { defaults.data(forKey: shareWorkersCacheKey) }
+        set { defaults.set(newValue, forKey: shareWorkersCacheKey) }
+    }
+
+    /// How many times each worker has been shared to, and when last.
+    static let shareCountsKey = "shareCounts"
+    static let shareLastKey = "shareLastAt"
+    static var shareCounts: [String: Int] {
+        (defaults.dictionary(forKey: shareCountsKey) as? [String: Int]) ?? [:]
+    }
+    static var shareLastAt: [String: Double] {
+        (defaults.dictionary(forKey: shareLastKey) as? [String: Double]) ?? [:]
+    }
+    static func recordShare(_ worker: String) {
+        var counts = shareCounts
+        counts[worker, default: 0] += 1
+        defaults.set(counts, forKey: shareCountsKey)
+        var last = shareLastAt
+        last[worker] = Date().timeIntervalSince1970
+        defaults.set(last, forKey: shareLastKey)
+    }
 }

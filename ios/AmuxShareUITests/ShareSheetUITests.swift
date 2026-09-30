@@ -287,7 +287,11 @@ final class ShareSheetUITests: XCTestCase {
     /// archived rows before the list is built — comparing against the raw total
     /// would fail for a reason that has nothing to do with this filter.
     private func fleetLifecycleCounts() throws -> (total: Int, active: Int) {
-        let url = URL(string: "https://localhost:8823/api/sessions")!
+        // The server's address, not a remembered port: 8823 went stale when the
+        // server moved to 8824 and turned this cross-check into a silent skip.
+        // Pass it with TEST_RUNNER_AMUX_URL=$(amux url) xcodebuild test ...
+        let base = ProcessInfo.processInfo.environment["AMUX_URL"] ?? "https://localhost:8824"
+        let url = URL(string: base + "/api/sessions")!
         let session = URLSession(configuration: .ephemeral, delegate: TrustAll(), delegateQueue: nil)
         let sem = DispatchSemaphore(value: 0)
         var payload: Data?

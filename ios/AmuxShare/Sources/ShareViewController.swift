@@ -86,7 +86,9 @@ final class ShareViewController: UIViewController {
         let view = ShareView(
             attachmentCount: fileURLs.count,
             sharedText: sharedText,
-            onSend: { [weak self] worker, note in self?.deliver(to: worker, note: note) },
+            onSend: { [weak self] worker, note, progress, done in
+                self?.deliver(to: worker, note: note, progress: progress, done: done)
+            },
             onCancel: { [weak self] in self?.extensionContext?.completeRequest(returningItems: nil) }
         )
         let host = UIHostingController(rootView: view)
@@ -107,15 +109,25 @@ final class ShareViewController: UIViewController {
 
     // MARK: - Delivery
 
-    private func deliver(to worker: String, note: String) {
+    /// `progress` names the step the sheet shows while sending; `done` is
+    /// called only on failure (success closes the extension), so the sheet
+    /// can unlock and the user can retry.
+    private func deliver(to worker: String, note: String,
+                         progress: @escaping (String) -> Void,
+                         done: @escaping (String?) -> Void) {
         guard let server = AmuxStore.serverURL else {
-            showFailure(AmuxClient.ClientError.noServer.localizedDescription)
+            let why = AmuxClient.ClientError.noServer.localizedDescription
+            done(why)
+            showFailure(why)
             return
         }
         Task {
             do {
                 var paths: [String] = []
-                for url in fileURLs {
+                for (i, url) in fileURLs.enumerated() {
+                    progress(fileURLs.count == 1
+                             ? "Uploading \(url.lastPathComponent)…"
+                             : "Uploading \(i + 1) of \(fileURLs.count): \(url.lastPathComponent)…")
                     paths.append(try await AmuxClient.upload(fileURL: url, server: server))
                 }
                 // `@<abs path>` is how amux already inlines an attachment into a
@@ -126,15 +138,19 @@ final class ShareViewController: UIViewController {
                 parts.append(contentsOf: paths.map { "@\($0)" })
                 let text = parts.joined(separator: "\n")
                 guard !text.isEmpty else {
+                    done("Nothing to send.")
                     await MainActor.run { showFailure("Nothing to send.") }
                     return
                 }
+                progress("Delivering the message…")
                 try await AmuxClient.send(text: text, to: worker, server: server)
                 AmuxStore.lastWorker = worker
+                AmuxStore.recordShare(worker)
                 await MainActor.run {
                     extensionContext?.completeRequest(returningItems: nil)
                 }
             } catch {
+                done(error.localizedDescription)
                 await MainActor.run { showFailure(error.localizedDescription) }
             }
         }
