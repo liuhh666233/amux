@@ -430,6 +430,23 @@ if [[ "$AMUX_HOME" == "$HOME/.amux" ]]; then
   done
 fi
 
+# GitHub pushes that outlive an App token (2026-09-30, gs12-cicd): with the
+# GitHub App configured, github.com credentials come from a helper that mints a
+# fresh App token on every request when the caller works under one, so a push
+# whose pre-push checks outlast the token retries instead of failing 401.
+# Without an App token in GH_TOKEN it hands off to `gh auth git-credential`.
+if [[ "$AMUX_HOME" == "$HOME/.amux" && -x "$AMUX_HOME/github-app/get-token.sh" ]] && command -v git >/dev/null; then
+  install_hook_from_head scripts/git-credential-amux-github.sh "$AMUX_HOME/github-app/git-credential.sh"
+  chmod 755 "$AMUX_HOME/github-app/git-credential.sh" 2>/dev/null || true
+  if ! git config --global --get-all credential.https://github.com.helper 2>/dev/null | grep -qF "$AMUX_HOME/github-app/git-credential.sh"; then
+    git config --global --unset-all credential.https://github.com.helper 2>/dev/null || true
+    git config --global --add credential.https://github.com.helper "" \
+      && git config --global --add credential.https://github.com.helper "!$AMUX_HOME/github-app/git-credential.sh" \
+      && say "GitHub pushes: fresh App token per request (github-app/git-credential.sh)" \
+      || warn "could not set the github.com git credential helper"
+  fi
+fi
+
 # ── 5. Service ──────────────────────────────────────────────────────────────
 if [[ "$OS" == "Linux" ]] && command -v systemctl &>/dev/null; then
   # envsubst ships in gettext-base (Debian/Ubuntu) / gettext (Fedora), not
