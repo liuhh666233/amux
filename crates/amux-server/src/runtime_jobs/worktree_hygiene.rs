@@ -24,13 +24,16 @@
 //!
 //! Isolated workers are skipped: they receive no amux automation.
 //!
+//! Every 2 minutes (was 10): the phantom recurred within one 10-minute tick on
+//! three workers, which all wrap their pushes in a manual skip-worktree.
+//!
 //! Logs verdict=worktree_sparse_repaired per lane it fixed, and
 //! verdict=worktree_hygiene_sweep per tick with the population considered.
 
 use std::path::Path;
 use std::time::Duration;
 
-const TICK_SECS: u64 = 600;
+const TICK_SECS: u64 = 120;
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn spawn() -> super::PeriodicTask {
