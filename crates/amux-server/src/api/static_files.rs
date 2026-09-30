@@ -251,21 +251,72 @@ pub(crate) fn establish_owner_session(state: &AppState) -> Response {
 /// then redirects to /. Served at /api/_clear_sw so the old SW (which
 /// passes through /api/* paths) cannot intercept it.
 pub async fn clear_sw_landing() -> Response {
+    // EVERY STEP IS BOUNDED AND THE PAGE ALWAYS LEAVES (AMUX-5385).
+    //
+    // Ethan's iPhone app sat on a black screen with its load bar on
+    // 2026-09-30: the owner-session exchange redirected it here at 08:29:16,
+    // and it made no further request. This page used to `await`
+    // serviceWorker.getRegistrations() and caches.keys() unbounded, then
+    // navigate. Inside an app's WKWebView with an older build's stored state,
+    // either can fail to settle, and the page had no other exit. It also
+    // painted nothing that reads on a dark app, so a hang was a black void.
+    //
+    // Now: each step races a timeout, a backstop navigates regardless, a
+    // per-tab counter stops a redirect loop after three passes with a visible
+    // Try again, and every pass reports which step finished, timed out or
+    // failed (client-debug kind=clear-sw), so the next failure names itself.
+    // `/?_fresh=1` is fetched from the network even if a service worker
+    // survives (sw.js passes it through).
     const PAGE: &str = r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>amux</title></head><body>
-<p style="font-family:system-ui;text-align:center;margin-top:40vh">Refreshing...</p>
+<meta name="color-scheme" content="dark light"><title>amux</title>
+<style>body{font-family:system-ui,sans-serif;text-align:center;margin:38vh 16px 0;background:#0d1117;color:#c9d1d9}a{color:#58a6ff}</style>
+</head><body><p id="m">Refreshing&hellip;</p>
+<noscript><p><a href="/?_fresh=1">Continue</a></p></noscript>
 <script>
-(async () => {
-  try {
-    const regs = await navigator.serviceWorker.getRegistrations();
-    await Promise.all(regs.map(r => r.unregister()));
-  } catch(e) {}
-  try {
-    const keys = await caches.keys();
-    await Promise.all(keys.map(k => caches.delete(k)));
-  } catch(e) {}
-  location.replace('/');
+(function () {
+  var t0 = Date.now(), steps = [], left = false;
+  function beacon(verdict) {
+    try {
+      var body = JSON.stringify({kind: 'clear-sw', verdict: verdict, steps: steps, ms: Date.now() - t0,
+        has_sw: !!navigator.serviceWorker, has_caches: typeof caches !== 'undefined', measured: true, n_considered: steps.length});
+      // keepalive outlives the navigation that follows; a string body is
+      // readable everywhere (a sendBeacon Blob arrived empty under WebKit).
+      fetch('/api/client-debug', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: body, keepalive: true});
+    } catch (e) {}
+  }
+  function leave(verdict) {
+    if (left) return; left = true;
+    beacon(verdict);
+    location.replace('/?_fresh=1');
+  }
+  function bounded(name, run, ms) {
+    return new Promise(function (resolve) {
+      var done = false;
+      setTimeout(function () { if (!done) { done = true; steps.push(name + ':timeout'); resolve(); } }, ms);
+      Promise.resolve().then(run).then(
+        function () { if (!done) { done = true; steps.push(name + ':ok'); resolve(); } },
+        function () { if (!done) { done = true; steps.push(name + ':error'); resolve(); } });
+    });
+  }
+  var n = 0;
+  try { n = Number(sessionStorage.getItem('amux_clear_sw_n') || 0) + 1; sessionStorage.setItem('amux_clear_sw_n', String(n)); } catch (e) {}
+  if (n > 3) {
+    document.getElementById('m').innerHTML = 'amux could not finish loading. <a href="/?_fresh=1">Try again</a>';
+    try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
+    beacon('loop_stopped');
+    return;
+  }
+  setTimeout(function () { leave('backstop'); }, 5000);
+  bounded('sw', function () {
+    return navigator.serviceWorker.getRegistrations().then(function (regs) {
+      return Promise.all(regs.map(function (r) { return r.unregister(); }));
+    });
+  }, 1500).then(function () {
+    return bounded('caches', function () {
+      return caches.keys().then(function (keys) { return Promise.all(keys.map(function (k) { return caches.delete(k); })); });
+    }, 1500);
+  }).then(function () { leave('navigating'); });
 })();
 </script></body></html>"#;
     (
@@ -276,6 +327,23 @@ pub async fn clear_sw_landing() -> Response {
         PAGE,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod clear_sw_landing_tests {
+    /// AMUX-5385: the landing page must always leave, never loop forever, and
+    /// report where it got to. Pinned on the served bytes.
+    #[tokio::test]
+    async fn the_landing_page_is_bounded_and_reports_itself() {
+        let resp = super::clear_sw_landing().await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let page = String::from_utf8(body.to_vec()).unwrap();
+        for needle in ["setTimeout(function () { leave('backstop'); }, 5000)", "bounded('sw'", "bounded('caches'",
+            "amux_clear_sw_n", "n > 3", "kind: 'clear-sw'", "location.replace('/?_fresh=1')", "#0d1117"] {
+            assert!(page.contains(needle), "landing page lost {needle:?}");
+        }
+        assert!(!page.contains("await navigator.serviceWorker"), "an unbounded await is back");
+    }
 }
 
 mod tailnet_auth;

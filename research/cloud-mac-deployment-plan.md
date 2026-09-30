@@ -14,6 +14,38 @@ Get a customer live on amux in one day with no hardware purchase:
 5. Back up the whole system so it can move later, for example onto a dedicated
    Mac Studio the customer buys, without rebuilding by hand.
 
+## Deployment model
+
+In Ethan's words (2026-09-30): we dogfood the experience ourselves first, then
+deploy it for the customer the same way.
+
+1. **We go first.** We rent the Mac, set up amux and the workflows, and invite
+   ourselves as members, exactly as a customer would be invited.
+2. **Full service before handover.** Email, credentials and connectors are
+   working before the customer signs in, so they start with a working system
+   rather than a setup task.
+3. **We work on it remotely, like our own Mac.** amux in the browser plus
+   Remote Desktop over Tailscale. Nothing about it differs from how we work
+   today.
+4. **The customer joins from their laptop.** Tailscale on the laptop, amux in
+   the browser, screen sharing when they want the desktop.
+5. **Backed up and portable from day one.** The whole system can move to a Mac
+   Studio or any other Mac later.
+
+### Isolation tiers
+
+The same code sets up all three. Only where the Mac lives changes.
+
+| Tier | Where the Mac is | When |
+|---|---|---|
+| 1. Cloud Mac (default) | Rented from Scaleway, on a tailnet we own | Every customer at the start. Live in a day. |
+| 2. Customer's own Mac | Their office or data center; we install over Tailscale | Their security team wants the hardware in their control. |
+| 3. Mac we ship | We set it up here, then courier it | They want dedicated hardware without doing the setup. |
+
+Moving from tier 1 to tier 2 or 3 is the Time Machine restore described under
+Backup and portability. The Ansible playbook runs over SSH on any Mac, so tiers
+2 and 3 need no new code.
+
 ## Provider choice
 
 All of these are real Apple hardware. Apple's macOS license requires a 24-hour
@@ -107,8 +139,40 @@ Target: about 4 hours of our time, most of it waiting on the provider.
 - ACLs: both sides may reach this machine on screen sharing (5900), SSH (22)
   and amux (8824). Nothing else on our tailnet is reachable for them.
 - Turn on Tailscale SSH so shell access is also tied to a tailnet identity.
-- Once Tailscale works, close the public screen-sharing and SSH ports in the
-  provider firewall. After that the machine is reachable only over the tailnet.
+- Once Tailscale works, close public screen sharing (5900) and amux (8824) with
+  the macOS firewall (`pf`). Leave public SSH open for break-glass access, locked
+  down as described below.
+
+### Break-glass access: SSH outside amux and Tailscale
+
+We need a way in that does not depend on amux or Tailscale, for when either
+one is the thing that is broken.
+
+**Confirmed available, 2026-09-30:**
+- **Scaleway** gives SSH to every Mac mini. The console's overview page shows the
+  exact SSH command and default user, and login uses an SSH key uploaded to the
+  Scaleway project. Its docs also note a login-failure block (fail2ban) that a
+  reboot clears. The console and API can also reboot the machine, open remote
+  desktop, and reinstall macOS.
+- **AWS EC2 Mac** gives SSH with an EC2 key pair, plus Systems Manager Session
+  Manager as a second shell path that needs no open port.
+
+**How we lock it down** (Scaleway documents no network firewall in front of the
+Mac, so this is done in macOS by the Ansible playbook):
+- Key-only login: `PasswordAuthentication no` and `KbdInteractiveAuthentication
+  no` in `sshd_config`.
+- Only one break-glass account (`breakglass`, an admin) may log in over public
+  SSH (`AllowUsers breakglass`). Its key lives in the amux vault, and a copy
+  goes somewhere that does not depend on amux (a password manager), so we can
+  still reach it when amux is down.
+- Optionally, `pf` allows port 22 only from our fixed addresses, if we have any.
+  Without fixed addresses, key-only login plus fail2ban is the protection.
+- Everything else, including day-to-day shell access, goes over Tailscale SSH,
+  so it is tied to a person.
+
+**If SSH itself is broken,** we fall back in this order: Scaleway console
+reboot (clears fail2ban and restarts sshd), then Scaleway remote desktop, then
+restoring from backup onto a fresh Mac.
 
 ### 4. Remote screen (15 min)
 
@@ -141,18 +205,190 @@ Target: about 4 hours of our time, most of it waiting on the provider.
 
 Three layers, in the order to rely on them:
 
-1. **amux**: every board mutation, message and send is stamped server-side with
-   the acting session (`X-Amux-Session`), and the board log records it. **Open
-   question to check before promising "full provenance":** amux attributes
-   actions to a worker session today, not to a human. Two humans using the same
-   dashboard look the same in the log. We need per-person sign-in on the local
-   dashboard, or a per-person identity header set at the tailnet edge (Tailscale
-   Serve passes `Tailscale-User-Login`), recorded on every mutation. File this
-   as its own amux card before the first customer depends on it.
+1. **amux**: every board mutation, message and send is stamped server-side.
+   A worker is stamped by its session name. A person is stamped as
+   `member:<email>` if they signed in as an invited org member (see
+   Multiplayer below for what exists and what is missing).
 2. **Tailscale**: every connection is tied to a tailnet user, and the admin
    console logs it. This tells us who connected, not what they did.
 3. **macOS**: separate user accounts mean files, shell history and the unified
    log each carry the account name.
+
+## Multiplayer: several people on the same workers
+
+What amux has today, read from origin/main on 2026-09-30:
+
+- **People already have an identity.** Invited org members sign in once and
+  carry an `amux_member` cookie. The `local_member_identity` middleware
+  (`api/org.rs:400`) turns it into `member:<email>`, strips any forged copy of
+  its headers, and stamps it wherever no worker header is set. Board writes pick
+  it up first (`actor_from_headers`, `api/board.rs:2312`), and sends record it
+  as their origin (`send_post`, `api/session_verbs.rs:25805`).
+- **amux can already ask Tailscale who a connection belongs to.**
+  `static_files/tailnet_auth.rs` calls tailscaled's `whois` for the owner
+  bootstrap. That lookup is made by tailscaled, not read from a request header,
+  so a user on the tailnet cannot fake it.
+- **The server listens on all interfaces** (`lib.rs:1075`) with the Tailscale
+  certificate, so no proxy is needed in front of it.
+- **Stale board writes are refused** with a 409 (`patch_item`, `board.rs:~10512`),
+  but the reply does not say who made the newer change.
+- **Worker messages are queued one at a time** (`steering_queue`, with a
+  `sender` column). A worker sender is shown to the receiving agent
+  (`origin_stamped`, `session_verbs.rs:12831`); a person's sends skip that
+  label, so the agent cannot tell Alice's instruction from Bob's.
+- **Missing entirely:** a typing lock on a pane, presence, and a "by person"
+  view of the history.
+
+So the gaps are joining a tailnet login to a member, carrying the person
+through to the worker, and making conflicts and presence visible. None of it
+needs a new primitive.
+
+### Should we use Yjs (or another CRDT)?
+
+No, for the board and for worker input. A CRDT merges concurrent edits
+silently, which is right for co-editing a text document and wrong here. When
+two people change the same card, or give the same worker opposite
+instructions, the useful outcome is that the second person SEES the conflict
+and who caused it, then decides. amux's ethos already records this as settled
+("No CRDT for the board": `rev` is a concurrency check whose failure is the
+product). Yjs only earns a place if we later add a live co-edited document
+surface, where merging keystrokes is the point.
+
+### Design rules
+
+1. **One identity: the org member.** A tailnet login is a way to sign in as a
+   member, not a second identity system.
+2. **Worker input is serialized, never merged.** Every message reaches the agent
+   labeled with the person who sent it.
+3. **Conflicts are shown, with a name.** A refused write says who got there
+   first and when, and offers to re-apply.
+4. **Everyone can see who else is here.**
+
+### Work plan
+
+Sizes: S is under a day, M is one to three days, for one lane. Every item ships
+with its log signal (a verdict field or WARN line), per the amux two-fix rule.
+
+**MP-1. Sign in by tailnet login (M). Blocks everything below.**
+- In `local_member_identity` (`api/org.rs:400`), when a request carries no
+  member cookie and comes from a tailnet address, ask tailscaled `whois` (reuse
+  `tailnet_auth.rs`). If the login matches an invited, accepted member's email,
+  treat the request as that member and set the cookie.
+- Opt in per machine with a scoped env key, `AMUX_TAILNET_MEMBER_AUTH=1`, off by
+  default. An unmatched login gets the normal sign-in page, not the owner.
+- Log `verdict=tailnet_member_auth` with `matched`/`unmatched`/`whois_failed`.
+- Done when: a test with a stubbed `whois` gets `member:<email>` on a board
+  write, and an unmatched login is refused.
+
+**MP-2. Every write path carries the person (M).**
+- Board and sends already read the member. Audit the rest: steering enqueue
+  (`sender` must be `member:<email>`, not empty), email and alert sends (their
+  `hdr_worker` copies in `api/email.rs:191` and `api/alerts.rs:536`), schedule
+  and note writes.
+- Write one test that walks every mutating route in `/api/debug/routes` with a
+  member request and fails on any row stored without the member. That test is
+  what makes the "full provenance" claim checkable.
+- Done when: that test passes, and deleting the member stamp from any one route
+  makes it fail.
+
+**MP-3. The worker sees who is talking (S).**
+- Extend `origin_stamped` (`session_verbs.rs:12831`) so a member send is labeled
+  `[from alice@customer.com, server-verified]`, the same way worker sends are
+  labeled today. Slash commands stay unlabeled.
+- Done when: two members' messages to one worker arrive in order, each with its
+  label, and the agent's reply names each person.
+
+**MP-4. A board conflict names the other person (S).**
+- In the stale-rev 409 in `patch_item`, add `changed_by` and `changed_at` from
+  the newest revision event.
+- In the dashboard, show "Alice changed this 12 seconds ago" with Re-apply and
+  Discard buttons.
+- Done when: two browser sessions edit one card and the loser sees the winner's
+  name and re-applies cleanly.
+
+**MP-5. Typing lock on a pane (M).**
+- `keys_verb` (`session_verbs.rs:26625`) and typed sends through `send_post` take
+  a lock on the pane for the member who typed, released after 30 seconds of
+  quiet. `keys_verb` needs the request headers passed in for this.
+- While another member holds it, keys are refused with `pane_held_by`, and
+  typed sends go to the steering queue instead, so nothing is lost.
+- The dashboard shows "alice is typing" and why your input was queued.
+- Screen sharing bypasses this: two people with the mouse on one screen is
+  handled by macOS, not amux. Say so in the customer walkthrough.
+- Done when: two members type at once and one pane gets one person's input,
+  with the other person's text delivered afterward from the queue.
+
+**MP-6. Presence (M).**
+- The SSE stream (`api/sse.rs:34`) only carries saved state changes. Add a second,
+  in-memory channel for short-lived events and merge it into the stream.
+- The dashboard reports which worker you are looking at when that changes; the
+  server broadcasts `presence` with everyone's current view and drops anyone
+  silent for 30 seconds.
+- Include presence in the polling fallback too, per the SSE rules in
+  `.claude/rules/sse-realtime.md`.
+- Done when: two browsers on one worker each show the other's avatar within two
+  seconds, and it clears within 30 seconds of one closing.
+
+**MP-7. History by person (S).**
+- Add `?actor=member:<email>` to the board log and message history APIs, and a
+  person filter in the dashboard.
+- Done when: filtering by Alice shows exactly the actions from the demo that
+  she took.
+
+**MP-8. The demo as an end-to-end test (M).**
+- A Playwright test with two browser contexts signed in as two members, running
+  the demo script below. It runs in CI so the claim stays true after later
+  changes.
+
+Order: MP-1, then MP-2, then MP-3 to MP-7 in parallel, then MP-8. About 12
+lane-days in total, which fits in two weeks for one lane or one week for two.
+
+For a first customer who cannot wait, MP-1 to MP-4 are the minimum: people sign
+in, every action names them, the worker knows who is talking, and conflicts
+name the other person. That is about five lane-days.
+
+### The demo that proves it (acceptance for "multiplayer done")
+
+Two people, two laptops, both on the tailnet, one worker:
+
+- Both open the same worker. Each sees the other's avatar.
+- Both send the worker a message within the same second. Both messages are
+  delivered in order, each labeled with its sender, and the worker's reply
+  addresses each person.
+- Alice types in the pane. Bob's typing is queued and he sees why.
+- Both edit the same card. One write lands; the other gets a conflict naming
+  the first person, and re-applies.
+- The board log and message history show the right person on every one of the
+  above, not the session name alone.
+
+## Tailscale acceptance
+
+- The Mac shows as connected in the tailnet admin console, tagged
+  `tag:customer-<name>`.
+- Adding a person is one Terraform change (or one invite link), with no step on
+  the Mac itself. Removing them cuts off the dashboard, screen and SSH within a
+  minute.
+- A test person can reach only this Mac, not anything else on the tailnet.
+- The Mac rejoins the tailnet on its own after a reboot.
+
+## Other requirements worth deciding now
+
+- **Whose Claude account runs the workers.** A personal Claude subscription is
+  licensed to one person, so a shared machine used by several people should run
+  on an Anthropic API key from an organization account (ours or the
+  customer's). This also settles who pays for tokens.
+- **Spend per person.** With human identity in place, token cost can be totaled
+  per person as well as per worker. Useful for the customer, and for us if we
+  bill usage.
+- **Offboarding.** One command removes a person from the tailnet, their macOS
+  account and their amux access, and keeps their history for the audit trail.
+- **Health alerts.** Our own amux pings the customer machine every few minutes
+  and pages us if it stops answering or reboots unexpectedly.
+- **Data boundary.** None of our credentials ever go onto the customer's
+  machine, and none of theirs come back to ours. Separate tailnet, separate
+  `server.env`, separate backup bucket.
+- **Data location.** Scaleway's Macs are in Paris. Check this is acceptable to a
+  US customer's compliance people before renting.
 
 ## Backup and portability
 
@@ -183,6 +419,132 @@ Test the move before a customer needs it: restore the Time Machine backup onto
 a second rented Mac for a day (about $10) and check that amux, the workers and
 Tailscale come back up.
 
+## Acceptance: the dogfood run
+
+We run this whole list on our own rented Mac, as the "customer", before any
+real customer. Every line has a check that can fail. The run is not complete
+until every line passes, and the results go on the card as evidence.
+
+**Live in a day**
+
+- [ ] From an empty account, `make up` finishes and the dashboard loads over
+  Tailscale in under 4 hours of wall-clock time. Record the actual time.
+- [ ] `make down`, then `make up` again from nothing, passes every check below
+  a second time.
+
+**Access**
+
+- [ ] A second person (one of us, acting as the customer) accepts a tailnet
+  invite on their own laptop, opens amux in the browser and is signed in as
+  their member, with no step done on the Mac. (Needs MP-1.)
+- [ ] The same person opens Screen Sharing over Tailscale and can click and
+  type on the desktop.
+- [ ] That person cannot reach anything else on our tailnet (connection test
+  to one of our other machines fails).
+- [ ] Removing the person from the tailnet cuts off the dashboard, screen and
+  SSH within a minute.
+
+**Full service**
+
+Each connector is proven by using it for real, not by the credential being
+present.
+
+- [ ] Email: a worker sends a message through `/api/email/send` and reads the
+  reply through `/api/email/inbox`, from the customer's own account.
+- [ ] Calendar: a worker creates an event, and it shows up in the customer's
+  calendar through the iCal feed.
+- [ ] Every other connector the customer uses (Google Drive, Slack, Granola and
+  so on): one real read and one real write each.
+- [ ] Credentials: `GET /api/connectors` shows no connector with missing keys
+  among the ones this customer needs.
+- [ ] Browser: a saved sign-in profile opens a page that requires the
+  customer's login.
+- [ ] A schedule fires on time and its run is recorded.
+- [ ] None of our credentials are on the machine: search `server.env` and the
+  vault for our keys by name and find none.
+
+**Working remotely**
+
+- [ ] Intervention drill: we break something on purpose (stop a worker, fill a
+  queue), and fix it using only amux in the browser and Screen Sharing, with
+  nobody at the machine.
+- [ ] Reboot drill: reboot the Mac. It comes back on Tailscale, amux is up and
+  workers resume, with nobody touching it. Record how long it takes.
+- [ ] Health alert: our own amux notices the reboot and alerts us.
+
+**Attribution**
+
+- [ ] The two-person demo under Multiplayer passes (MP-8), and the history shows
+  the right person on every action.
+
+**Portability**
+
+- [ ] Restore the Time Machine backup onto a second rented Mac with Migration
+  Assistant. amux, the workers, the connectors and Tailscale all work there.
+- [ ] Restore one file from the restic backup in B2.
+
+When this list passes on our own Mac, the first customer gets the same run with
+their accounts in place of ours.
+
+## Invariants: continuous validation on the cloud Mac
+
+The checklist above is run once. These checks run forever, on our dogfood Mac
+first and then on every customer Mac, so each promise in this plan is
+something that goes red the moment it stops being true.
+
+### How they run
+
+- **Outside-in checks** run on OUR amux as a `kind: shell` schedule every 5
+  minutes, probing the customer Mac over Tailscale. They see what a customer
+  sees, and they still report when the Mac is down.
+- **On-box checks** run on the customer Mac as a `kind: shell` schedule every
+  15 minutes, reading its own amux API and system state.
+- **Output contract.** Every check prints one JSON line:
+  `{"check":"CM-1","ok":true,"measured":true,"n_considered":1,"detail":"..."}`.
+  A check that could not run reports `measured:false`, and **unmeasured counts
+  as failing**, never as passing (amux ethos rule 4).
+- **Failure path.** A failing or unmeasured check opens or updates ONE card per
+  check on the amux-cloud board (deduped by check id and customer) and sends an
+  amux alert. It closes the card itself when the check passes again, with the
+  passing line as evidence.
+- **The checks are code in the IaC directory** (`checks/cloud-mac.sh` plus a
+  per-customer config naming the expected members, connectors and backup
+  targets), so a new customer gets the full set from `make up`.
+- **Each check must be able to fail.** When a check is added, break the thing
+  it watches once on the dogfood Mac and confirm it goes red, then restore.
+  Record that in the check's comment.
+
+### The invariants
+
+| ID | Promise | Where | How it is checked | Passes when |
+|---|---|---|---|---|
+| CM-1 | amux is up | Outside-in | `GET https://<mac>:8824/health` over Tailscale | 200, and `commit` equals the pinned commit for this customer |
+| CM-2 | amux and screen sharing only over Tailscale | Outside-in | Connect to ports 5900 and 8824 on the Mac's PUBLIC address | Both refused or time out |
+| CM-2b | Break-glass SSH works, and only with a key | Outside-in | Over the PUBLIC address: `ssh -o BatchMode=yes breakglass@<ip> true` with the vault key, then the same with a password only (`PreferredAuthentications=password`) | Key login succeeds; password login is refused |
+| CM-3 | Remote screen works | Outside-in | Open port 5900 over Tailscale and read the greeting | Greeting starts with `RFB` |
+| CM-4 | Stays up 24/7 | Outside-in | Compare `/health` start time with the previous run | No restart outside an announced maintenance window |
+| CM-5 | People sign in by Tailscale login | Outside-in | Our probe device is an invited member; `GET /api/identity` from it | `is_local_member` true, with our probe's email (needs MP-1) |
+| CM-6 | A customer can reach only their Mac | Tailscale | `tests` block in the Tailscale policy file, checked by Tailscale on every policy change | Customer users are allowed to the Mac's ports and denied everything else |
+| CM-7 | Full service: credentials | On-box | `GET /api/connectors` against the customer's required list | No required connector reports missing keys |
+| CM-8 | Full service: email works | On-box, daily | Send to a canary address with a unique subject, then find it with `/api/email/search` | Found within 10 minutes |
+| CM-9 | Schedules fire | On-box | `GET /api/schedules/runs` | Every enabled schedule ran within its expected window |
+| CM-10 | None of our credentials on their Mac | On-box | Look up our key NAMES (a denylist in the config) in `server.env` and the vault | Zero matches |
+| CM-11 | Every action names a person or worker | On-box | Board and message history for the last 24 hours | No row with an empty or `api-anonymous` actor |
+| CM-12 | Backups are current | On-box | `restic snapshots --latest 1` and `tmutil latestbackup` | restic under 7 hours old, Time Machine under 2 hours |
+| CM-13 | Backups restore | On-box, weekly | Restore one known file from restic to a temp directory | Its hash matches the live file |
+| CM-14 | The machine stays ours to schedule | On-box | `softwareupdate --schedule` and `pmset -g` | Automatic updates off, sleep never, restart after power failure on |
+| CM-15 | Room to work | On-box | Free disk and memory pressure | Disk over 20% free, memory pressure normal |
+
+CM-6 is the only check Tailscale runs rather than us: a policy change that
+breaks isolation is rejected before it applies, which is stronger than a probe.
+
+### What "live" means for a customer
+
+A customer Mac counts as live when every check above has been green for 24
+hours in a row and the one-off drills in the dogfood checklist have passed.
+Before that the customer can use it, and the board shows which promise is not
+yet kept.
+
 ## Monthly cost, one customer
 
 | Item | Cost |
@@ -201,13 +563,13 @@ Tailscale come back up.
 
 ## Next steps
 
-1. Card: per-person attribution on the amux dashboard (the open question
-   above). This blocks any promise of "full provenance".
+1. One card per multiplayer work item, MP-1 to MP-8, starting with MP-1. It
+   blocks any promise of "full provenance".
 2. Card: the IaC directory (Terraform for Scaleway and Tailscale, the Ansible
    playbook, the Brewfile, `make up` and `make down`).
-3. After spending approval: rent one Mac, run `make up` against it ourselves,
-   then `make down` and `make up` again from scratch. A second clean run is the
-   proof that nothing depends on a manual step we forgot to write down.
+3. After spending approval: rent one Mac and do the dogfood run above on it,
+   with ourselves as the customer. The second clean `make up` is the proof that
+   nothing depends on a manual step we forgot to write down.
 4. Decide on MDM before the second customer.
 
 ## Sources
@@ -218,3 +580,5 @@ Tailscale come back up.
 - MacStadium pricing: https://macstadium.com/pricing
 - Scaleway Terraform provider: https://registry.terraform.io/providers/scaleway/scaleway/latest/docs
 - MacStadium bare metal (portal ordering): https://docs.macstadium.com/docs/bare-metal-hosts
+- Scaleway: connect to a Mac mini using SSH: https://www.scaleway.com/en/docs/apple-silicon/how-to/connect-to-mac-mini-ssh/
+- Scaleway: SSH troubleshooting (fail2ban): https://www.scaleway.com/en/docs/apple-silicon/troubleshooting/cant-connect-using-ssh/
