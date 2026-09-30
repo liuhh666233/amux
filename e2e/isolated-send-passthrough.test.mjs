@@ -9,6 +9,9 @@ for (const isolated of [true,false]) test(`real composer send: isolated=${isolat
   const ctx=vm.createContext({sessions:[{name:'worker',isolated}], API:'',_cloudEmail:null,_localMemberEmail:null,
     crypto:{randomUUID:()=> 'one-send'},AbortSignal, amuxTrack:()=>{},_sendContext:()=>({source:'worker'}),
     _authHeaders:()=>({}),_isLocallyQueued:()=>false,showSendingIndicator:()=>{},
+    // doSend asks whether the target is a chat before choosing the path; this
+    // worker is a terminal worker.
+    _workerRenderer:()=>'terminal',_chatCompanionOf:()=>null,
     fetch:async(url,opts)=>{sent.push({url,...JSON.parse(opts.body)});return {ok:true,status:200};}});
   vm.runInContext(code,ctx);
   const literal='[no-board] literal user text\n  preserve spacing and Unicode →';
