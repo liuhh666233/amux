@@ -141,14 +141,10 @@ Target: about 4 hours of our time, most of it waiting on the provider.
 
 Three layers, in the order to rely on them:
 
-1. **amux**: every board mutation, message and send is stamped server-side with
-   the acting session (`X-Amux-Session`), and the board log records it. **Open
-   question to check before promising "full provenance":** amux attributes
-   actions to a worker session today, not to a human. Two humans using the same
-   dashboard look the same in the log. We need per-person sign-in on the local
-   dashboard, or a per-person identity header set at the tailnet edge (Tailscale
-   Serve passes `Tailscale-User-Login`), recorded on every mutation. File this
-   as its own amux card before the first customer depends on it.
+1. **amux**: every board mutation, message and send is stamped server-side.
+   A worker is stamped by its session name. A person is stamped as
+   `member:<email>` if they signed in as an invited org member (see
+   Multiplayer below for what exists and what is missing).
 2. **Tailscale**: every connection is tied to a tailnet user, and the admin
    console logs it. This tells us who connected, not what they did.
 3. **macOS**: separate user accounts mean files, shell history and the unified
@@ -156,10 +152,32 @@ Three layers, in the order to rely on them:
 
 ## Multiplayer: several people on the same workers
 
-What amux has today, checked on origin/main 2026-09-30: every mutation is
-attributed to a worker SESSION, and board cards carry a `rev` so a stale write
-is refused. There is no human identity: nothing reads a person's login, so two
-people on one dashboard are indistinguishable.
+What amux has today, read from origin/main on 2026-09-30:
+
+- **People already have an identity.** Invited org members sign in once and
+  carry an `amux_member` cookie. The `local_member_identity` middleware
+  (`api/org.rs:400`) turns it into `member:<email>`, strips any forged copy of
+  its headers, and stamps it wherever no worker header is set. Board writes pick
+  it up first (`actor_from_headers`, `api/board.rs:2312`), and sends record it
+  as their origin (`send_post`, `api/session_verbs.rs:25805`).
+- **amux can already ask Tailscale who a connection belongs to.**
+  `static_files/tailnet_auth.rs` calls tailscaled's `whois` for the owner
+  bootstrap. That lookup is made by tailscaled, not read from a request header,
+  so a user on the tailnet cannot fake it.
+- **The server listens on all interfaces** (`lib.rs:1075`) with the Tailscale
+  certificate, so no proxy is needed in front of it.
+- **Stale board writes are refused** with a 409 (`patch_item`, `board.rs:~10512`),
+  but the reply does not say who made the newer change.
+- **Worker messages are queued one at a time** (`steering_queue`, with a
+  `sender` column). A worker sender is shown to the receiving agent
+  (`origin_stamped`, `session_verbs.rs:12831`); a person's sends skip that
+  label, so the agent cannot tell Alice's instruction from Bob's.
+- **Missing entirely:** a typing lock on a pane, presence, and a "by person"
+  view of the history.
+
+So the gaps are joining a tailnet login to a member, carrying the person
+through to the worker, and making conflicts and presence visible. None of it
+needs a new primitive.
 
 ### Should we use Yjs (or another CRDT)?
 
@@ -172,26 +190,98 @@ and who caused it, then decides. amux's ethos already records this as settled
 product). Yjs only earns a place if we later add a live co-edited document
 surface, where merging keystrokes is the point.
 
-### Design, in the order to build it
+### Design rules
 
-1. **Human identity at the edge.** Put the dashboard behind Tailscale Serve,
-   which adds `Tailscale-User-Login` to every request and cannot be forged from
-   inside the tailnet. The server stamps it as `human` on every board
-   mutation, message, steering row and send, beside the existing session stamp.
-   A request with no header (localhost) is the machine owner.
-2. **Worker input is serialized, never merged.** Messages to a worker already go
-   through the steering queue one at a time. Each row carries its sender, and
-   the worker sees "from alice@customer" at the top of the message, so the
-   agent knows whose instruction it is acting on.
-3. **Typing directly in a pane takes a soft lock.** Two people typing into one
-   terminal produces interleaved garbage. The first person to type holds the
-   pane; everyone else sees "alice is typing" and their input goes to the
-   queue instead. The lock expires after 30 seconds of silence.
-4. **Board conflicts name the other person.** A write with a stale `rev` already
-   gets a 409. Add who made the newer change and when, and have the dashboard
-   offer to re-apply on top of it.
-5. **Presence.** An SSE event listing who is viewing which worker, shown as
-   avatars in the header, so nobody is surprised by someone else's action.
+1. **One identity: the org member.** A tailnet login is a way to sign in as a
+   member, not a second identity system.
+2. **Worker input is serialized, never merged.** Every message reaches the agent
+   labeled with the person who sent it.
+3. **Conflicts are shown, with a name.** A refused write says who got there
+   first and when, and offers to re-apply.
+4. **Everyone can see who else is here.**
+
+### Work plan
+
+Sizes: S is under a day, M is one to three days, for one lane. Every item ships
+with its log signal (a verdict field or WARN line), per the amux two-fix rule.
+
+**MP-1. Sign in by tailnet login (M). Blocks everything below.**
+- In `local_member_identity` (`api/org.rs:400`), when a request carries no
+  member cookie and comes from a tailnet address, ask tailscaled `whois` (reuse
+  `tailnet_auth.rs`). If the login matches an invited, accepted member's email,
+  treat the request as that member and set the cookie.
+- Opt in per machine with a scoped env key, `AMUX_TAILNET_MEMBER_AUTH=1`, off by
+  default. An unmatched login gets the normal sign-in page, not the owner.
+- Log `verdict=tailnet_member_auth` with `matched`/`unmatched`/`whois_failed`.
+- Done when: a test with a stubbed `whois` gets `member:<email>` on a board
+  write, and an unmatched login is refused.
+
+**MP-2. Every write path carries the person (M).**
+- Board and sends already read the member. Audit the rest: steering enqueue
+  (`sender` must be `member:<email>`, not empty), email and alert sends (their
+  `hdr_worker` copies in `api/email.rs:191` and `api/alerts.rs:536`), schedule
+  and note writes.
+- Write one test that walks every mutating route in `/api/debug/routes` with a
+  member request and fails on any row stored without the member. That test is
+  what makes the "full provenance" claim checkable.
+- Done when: that test passes, and deleting the member stamp from any one route
+  makes it fail.
+
+**MP-3. The worker sees who is talking (S).**
+- Extend `origin_stamped` (`session_verbs.rs:12831`) so a member send is labeled
+  `[from alice@customer.com, server-verified]`, the same way worker sends are
+  labeled today. Slash commands stay unlabeled.
+- Done when: two members' messages to one worker arrive in order, each with its
+  label, and the agent's reply names each person.
+
+**MP-4. A board conflict names the other person (S).**
+- In the stale-rev 409 in `patch_item`, add `changed_by` and `changed_at` from
+  the newest revision event.
+- In the dashboard, show "Alice changed this 12 seconds ago" with Re-apply and
+  Discard buttons.
+- Done when: two browser sessions edit one card and the loser sees the winner's
+  name and re-applies cleanly.
+
+**MP-5. Typing lock on a pane (M).**
+- `keys_verb` (`session_verbs.rs:26625`) and typed sends through `send_post` take
+  a lock on the pane for the member who typed, released after 30 seconds of
+  quiet. `keys_verb` needs the request headers passed in for this.
+- While another member holds it, keys are refused with `pane_held_by`, and
+  typed sends go to the steering queue instead, so nothing is lost.
+- The dashboard shows "alice is typing" and why your input was queued.
+- Screen sharing bypasses this: two people with the mouse on one screen is
+  handled by macOS, not amux. Say so in the customer walkthrough.
+- Done when: two members type at once and one pane gets one person's input,
+  with the other person's text delivered afterward from the queue.
+
+**MP-6. Presence (M).**
+- The SSE stream (`api/sse.rs:34`) only carries saved state changes. Add a second,
+  in-memory channel for short-lived events and merge it into the stream.
+- The dashboard reports which worker you are looking at when that changes; the
+  server broadcasts `presence` with everyone's current view and drops anyone
+  silent for 30 seconds.
+- Include presence in the polling fallback too, per the SSE rules in
+  `.claude/rules/sse-realtime.md`.
+- Done when: two browsers on one worker each show the other's avatar within two
+  seconds, and it clears within 30 seconds of one closing.
+
+**MP-7. History by person (S).**
+- Add `?actor=member:<email>` to the board log and message history APIs, and a
+  person filter in the dashboard.
+- Done when: filtering by Alice shows exactly the actions from the demo that
+  she took.
+
+**MP-8. The demo as an end-to-end test (M).**
+- A Playwright test with two browser contexts signed in as two members, running
+  the demo script below. It runs in CI so the claim stays true after later
+  changes.
+
+Order: MP-1, then MP-2, then MP-3 to MP-7 in parallel, then MP-8. About 12
+lane-days in total, which fits in two weeks for one lane or one week for two.
+
+For a first customer who cannot wait, MP-1 to MP-4 are the minimum: people sign
+in, every action names them, the worker knows who is talking, and conflicts
+name the other person. That is about five lane-days.
 
 ### The demo that proves it (acceptance for "multiplayer done")
 
@@ -283,9 +373,8 @@ Tailscale come back up.
 
 ## Next steps
 
-1. Cards for the multiplayer design, one per step (identity at the edge, sender
-   on queued messages, pane soft lock, conflict naming, presence). Identity
-   first: it blocks any promise of "full provenance".
+1. One card per multiplayer work item, MP-1 to MP-8, starting with MP-1. It
+   blocks any promise of "full provenance".
 2. Card: the IaC directory (Terraform for Scaleway and Tailscale, the Ansible
    playbook, the Brewfile, `make up` and `make down`).
 3. After spending approval: rent one Mac, run `make up` against it ourselves,
