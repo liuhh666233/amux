@@ -69,6 +69,8 @@ pub const SCOPES: &[&str] = &["amux:read", "amux:write"];
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 const RELAY_HEADER: &str = "x-amux-tunnel-relay";
 const PUBLIC_BASE_HEADER: &str = "x-amux-public-base";
+/// The cloud front door's workspace callback (see `redirect_allowed`).
+pub(crate) const FRONT_DOOR_CALLBACK: &str = "https://cloud.amux.io/oauth/workspace/callback";
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -115,12 +117,17 @@ pub(crate) fn redirect_allowed(uri: &str, extra: &str) -> bool {
         && u.port().is_none()
         && (path == "/connector_platform_oauth_redirect" || path.starts_with("/connector/oauth/"));
     let loopback = u.scheme() == "http" && matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    // The cloud front door (cloud/gateway/chatgpt_front.py) is itself an
+    // OAuth client of this workspace: exactly this callback and nothing else
+    // on that host. It lets one directory listing reach every user's own
+    // amux; the owner still approves the code here.
+    let front_door = uri == FRONT_DOOR_CALLBACK;
     let listed = extra
         .split(',')
         .map(str::trim)
         .filter(|p| p.starts_with("https://") && p.len() > "https://x/".len())
         .any(|p| uri.starts_with(p));
-    chatgpt || loopback || listed
+    chatgpt || loopback || front_door || listed
 }
 
 fn extra_redirects() -> String {
@@ -567,6 +574,13 @@ async fn register(State(state): State<AppState>, body: Bytes) -> Response {
     }
 }
 
+pub(crate) fn wants_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("application/json"))
+}
+
 fn html_page(title: &str, body: &str) -> Response {
     let page = format!(
         "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>\
@@ -639,6 +653,18 @@ async fn authorize(State(state): State<AppState>, headers: HeaderMap, uri: Uri, 
     audit(json!({"ts": now, "event": "grant_requested", "request": id, "client_id": client_id, "client_name": client_name, "scope": scope, "resource": resource}));
     tracing::warn!(target: "amux::chatgpt_app", verdict = "chatgpt_grant_pending_owner", request = %id, user_code = %user_code,
         "chatgpt app: a connection is waiting for the owner's approval in Settings > ChatGPT");
+    // A programmatic client (the cloud front door) asks for JSON: the same
+    // facts the page below shows whoever opened it, so nothing new leaks.
+    // The approval itself still happens in Settings > ChatGPT.
+    if wants_json(&headers) {
+        let mut r = Json(json!({
+            "status": "pending", "request": id, "user_code": user_code,
+            "poll": format!("oauth/authorize/status?id={id}&k={poll_secret}"),
+        }))
+        .into_response();
+        r.headers_mut().insert("cache-control", HeaderValue::from_static("no-store"));
+        return r;
+    }
     let esc = crate::integrations::email::html_escape;
     let body = format!(
         "<h2>Approve in amux</h2><p>{who} wants to use your amux ({scope}).</p>\
@@ -1206,6 +1232,11 @@ mod tests {
         assert!(!redirect_allowed("https://chatgpt.com/other", ""));
         assert!(!redirect_allowed("https://user@chatgpt.com/connector_platform_oauth_redirect", ""));
         assert!(redirect_allowed("https://claude.ai/api/mcp/auth_callback", "https://claude.ai/api/mcp/"));
+        // The cloud front door's callback, exactly: not its host, not a prefix.
+        assert!(redirect_allowed(FRONT_DOOR_CALLBACK, ""));
+        assert!(!redirect_allowed("https://cloud.amux.io/oauth/workspace/callback/x", ""));
+        assert!(!redirect_allowed("https://cloud.amux.io/other", ""));
+        assert!(!redirect_allowed("http://cloud.amux.io/oauth/workspace/callback", ""));
     }
 
     fn approved_request(c: &Connection, now: f64) -> (String, String, String) {
@@ -1393,6 +1424,30 @@ mod tests {
         let mut req = rpc("tools/list", Some(at));
         req.headers_mut().insert("host", HeaderValue::from_static("elsewhere.test"));
         assert_eq!(call(&a, req).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The cloud front door is an OAuth client of this workspace: it registers
+    /// its one callback, asks authorize for JSON, and gets the same request id,
+    /// user code and poll secret the page would show. Nothing is approved by
+    /// asking; the grant stays pending until the owner decides.
+    #[tokio::test]
+    async fn the_front_door_gets_the_pending_request_as_json_and_it_stays_pending() {
+        let (_d, st) = state();
+        let a = app(st);
+        let (s, _, reg) = call(&a, Request::post("/oauth/register").header("host", "amux.test").header("content-type", "application/json")
+            .body(Body::from(json!({"client_name": "amux cloud", "redirect_uris": [FRONT_DOOR_CALLBACK]}).to_string())).unwrap()).await;
+        assert_eq!(s, StatusCode::CREATED, "{reg}");
+        let cid = reg["client_id"].as_str().unwrap();
+        let q = format!("/oauth/authorize?response_type=code&client_id={cid}&redirect_uri={}&code_challenge={CHALLENGE}&code_challenge_method=S256&state=s1",
+            enc(FRONT_DOOR_CALLBACK));
+        let (s, _, j) = call(&a, Request::get(&q).header("host", "amux.test").header("accept", "application/json").body(Body::empty()).unwrap()).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(j["status"], "pending");
+        assert!(j["user_code"].as_str().unwrap().len() >= 4, "{j}");
+        let poll = j["poll"].as_str().unwrap();
+        assert!(poll.starts_with("oauth/authorize/status?id=") && poll.contains("&k="), "{poll}");
+        let (_, _, p) = call(&a, Request::get(format!("/{poll}")).header("host", "amux.test").body(Body::empty()).unwrap()).await;
+        assert_eq!(p["status"], "pending", "asking for JSON approves nothing");
     }
 
     #[test]

@@ -1825,34 +1825,55 @@ def _tunnel_tid_from_host(handler):
     return m.group(1).lower() if m else None
 
 
-def _tunnel_serve_public(handler, tid, path, qs):
-    """Relay a public /t/<tid>/... request down the tunnel and return the reply."""
+def _tunnel_relay(tid, method, path, qs, headers, body, org_id=None, timeout=35):
+    """Send one request down tunnel `tid` and wait for the local amux's reply.
+    Returns (status, headers, body bytes). Raises LookupError when the tunnel
+    is not registered, or (org_id given) is registered to a different org,
+    and TimeoutError when the local side does not answer.
+
+    The pending entry remembers its tid, so /tunnel/reply only accepts the
+    answer from the org that owns that tunnel (see _tunnel_routes)."""
     with _tunnel_lock:
         tun = _tunnels.get(tid)
     if not tun:
-        return handler._json({"error": "tunnel not found"}, 404)
-    length = int(handler.headers.get("Content-Length", 0))
-    body = handler.rfile.read(length) if length else b""
+        raise LookupError("tunnel not registered")
+    if org_id is not None and tun["org_id"] != org_id:
+        print(f"[tunnel] verdict=tunnel_org_mismatch tid={tid} want_org={org_id}", flush=True)
+        raise LookupError("tunnel belongs to another org")
     rid = secrets.token_urlsafe(10)
     ev = threading.Event()
     with _tunnel_lock:
-        _tunnel_pending[rid] = {"ev": ev, "resp": None}
+        _tunnel_pending[rid] = {"ev": ev, "resp": None, "tid": tid}
     skip = {"host", "content-length", "connection"}
-    fwd = {k: v for k, v in handler.headers.items() if k.lower() not in skip}
+    fwd = {k: v for k, v in (headers or {}).items() if k.lower() not in skip}
     tun["q"].put({
-        "rid": rid, "method": handler.command, "path": path, "qs": qs,
-        "headers": fwd, "body": base64.b64encode(body).decode(),
+        "rid": rid, "method": method, "path": path, "qs": qs or "",
+        "headers": fwd, "body": base64.b64encode(body or b"").decode(),
     })
-    got = ev.wait(timeout=35)
+    got = ev.wait(timeout=timeout)
     with _tunnel_lock:
         pend = _tunnel_pending.pop(rid, None)
     if not got or not pend or not pend["resp"]:
-        return handler._json({"error": "tunnel timeout — local amux not responding"}, 504)
+        raise TimeoutError("local amux not responding")
     resp = pend["resp"]
     rbody = base64.b64decode(resp.get("body", "")) if resp.get("body") else b""
+    return int(resp.get("status", 200)), (resp.get("headers") or {}), rbody
+
+
+def _tunnel_serve_public(handler, tid, path, qs):
+    """Relay a public /t/<tid>/... request down the tunnel and return the reply."""
+    length = int(handler.headers.get("Content-Length", 0))
+    body = handler.rfile.read(length) if length else b""
+    try:
+        status, rheaders, rbody = _tunnel_relay(tid, handler.command, path, qs,
+                                                dict(handler.headers.items()), body)
+    except LookupError:
+        return handler._json({"error": "tunnel not found"}, 404)
+    except TimeoutError:
+        return handler._json({"error": "tunnel timeout — local amux not responding"}, 504)
     upstream_cl = None
-    handler.send_response(int(resp.get("status", 200)))
-    for k, v in (resp.get("headers") or {}).items():
+    handler.send_response(status)
+    for k, v in rheaders.items():
         if k.lower() == "content-length":
             upstream_cl = v
         if k.lower() in ("transfer-encoding", "connection", "content-length"):
@@ -1869,6 +1890,14 @@ def _tunnel_serve_public(handler, tid, path, qs):
         handler.wfile.write(rbody)
     except (BrokenPipeError, ConnectionResetError):
         pass
+
+
+def _tunnel_label(tok):
+    try:
+        r = get_db().execute("SELECT label, email FROM tunnel_tokens WHERE token=?", (tok,)).fetchone()
+        return (r["label"] or r["email"] or "") if r else ""
+    except Exception:
+        return ""
 
 
 def _tunnel_routes(handler, path, qs):
@@ -1893,7 +1922,8 @@ def _tunnel_routes(handler, path, qs):
         tid = hashlib.sha256(("amux-tunnel:" + _tok).encode()).hexdigest()[:16]
         with _tunnel_lock:
             _tunnels[tid] = {"org_id": org["id"], "q": _queue.Queue(),
-                             "last_seen": time.time(), "created": time.time()}
+                             "last_seen": time.time(), "created": time.time(),
+                             "label": _tunnel_label(_tok)}
         base = f"https://{handler.headers.get('Host', 'cloud.amux.io')}"
         # Subdomain is the primary URL — root-absolute paths in the tunneled app
         # stay inside the tunnel. The /t/<tid>/ path URL keeps working for anything
@@ -1930,12 +1960,102 @@ def _tunnel_routes(handler, path, qs):
         data = json.loads(handler.rfile.read(length)) if length else {}
         with _tunnel_lock:
             pend = _tunnel_pending.get(rid)
+            owner = (_tunnels.get(pend["tid"]) or {}).get("org_id") if pend else None
+        if pend and owner != org["id"]:
+            # Only the org whose tunnel carried the request may answer it. Before
+            # this check any paying org could reply to another tenant's pending
+            # rid; with /mcp relayed through tunnels that would be a forged tool
+            # result in someone else's ChatGPT.
+            print(f"[tunnel] verdict=tunnel_reply_wrong_org rid={rid} org={org['id']}", flush=True)
+            handler._json({"error": "not your request"}, 403)
+            return True
         if pend:
             pend["resp"] = data
             pend["ev"].set()
         handler._json({"ok": True})
         return True
     return False
+
+
+# ── ChatGPT front door (AMUX-5397) ────────────────────────────────────────────
+# One public origin for every user's amux; the design and the tenant rule are
+# in chatgpt_front.py's docstring. This block only supplies what it needs from
+# the gateway: identity, the user's reachable workspaces, and the two hops
+# (container loopback, tunnel relay), each refusing a workspace that does not
+# belong to the grant's org.
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chatgpt_front  # noqa: E402
+
+TUNNEL_LIVE_S = 90  # a tunnel that has not long-polled this recently is not offered
+
+
+class _FrontEnv(chatgpt_front.Env):
+    origin = os.environ.get("AMUX_FRONT_DOOR_ORIGIN", "https://cloud.amux.io").rstrip("/")
+    redirect_extra = os.environ.get("AMUX_FRONT_REDIRECT_ALLOW", "")
+    _local = threading.local()
+
+    def db(self):
+        c = getattr(self._local, "db", None)
+        if c is None:
+            c = get_db()
+            chatgpt_front.ensure_schema(c)
+            self._local.db = c
+        return c
+
+    def identify(self, handler):
+        val = _parse_cookies(handler.headers.get("Cookie", "")).get("amux_session", "")
+        if not val:
+            return None
+        try:
+            return _verify_cookie(val)
+        except ValueError:
+            return None
+
+    def login(self, handler, return_to):
+        handler._serve_login(post_login_redirect=return_to)
+
+    def workspaces(self, user_id):
+        db = self.db()
+        mem = db.execute(
+            "SELECT o.id, o.name, o.port, m.role FROM org_memberships m JOIN orgs o ON o.id = m.org_id "
+            "WHERE m.user_id=?", (user_id,)).fetchall()
+        roles = {r["id"]: r["role"] for r in mem}
+        out = [{"kind": "container", "ref": r["id"], "org_id": r["id"], "role": r["role"],
+                "label": f"{r['name'] or r['id']} (cloud)"} for r in mem if r["port"]]
+        now = time.time()
+        with _tunnel_lock:
+            tuns = [(tid, t) for tid, t in _tunnels.items()
+                    if t["org_id"] in roles and now - t.get("last_seen", 0) < TUNNEL_LIVE_S]
+        out += [{"kind": "tunnel", "ref": tid, "org_id": t["org_id"], "role": roles[t["org_id"]],
+                 "label": t.get("label") or f"machine {tid[:6]}"} for tid, t in tuns]
+        return out
+
+    def ws_fetch(self, kind, ref, org_id, method, path, headers, body):
+        p, _, q = path.partition("?")
+        if kind == "tunnel":
+            try:
+                return _tunnel_relay(ref, method, p, q, headers, body, org_id=org_id, timeout=30)
+            except TimeoutError as e:
+                raise LookupError(str(e))
+        if kind != "container" or ref != org_id:
+            raise LookupError("unknown workspace kind")
+        row = get_db().execute("SELECT port FROM orgs WHERE id=?", (org_id,)).fetchone()
+        if not row or not row["port"]:
+            raise LookupError("workspace has no container")
+        # Direct loopback hop, no X-Forwarded-*: the workspace treats this as
+        # its trusted gateway, which is what the container trust model says.
+        req = urllib.request.Request(_ctr_url(row["port"], path), data=body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30, context=_CTR_SSL) as r:
+                return r.status, dict(r.headers.items()), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers.items()), e.read()
+        except urllib.error.URLError as e:
+            raise LookupError(f"workspace not running: {e.reason}")
+
+
+_FRONT = _FrontEnv()
 
 
 # ── Proxy helper ───────────────────────────────────────────────────────────────
@@ -2194,6 +2314,13 @@ class Handler(BaseHTTPRequestHandler):
         # ── amux tunnel: /t/<tid>/… (public) + /tunnel/* (token-authed) ──
         if path.startswith("/t/") or path.startswith("/tunnel/"):
             if _tunnel_routes(self, path, qs):
+                return
+
+        # ── ChatGPT front door: /mcp, /oauth/*, /.well-known/oauth-* ──
+        # Before cookie auth: each of these authenticates for itself (OAuth
+        # tokens, or the signed-in cookie on the consent pages).
+        if path in chatgpt_front.FRONT_PATHS:
+            if chatgpt_front.handle(self, path, qs, _FRONT):
                 return
 
         # ── Public: Clerk path-based routing (sign-in/sign-up sub-pages) ──
@@ -2628,6 +2755,15 @@ class Handler(BaseHTTPRequestHandler):
                 return True  # god mode
             r = db.execute("SELECT role FROM org_memberships WHERE org_id=? AND user_id=?", (org_id, user_id)).fetchone()
             return r and r["role"] in roles
+
+        # ── ChatGPT front door: the signed-in user's connections ──
+        if path == "/api/gateway/chatgpt/grants" and self.command == "GET":
+            return self._json({"grants": chatgpt_front.list_grants(_FRONT, user_id)})
+        if (path.startswith("/api/gateway/chatgpt/grants/") and path.endswith("/revoke")
+                and self.command == "POST" and path.count("/") == 6):
+            code = chatgpt_front.revoke_for_user(_FRONT, user_id, path.split("/")[5],
+                                                 lambda oid: _has_role(oid, "owner"))
+            return self._json({"ok": code == 200}, code)
 
         # GET /invite/<token> while authenticated → show accept page
         if path.startswith("/invite/") and self.command == "GET":

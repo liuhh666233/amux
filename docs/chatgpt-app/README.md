@@ -23,6 +23,76 @@ the OAuth 2.1 server ChatGPT needs to connect to it. Source:
    page continues by itself.
 5. Disconnect any time from the same panel. Its tokens stop working at once.
 
+## The public front door (for the directory listing)
+
+A directory listing names one MCP URL for every user, and that origin can never
+change. That URL is `https://cloud.amux.io/mcp`, served by the cloud gateway
+(`cloud/gateway/chatgpt_front.py`, AMUX-5397). Built and tested locally; not
+deployed, because cloud.amux.io has no host right now (see `SUBMIT.md`).
+
+**Design.** The gateway is the OAuth server ChatGPT talks to, and it is itself
+an ordinary OAuth client of the amux the user picks. The user signs in with the
+same Clerk account as the cloud dashboard and chooses one amux they may reach:
+a cloud workspace they own or administer, or their own machine through its
+MCP-only tunnel. The gateway then runs that amux's own OAuth (register,
+authorize with PKCE, redeem), keeps the workspace token, and gives ChatGPT a
+token of its own that is bound to that one workspace. `/mcp` relays each call
+to that workspace unchanged, and the answer, including any refusal, comes back
+as written.
+
+Why this one: it needed almost nothing new on the amux side (its redirect
+allow-list admits exactly `https://cloud.amux.io/oauth/workspace/callback`, and
+its authorize endpoint answers JSON when asked), and every rule amux already
+enforces keeps working, including the owner approving each connection.
+Proxying ChatGPT's OAuth straight to the workspace was rejected: registration
+happens before the user is known, so there is no workspace to send it to.
+
+**Who approves.**
+
+- A machine behind a tunnel: its owner approves the code in that amux's
+  Settings > ChatGPT, exactly as for a direct connection.
+- A cloud workspace: its dashboard sits behind the gateway and cannot tell a
+  relayed approval from a forged one, so the owner's click on the gateway's
+  consent page is the approval. Only an owner or admin of the workspace can
+  give it.
+
+**Tenant rule.**
+
+- A front door grant is bound to one user, one org and one workspace when it
+  is created.
+- The picker only offers workspaces the signed-in user may reach, and the
+  choose step checks the pick again rather than trusting the form.
+- `/mcp` takes the workspace from the grant, never from the request.
+- A tunnel is used only while it still belongs to the grant's org. If it
+  changes hands, calls fail and are never re-routed.
+- The tunnel relay accepts an answer only from the org that owns the tunnel
+  the request went down. Before this change, any paying org could answer
+  another tenant's pending request.
+
+**Revoking.**
+
+- Signed-in users list and revoke their connections at
+  `GET /api/gateway/chatgpt/grants` and
+  `POST /api/gateway/chatgpt/grants/<id>/revoke`.
+- Revoking on the amux side also ends the connection: the workspace refuses
+  the token, the refresh fails, and the gateway revokes its own grant.
+
+Every refusal prints `[chatgpt-front] verdict=<name>`.
+
+**Tests.** `python3 cloud/tests/test_chatgpt_front.py` runs the real gateway
+handler against fake workspaces and a fake tunnel client. It needs no cloud,
+Clerk, Docker or network. It covers:
+
+- the full OAuth, `tools/list` and `tools/call` path for a cloud workspace and
+  for a machine through its tunnel;
+- a forged pick of another org's workspace;
+- another user continuing your request;
+- a plain member connecting a cloud workspace;
+- a tunnel changing hands;
+- a forged tunnel reply;
+- code replay, PKCE failure, refresh rotation, revocation on either side, and
+  unlisted redirects.
+
 ## Tools
 
 | Tool | Kind | What it does |
@@ -47,7 +117,9 @@ with only `amux:read` cannot use the write tools.
   origin, a local member, and any request carrying relay or proxy headers
   unless it also presents the owner token or an owner session.
 - PKCE S256 only. Public clients only. Redirects are limited to ChatGPT's
-  callbacks and loopback; `AMUX_MCP_REDIRECT_ALLOW` adds HTTPS prefixes.
+  callbacks, loopback, and the cloud front door's one callback
+  (`https://cloud.amux.io/oauth/workspace/callback`); `AMUX_MCP_REDIRECT_ALLOW`
+  adds HTTPS prefixes.
 - Codes last 2 minutes and are single use; a replayed code revokes its grant.
   Access tokens last 1 hour; refresh tokens 30 days, rotated on every use.
   Everything is stored as a sha256 hash.

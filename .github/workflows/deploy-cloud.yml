@@ -302,9 +302,11 @@ jobs:
           # restart; only gateway.py / gateway.env do.
           H=$(ssh -i ~/.ssh/amux_cloud "root@$CLOUD_HOST" '
             md5sum /opt/amux-cloud/gateway/gateway.py 2>/dev/null | cut -d" " -f1
-            md5sum /etc/amux/gateway.env 2>/dev/null | cut -d" " -f1')
+            md5sum /etc/amux/gateway.env 2>/dev/null | cut -d" " -f1
+            md5sum /opt/amux-cloud/gateway/chatgpt_front.py 2>/dev/null | cut -d" " -f1')
           echo "PRE_GW_PY=$(echo "$H" | sed -n 1p)" >> "$GITHUB_ENV"
           echo "PRE_GW_ENV=$(echo "$H" | sed -n 2p)" >> "$GITHUB_ENV"
+          echo "PRE_GW_FRONT=$(echo "$H" | sed -n 3p)" >> "$GITHUB_ENV"
           echo "pre-deploy: gateway.py md5=$(echo "$H" | sed -n 1p) gateway.env md5=$(echo "$H" | sed -n 2p)"
 
       - name: Gateway env — admin emails (idempotent, safe on every deploy)
@@ -414,6 +416,10 @@ jobs:
           if [ -n "${PRE_GW_PY:-}" ] && [ "$PRE_GW_PY" != "$SHIP" ]; then
             echo "::warning title=gateway.py overwrite::host gateway.py ($PRE_GW_PY) differs from the version being deployed ($SHIP). If the host copy was a hand-deploy ahead of origin, this rsync REVERTS it (AC-410) — confirm origin carries the intended gateway.py."
           fi
+          # chatgpt_front.py FIRST: gateway.py imports it (AMUX-5397), and a
+          # gateway restarted before its module landed would fail to start.
+          rsync -e "ssh -i ~/.ssh/amux_cloud" cloud/gateway/chatgpt_front.py \
+            "root@$CLOUD_HOST:/opt/amux-cloud/gateway/chatgpt_front.py"
           rsync --inplace -e "ssh -i ~/.ssh/amux_cloud" cloud/gateway/gateway.py \
             "root@$CLOUD_HOST:/opt/amux-cloud/gateway/gateway.py"
           rsync -e "ssh -i ~/.ssh/amux_cloud" cloud/docker/docker-compose.template.yml \
@@ -429,9 +435,10 @@ jobs:
           # (the blip then is a deploy someone meant to make).
           NOW=$(ssh -i ~/.ssh/amux_cloud "root@$CLOUD_HOST" '
             md5sum /opt/amux-cloud/gateway/gateway.py 2>/dev/null | cut -d" " -f1
-            md5sum /etc/amux/gateway.env 2>/dev/null | cut -d" " -f1')
-          NPY=$(echo "$NOW" | sed -n 1p); NENV=$(echo "$NOW" | sed -n 2p)
-          if [ "$NPY" != "${PRE_GW_PY:-}" ] || [ "$NENV" != "${PRE_GW_ENV:-}" ]; then
+            md5sum /etc/amux/gateway.env 2>/dev/null | cut -d" " -f1
+            md5sum /opt/amux-cloud/gateway/chatgpt_front.py 2>/dev/null | cut -d" " -f1')
+          NPY=$(echo "$NOW" | sed -n 1p); NENV=$(echo "$NOW" | sed -n 2p); NFRONT=$(echo "$NOW" | sed -n 3p)
+          if [ "$NPY" != "${PRE_GW_PY:-}" ] || [ "$NENV" != "${PRE_GW_ENV:-}" ] || [ "$NFRONT" != "${PRE_GW_FRONT:-}" ]; then
             echo "gateway changed (py ${PRE_GW_PY:-none}->$NPY, env ${PRE_GW_ENV:-none}->$NENV) — restarting (expect a ~2s blip)"
             ssh -i ~/.ssh/amux_cloud "root@$CLOUD_HOST" \
               'pip3 install -q stripe 2>/dev/null; systemctl restart amux-gateway && sleep 2 && systemctl is-active amux-gateway'
