@@ -560,6 +560,15 @@ async fn async_main() {
                 crate::api::chat_worker::recover_all(&state).await;
             tracing::info!(workers, interrupted, resumed, measured = true, n_considered = workers,
                 verdict = "chat_recovery_pass", "chat worker restart recovery complete");
+            // A browser tab still on a pre-2026-09-30 client creates a
+            // `<worker>-chat` companion WORKER when Chat is turned on. The
+            // startup pass cannot see one made after it, so keep folding them
+            // into their worker's Chat tab until old tabs have reloaded. Each
+            // fold logs verdict=chat_companion_migrated.
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                crate::api::chat_worker::migrate_legacy_companions(&state).await;
+            }
         });
     }
     // Project lifecycle driver. Projects have their own contract, retained
