@@ -2565,6 +2565,26 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <span id="peek-steering-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
       <button class="btn" style="font-size:0.8rem;padding:5px 12px;" onclick="_steeringClearAll()">Clear all</button>
     </div>
+    <div id="steer-delay-composer" style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:rgba(255,255,255,0.02);flex-shrink:0;">
+      <div onclick="var b=document.getElementById('steer-delay-body');var c=document.getElementById('steer-delay-caret');var v=b.style.display==='none';b.style.display=v?'flex':'none';c.textContent=v?'▾':'▸';" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;-webkit-user-select:none;">
+        <span id="steer-delay-caret" style="font-size:0.7rem;color:var(--dim);display:inline-block;width:10px;">&#x25B8;</span>
+        <span style="font-size:0.8rem;font-weight:600;">Delayed message</span>
+        <span style="font-size:0.68rem;color:var(--dim);flex:1;">Deliver after the worker has been idle for a set time.</span>
+      </div>
+      <div id="steer-delay-body" style="display:none;flex-direction:column;gap:8px;margin-top:8px;">
+        <textarea id="steer-delay-text" rows="2" placeholder="Message to deliver after idle period..." style="width:100%;font-size:0.78rem;resize:vertical;box-sizing:border-box;"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <label style="font-size:0.78rem;color:var(--dim);white-space:nowrap;">Deliver after idle for</label>
+          <input id="steer-delay-val2" type="number" min="1" value="2" style="width:50px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;text-align:center;">
+          <select id="steer-delay-unit2" style="padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;">
+            <option value="60">minutes</option>
+            <option value="3600" selected>hours</option>
+          </select>
+          <div style="flex:1;"></div>
+          <button class="btn primary" style="font-size:0.75rem;padding:4px 12px;" onclick="_steeringQueueDelayed()">Queue delayed</button>
+        </div>
+      </div>
+    </div>
     <!-- ONE scroll region for the queue + sent history. The queue list carries
          flex:none so it sizes to its content; without this wrapper the panel is a
          fixed-height flex column and a long queue simply overflowed with nowhere

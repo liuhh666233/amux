@@ -543,6 +543,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "0096_skill_usage",
         sql: include_str!("../../migrations/0096_skill_usage.sql"),
     },
+    Migration {
+        version: 97,
+        name: "0097_steering_delay_after_idle",
+        sql: include_str!("../../migrations/0097_steering_delay_after_idle.sql"),
+    },
 ];
 
 /// Migrations embedded in THIS binary that the DB has not recorded yet.

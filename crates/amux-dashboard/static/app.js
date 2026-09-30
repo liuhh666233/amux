@@ -11858,13 +11858,14 @@ function _steeringRender() {
   const row = m => {
     const ago = timeAgo(m.queued_at);
     const sysTag = m.system ? `<span style="font-size:0.68rem;font-weight:600;padding:1px 6px;border-radius:3px;background:rgba(148,163,184,0.15);color:var(--dim);margin-right:6px;">SYSTEM${m.guard ? ' · ' + esc(m.guard) : ''}</span>` : '';
+    const delayTag = (m.delay_after_idle_s > 0 && !m.system) ? `<span style="font-size:0.68rem;font-weight:600;padding:1px 6px;border-radius:3px;background:rgba(99,102,241,0.15);color:var(--accent,#6366f1);margin-right:6px;">DELAYED ${_formatDelay(m.delay_after_idle_s)} idle</span>` : '';
     // Durable local intent has no server steering ID yet; server-only actions
     // stay disabled until acknowledgement. Offline/error state remains explicit.
     const pendTag = m.pending ? `<span style="font-size:0.68rem;font-weight:600;padding:1px 6px;border-radius:3px;background:rgba(210,153,34,0.16);color:#d29922;margin-right:6px;">${m.error ? 'Needs review' : online ? 'Awaiting server' : 'Saved offline'}</span>` : '';
     const dis = m.pending ? 'disabled style="opacity:0.5;font-size:0.7rem;padding:2px 8px;"' : 'style="font-size:0.7rem;padding:2px 8px;"';
     return `<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:${m.system ? 'rgba(255,255,255,0.02)' : 'var(--card-bg)'};border:1px solid ${m.pending ? 'rgba(210,153,34,0.45)' : 'var(--border)'};border-radius:8px;${m.system ? 'opacity:0.85;' : ''}">
       <div style="flex:1;min-width:0;">
-        ${(sysTag || pendTag) ? `<div style="margin-bottom:4px;">${sysTag}${pendTag}</div>` : ''}
+        ${(sysTag || delayTag || pendTag) ? `<div style="margin-bottom:4px;">${sysTag}${delayTag}${pendTag}</div>` : ''}
         <div style="font-size:0.85rem;color:${m.system ? 'var(--dim)' : 'var(--fg)'};white-space:pre-wrap;word-break:break-word;">${esc(m.text)}</div>
         ${m.blocked_reason ? `<p class="steering-held">Held: ${esc(m.blocked_reason)}. Input stays queued until an authorized working claim can receive it.</p>` : ''}
         <div style="font-size:0.75rem;color:var(--dim);margin-top:4px;">Queued ${ago}</div>
@@ -11934,6 +11935,28 @@ function _steeringUpdateBadge() {
   if (!badge) return;
   if (n > 0) { badge.textContent = n; badge.classList.add('has-count'); }
   else { badge.textContent = ''; badge.classList.remove('has-count'); }
+}
+
+async function _steeringQueueDelayed() {
+  if (!peekSession) return;
+  const text = (document.getElementById('steer-delay-text') || {}).value?.trim();
+  if (!text) { showToast('Enter a message to queue.'); return; }
+  const val = parseInt((document.getElementById('steer-delay-val2') || {}).value) || 1;
+  const unit = parseInt((document.getElementById('steer-delay-unit2') || {}).value) || 3600;
+  const delay = val * unit;
+  const ok = await steerSession(peekSession, text, {}, {delay_after_idle_s: delay});
+  if (ok) {
+    const inp = document.getElementById('steer-delay-text');
+    if (inp) inp.value = '';
+    const label = delay >= 3600 ? (delay / 3600) + 'h' : (delay / 60) + 'm';
+    showToast('Queued delayed message (delivers after ' + label + ' idle)');
+  }
+}
+
+function _formatDelay(s) {
+  if (s >= 3600) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60); return m ? h+'h '+m+'m' : h+'h'; }
+  if (s >= 60) return Math.floor(s/60) + 'm';
+  return s + 's';
 }
 
 async function _steeringSendNow(msgId) {
@@ -13455,7 +13478,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1189';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1190';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -18540,13 +18563,22 @@ function _showSteerPrompt(text) {
     bg.className = 'amux-dialog-backdrop';
     bg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:400;display:flex;align-items:center;justify-content:center;';
     const box = document.createElement('div');
-    box.style.cssText = 'background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:400px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.4);max-height:min(90dvh,calc(100dvh - 24px));overflow-y:auto;overscroll-behavior:contain;';
+    box.style.cssText = 'background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:420px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.4);max-height:min(90dvh,calc(100dvh - 24px));overflow-y:auto;overscroll-behavior:contain;';
     box.innerHTML = `<div style="font-weight:600;margin-bottom:8px;">Worker is working</div>
       <div style="font-size:0.85rem;color:var(--dim);margin-bottom:12px;">This worker is actively running. How should your message be delivered?</div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:0.82rem;margin-bottom:16px;max-height:60px;overflow:hidden;word-break:break-word;">${text.length > 120 ? text.slice(0,120) + '…' : text}</div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:0.82rem;margin-bottom:16px;max-height:60px;overflow:hidden;word-break:break-word;">${text.length > 120 ? text.slice(0,120) + '...' : text}</div>
+      <div id="steer-delay-row" style="display:none;align-items:center;gap:8px;margin-bottom:14px;font-size:0.82rem;">
+        <label style="color:var(--dim);white-space:nowrap;">Deliver after idle for</label>
+        <input id="steer-delay-val" type="number" min="1" value="2" style="width:56px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.82rem;text-align:center;">
+        <select id="steer-delay-unit" style="padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.82rem;">
+          <option value="60">minutes</option>
+          <option value="3600" selected>hours</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
         <button class="btn" id="steer-cancel" style="font-size:0.82rem;">Cancel</button>
         <button class="btn" id="steer-send-now" style="font-size:0.82rem;">Send now</button>
+        <button class="btn" id="steer-delay-toggle" style="font-size:0.82rem;">Delay...</button>
         <button class="btn primary" id="steer-queue" style="font-size:0.82rem;">Queue for next turn</button>
       </div>`;
     bg.appendChild(box);
@@ -18555,16 +18587,32 @@ function _showSteerPrompt(text) {
     box.querySelector('#steer-cancel').onclick = () => cleanup('cancel');
     box.querySelector('#steer-send-now').onclick = () => cleanup('send');
     box.querySelector('#steer-queue').onclick = () => cleanup('queue');
+    const delayRow = box.querySelector('#steer-delay-row');
+    const delayBtn = box.querySelector('#steer-delay-toggle');
+    delayBtn.onclick = () => {
+      if (delayRow.style.display === 'none') {
+        delayRow.style.display = 'flex';
+        delayBtn.textContent = 'Queue delayed';
+        delayBtn.classList.add('primary');
+        delayBtn.onclick = () => {
+          const v = parseInt(box.querySelector('#steer-delay-val').value) || 1;
+          const u = parseInt(box.querySelector('#steer-delay-unit').value) || 3600;
+          cleanup({mode:'delay', delay_after_idle_s: v * u});
+        };
+      }
+    };
     bg.onclick = (e) => { if (e.target === bg) cleanup('cancel'); };
   });
 }
-async function steerSession(name, text, identity = {}) {
+async function steerSession(name, text, identity = {}, opts = {}) {
   if (!text) return false;
   identity.msg_id = crypto.randomUUID();
   try {
+    const payload = {text, record_history:true, msg_id:identity.msg_id};
+    if (opts.delay_after_idle_s > 0) payload.delay_after_idle_s = opts.delay_after_idle_s;
     const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/steer', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text, record_history:true, msg_id:identity.msg_id})
+      body:JSON.stringify(payload)
     });
     if (!_isLocallyQueued(r)) {
       if (!r.ok) return false;

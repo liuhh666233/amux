@@ -6111,6 +6111,10 @@ pub(crate) fn ensure_fleet_tables(conn: &rusqlite::Connection) -> rusqlite::Resu
         [],
     );
     let _ = conn.execute(
+        "ALTER TABLE steering_queue ADD COLUMN delay_after_idle_s INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
         "ALTER TABLE cmd_history ADD COLUMN origin TEXT NOT NULL DEFAULT ''",
         [],
     );
@@ -19646,6 +19650,32 @@ fn steer_no_signal(name: &str, age_s: f64, why: &'static str) -> SteerDelivery {
     SteerDelivery::OverdueMidTurn
 }
 
+fn format_delay_human(seconds: i64) -> String {
+    if seconds >= 3600 {
+        let h = seconds / 3600;
+        let m = (seconds % 3600) / 60;
+        if m > 0 {
+            format!("{h}h {m}m")
+        } else {
+            format!("{h}h")
+        }
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+async fn idle_duration_s(state: &AppState, name: &str) -> f64 {
+    let Some(signals) = boundary_signals(state, Some(name)).await else {
+        return 0.0;
+    };
+    match signals.transitions.get(name) {
+        Some((st, ts)) if st == "idle" => (signals.now - ts).max(0.0),
+        _ => 0.0,
+    }
+}
+
 pub(crate) async fn steer_delivery_for(state: &AppState, name: &str, age_s: f64) -> SteerDelivery {
     let Some(signals) = boundary_signals(state, Some(name)).await else {
         return steer_no_signal(name, age_s, "no-boundary-signals");
@@ -20075,18 +20105,19 @@ pub async fn steer_deliver_tick(state: &AppState) -> usize {
     // (steer id, card, why) for rows whose premise expired — filled inside the
     // read scope, acted on outside it (the delete is a write).
     let expired: Vec<(String, String, String)>;
-    let queued: Vec<(String, String, String, f64, String, String)> = {
+    let queued: Vec<(String, String, String, f64, String, String, i64)> = {
         let Ok(conn) = state.store.read() else {
             return 0;
         };
         let Ok(mut stmt) = conn.prepare(
             "SELECT id, session, text, queued_at, COALESCE(guard,''), COALESCE(sender,''), \
-                    COALESCE(precond_card,''), COALESCE(precond_rev,-1) \
+                    COALESCE(precond_card,''), COALESCE(precond_rev,-1), \
+                    COALESCE(delay_after_idle_s,0) \
              FROM steering_queue WHERE delivering_since IS NULL ORDER BY queued_at ASC",
         ) else {
             return 0;
         };
-        type QueuedRow = (String, String, String, f64, String, String, String, i64);
+        type QueuedRow = (String, String, String, f64, String, String, String, i64, i64);
         let rows: Vec<QueuedRow> = stmt
             .query_map([], |r| {
                 Ok((
@@ -20098,6 +20129,7 @@ pub async fn steer_deliver_tick(state: &AppState) -> usize {
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
+                    r.get(8)?,
                 ))
             })
             .map(|it| it.flatten().collect::<Vec<_>>())
@@ -20116,7 +20148,7 @@ pub async fn steer_deliver_tick(state: &AppState) -> usize {
         let mut stale: Vec<(String, String, String)> = Vec::new();
         let rows: Vec<_> = rows
             .into_iter()
-            .filter(|(id, _s, _t, _q, _g, _sd, card, rev)| {
+            .filter(|(id, _s, _t, _q, _g, _sd, card, rev, _delay)| {
                 if card.is_empty() || *rev < 0 {
                     return true;
                 }
@@ -20148,7 +20180,7 @@ pub async fn steer_deliver_tick(state: &AppState) -> usize {
             .collect();
         expired = stale;
         rows.into_iter()
-            .map(|(a, b, c, d, e, f, _, _)| (a, b, c, d, e, f))
+            .map(|(a, b, c, d, e, f, _, _, delay)| (a, b, c, d, e, f, delay))
             .collect::<Vec<_>>()
     };
     // NEVER SILENT, and OUTSIDE the read guard — the delete is a write and the
@@ -20207,7 +20239,7 @@ pub async fn steer_deliver_tick(state: &AppState) -> usize {
     let mut lane_blocks: std::collections::HashMap<String, Option<&'static str>> =
         std::collections::HashMap::new();
     let mut delivered = 0usize;
-    for (id, session, text, queued_at, guard, sender) in queued {
+    for (id, session, text, queued_at, guard, sender, delay_after_idle_s) in queued {
         if guard == "project-steering" && project_send_hold(state, &session, Some(&id)).is_some() {
             // Recheck in the writer; if the hold lifted in between, release our
             // claim so the next pass delivers it rather than stranding it.
@@ -20568,6 +20600,17 @@ pub async fn steer_deliver_tick(state: &AppState) -> usize {
             SteerDelivery::OverdueMidTurn => true,
             SteerDelivery::AtBoundary => false,
         };
+        if !mid_turn && delay_after_idle_s > 0 {
+            let idle_dur = idle_duration_s(state, &session).await;
+            if idle_dur < delay_after_idle_s as f64 {
+                skip(
+                    &session,
+                    &id,
+                    "delay-after-idle (insufficient idle time)",
+                );
+                continue;
+            }
+        }
         // from_steering=true is still passed: it makes the callee REFUSE rather
         // than re-queue if the lane starts generating between this check and the
         // SAY HOW OLD IT IS, when it has been parked past the point the
@@ -21186,16 +21229,18 @@ pub async fn steer_deliver_for_session(state: &AppState, session: &str) -> bool 
     // taking only `LIMIT 1` meant one undeliverable message froze the lane's
     // whole queue, which is how amux-rust accumulated 10 messages over 229
     // minutes while this function ran on every idle report and did nothing.
-    let rows: Vec<(String, String, f64)> = state
+    let rows: Vec<(String, String, f64, i64)> = state
         .store
         .read()
         .ok()
         .and_then(|conn| {
             conn.prepare(
-                "SELECT id, text, queued_at FROM steering_queue WHERE session=?1 AND delivering_since IS NULL ORDER BY queued_at ASC",
+                "SELECT id, text, queued_at, COALESCE(delay_after_idle_s,0) \
+                 FROM steering_queue WHERE session=?1 AND delivering_since IS NULL \
+                 ORDER BY queued_at ASC",
             )
             .and_then(|mut st| {
-                st.query_map([&session_s], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                st.query_map([&session_s], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
                     .map(|it| it.flatten().collect::<Vec<_>>())
             })
             .ok()
@@ -21207,9 +21252,9 @@ pub async fn steer_deliver_for_session(state: &AppState, session: &str) -> bool 
     if parse_env(session).get("CC_PROJECT").is_some() {
         let any = rows
             .iter()
-            .any(|(id, _, _)| project_send_hold(state, session, Some(id)).is_none());
+            .any(|(id, _, _, _)| project_send_hold(state, session, Some(id)).is_none());
         if !any {
-            for (id, _, _) in &rows {
+            for (id, _, _, _) in &rows {
                 if claim_steering_row(&state.store, id).await {
                     unclaim_steering_row(&state.store, id).await;
                 }
@@ -21238,7 +21283,12 @@ pub async fn steer_deliver_for_session(state: &AppState, session: &str) -> bool 
     let mut text = String::new();
     let mut sent = None;
     let mut was_mid_turn = false;
-    for (rid, rtext, queued_at) in rows {
+    let idle_dur = idle_duration_s(state, session).await;
+    for (rid, rtext, queued_at, delay) in rows {
+        if delay > 0 && idle_dur < delay as f64 {
+            skip(session, &rid, "delay-after-idle (insufficient idle time)");
+            continue;
+        }
         // This function is called BECAUSE the lane just reported idle, so the
         // boundary is not in question; the age still decides whether a lane
         // that flickers idle-then-busy gets an overdue delivery.
@@ -24343,6 +24393,27 @@ pub(crate) async fn steer_mutate(
             }
         };
         send_dedup_accept(state, name, &dedup_id, &msg_id).await;
+        let delay_s = body
+            .get("delay_after_idle_s")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0);
+        if delay_s > 0 {
+            let id2 = msg_id.clone();
+            let _ = state
+                .store
+                .write_async(move |conn| {
+                    conn.execute(
+                        "UPDATE steering_queue SET delay_after_idle_s=?1 WHERE id=?2",
+                        rusqlite::params![delay_s, id2],
+                    )?;
+                    Ok(crate::db::WriteOutcome {
+                        applied: true,
+                        events: vec![],
+                    })
+                })
+                .await;
+        }
         if body.get("record_history").map(py_truthy).unwrap_or(false) {
             let email = headers
                 .get("x-amux-user-email")
@@ -24379,8 +24450,13 @@ pub(crate) async fn steer_mutate(
             // response stops CLAIMING a boundary is coming.
             "deliverable": blocked.is_none(),
             "blocked_reason": blocked,
+            "delay_after_idle_s": delay_s,
             "message": match blocked {
-                None => format!("queued — delivers to '{name}' at its next turn boundary"),
+                None => if delay_s > 0 {
+                    format!("queued — delivers to '{name}' after {delay_s}s of idle time")
+                } else {
+                    format!("queued — delivers to '{name}' at its next turn boundary")
+                },
                 Some(r) => block_reason_explain(r, name),
             },
             // Absent unless it applies (AMUX-4555).
@@ -26785,7 +26861,8 @@ pub(crate) async fn steer_history_verb(
     }
     let mut out: Vec<Value> = vec![];
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, text, queued_at, COALESCE(guard,''), COALESCE(sender,'') FROM steering_queue \
+        "SELECT id, text, queued_at, COALESCE(guard,''), COALESCE(sender,''), \
+                COALESCE(delay_after_idle_s,0) FROM steering_queue \
          WHERE session=? ORDER BY queued_at ASC",
     ) {
         if let Ok(rows) = stmt.query_map([name], |r| {
@@ -26795,6 +26872,7 @@ pub(crate) async fn steer_history_verb(
                 "queued_at": r.get::<_, f64>(2)?,
                 "guard": r.get::<_, String>(3)?,
                 "sender": r.get::<_, String>(4)?,
+                "delay_after_idle_s": r.get::<_, i64>(5)?,
             }))
         }) {
             out = rows.flatten().collect();
@@ -26837,8 +26915,23 @@ pub(crate) async fn steer_history_verb(
             _ => None,
         }
     };
+    let idle_dur = idle_duration_s(state, name).await;
     for row in out.iter_mut() {
-        row["waiting_for"] = json!(waiting_for);
+        let delay = row["delay_after_idle_s"].as_i64().unwrap_or(0);
+        let row_waiting = if delay > 0 && waiting_for.is_none() {
+            if idle_dur < delay as f64 {
+                let remaining = delay as f64 - idle_dur;
+                Some(format!(
+                    "the worker to be idle for {} (delayed delivery; {remaining:.0}s remaining)",
+                    format_delay_human(delay)
+                ))
+            } else {
+                None
+            }
+        } else {
+            waiting_for.map(str::to_owned)
+        };
+        row["waiting_for"] = json!(row_waiting);
         let age = now - row["queued_at"].as_f64().unwrap_or(now);
         row["age_s"] = json!(age as i64);
         row["overdue"] = json!(age >= max_age);
