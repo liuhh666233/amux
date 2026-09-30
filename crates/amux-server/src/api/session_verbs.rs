@@ -30662,18 +30662,27 @@ async fn config_patch_inner(state: &AppState, name: &str, body: &Value) -> Respo
 
 // The observed liveness is an input so refusal tests exercise the whole config
 // branch, including its ordering, without restarting a real fleet worker.
+/// Every key a config PATCH reads, flattened from [`config_patch_operations`]'s
+/// table plus `create` (sent with `branch`).
+fn config_patch_operations_keys() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = CONFIG_PATCH_OPS.iter().flat_map(|k| k.iter().copied()).collect();
+    v.push("create");
+    v
+}
+
+const CONFIG_PATCH_OPS: &[&[&str]] = &[
+    &["worktree_verify"], &["worktree_base"], &["rename"], &["worker_type"],
+    &["provider"], &["model", "effort"], &["dir"], &["task_summary"], &["desc"],
+    &["toggle_pin"], &["isolated"], &["toggle_yolo"], &["external_email_allowed"],
+    &["send_allow", "spans_groups"], &["worktree_profile"], &["branch"], &["tags"],
+    &["mcp"], &["new_conversation", "restart"],
+];
+
 /// The settings a config PATCH body names. Keys handled together by one
 /// branch count as one setting: model with effort, send_allow with
 /// spans_groups, new_conversation with restart.
 fn config_patch_operations(body: &Value) -> Vec<String> {
-    const OPS: &[&[&str]] = &[
-        &["worktree_verify"], &["worktree_base"], &["rename"], &["worker_type"],
-        &["provider"], &["model", "effort"], &["dir"], &["task_summary"], &["desc"],
-        &["toggle_pin"], &["isolated"], &["toggle_yolo"], &["external_email_allowed"],
-        &["send_allow", "spans_groups"], &["worktree_profile"], &["branch"], &["tags"],
-        &["mcp"], &["new_conversation", "restart"],
-    ];
-    OPS.iter()
+    CONFIG_PATCH_OPS.iter()
         .filter(|keys| keys.iter().any(|k| body.get(*k).is_some()))
         .map(|keys| keys.join("+"))
         .collect()
@@ -31791,9 +31800,31 @@ async fn config_patch_with_liveness(
         );
     }
 
+    // SAY WHERE THE SETTING LIVES (2026-09-30). The goal-spec-12 orchestrator
+    // PATCHed an env key (AMUX_DISPATCH_BACKLOG_WHEN_IDLE) here and got a bare
+    // "nothing to update", which names neither the key nor the route that sets
+    // it. Name what was not recognised, and point env keys at /api/scope.
+    let known: std::collections::HashSet<&str> = config_patch_operations_keys().into_iter().collect();
+    let unrecognized: Vec<String> = body
+        .as_object()
+        .map(|o| o.keys().filter(|k| !known.contains(k.as_str())).cloned().collect())
+        .unwrap_or_default();
+    let env_like = unrecognized.iter().any(|k| k == "env" || k.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'));
+    if !unrecognized.is_empty() {
+        tracing::info!(session = name, keys = ?unrecognized, measured = true, n_considered = unrecognized.len(),
+            verdict = "config_patch_unrecognized", "config PATCH carried keys this endpoint does not set");
+    }
     jresp(
         StatusCode::BAD_REQUEST,
-        json!({"error": "nothing to update"}),
+        json!({
+            "error": "nothing to update",
+            "unrecognized": unrecognized,
+            "hint": if env_like {
+                "Environment keys are set with PUT /api/scope {\"level\":\"worker|group|global\",\"name\":...,\"capability\":\"env\",\"value\":{KEY: value}}. A worker may write its own worker layer; group and global layers are the owner's (dashboard Scope tab)."
+            } else {
+                "This endpoint sets one of: worktree_verify, worktree_base, rename, worker_type, provider, model/effort, dir, task_summary, desc, toggle_pin, isolated, toggle_yolo, external_email_allowed, send_allow/spans_groups, worktree_profile, branch, tags, mcp, new_conversation/restart."
+            },
+        }),
     )
 }
 
@@ -42040,6 +42071,12 @@ Enter to select \u{00b7} \u{2191}/\u{2193} to navigate \u{00b7} Esc to cancel\n\
         let (st, v) = call(&app, "PATCH", "/api/sessions/probe/config", Some(json!({}))).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert_eq!(v["error"], json!("nothing to update"));
+        // An env key sent here is named, and pointed at the route that sets it.
+        let (st, v) = call(&app, "PATCH", "/api/sessions/probe/config",
+            Some(json!({"AMUX_DISPATCH_BACKLOG_WHEN_IDLE": "1"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(v["unrecognized"], json!(["AMUX_DISPATCH_BACKLOG_WHEN_IDLE"]), "{v}");
+        assert!(v["hint"].as_str().unwrap_or("").contains("/api/scope"), "{v}");
         // model swap on a NOT-RUNNING session rewrites flags without restart.
         let (st, v) = call(
             &app,
