@@ -14259,6 +14259,7 @@ pub(crate) async fn start_session(
     // invariant also reads (RR-0043 / AMUX-3153). The arms below build from it
     // so the check and the launcher cannot disagree about what gets run.
     let base_bin = launch_base_binary(&provider);
+    let rules_opts = worker_rules_shell(name, &provider, isolated);
     let cmd = match provider.as_str() {
         "codex" => {
             // py:24380 — codex command construction (trust-db side effect not
@@ -14310,6 +14311,7 @@ pub(crate) async fn start_session(
                     opts += &format!(" --add-dir {}", sh_quote(&path));
                 }
             }
+            opts += &rules_opts;
             if !codex_session_id.is_empty() {
                 format!("{base_bin} resume{opts} {codex_session_id}")
             } else {
@@ -14507,7 +14509,7 @@ pub(crate) async fn start_session(
             }
             format!("{base_bin}{opts}")
         }
-        _ => build_claude_cmd(&cfg, &flags, &default_flags, &session_flag, extra_flags),
+        _ => build_claude_cmd(&cfg, &flags, &default_flags, &session_flag, extra_flags) + &rules_opts,
     };
 
     // Shell setup line (py:24532): unset Claude env markers, source profile,
@@ -15081,6 +15083,7 @@ pub(crate) async fn start_session(
                 &format!(
                     "{observer_prefix}{}",
                     build_claude_cmd(&cfg, &flags, &default_flags, &fresh_flag, extra_flags)
+                        + &rules_opts
                 ),
                 isolated,
             );
@@ -18345,13 +18348,13 @@ fn preserved_agent_pointers(mem_dir: &std::path::Path, composed: &str) -> String
 
 fn compose_memory_doc(name: &str, global_content: &str, session_content: &str) -> String {
     let mut parts = Vec::new();
-    // RULES FIRST (AF-297). Binding constraints buried under prose are
-    // constraints the model has to go looking for, which is the python call
-    // site's own reason for this ordering.
-    let rules = compose_rules_block(name);
-    if !rules.is_empty() {
-        parts.push(rules);
-    }
+    // NO RULES HERE (AH-233, 2026-09-30). This document is Claude's auto-memory
+    // for a DIRECTORY, and 45 workers share 6 directories, so whichever lane
+    // composed last decided the binding rules every lane in that directory ran
+    // under. Measured with three probe workers: one outside the group, sharing a
+    // directory with a member, reported the group's rule and its PEER's worker
+    // rule and not its own. Rules now reach each worker through its own launch
+    // (worker_rules_args), which is per worker by construction.
     if !global_content.trim().is_empty() {
         parts.push(format!(
             "- [amux inter-session API]({MEM_TOPIC_FILE}) — \
@@ -27550,6 +27553,95 @@ fn compose_rules_block(name: &str) -> String {
          something you infer, the rule wins — and if a rule cannot be followed \
          honestly, say so rather than working around it.\n\n{body}"
     )
+}
+
+/// Where a worker's composed binding rules are written for its own launch.
+pub(crate) fn worker_rules_file(name: &str) -> PathBuf {
+    home().join("rules").join(format!("{name}.md"))
+}
+
+/// The launch arguments that give `name` its binding rules, composed global ->
+/// groups -> worker at THIS launch (AH-233).
+///
+/// Rules used to ride in Claude's per-directory MEMORY.md, which lanes sharing
+/// a directory overwrite for each other, and which nothing recomposed when a
+/// rule changed. Here each launch composes from the store, so an edit at any
+/// level is in force from the worker's next start, and a worker only ever
+/// receives its own scope.
+///
+/// - claude: `--append-system-prompt-file <~/.amux/rules/<name>.md>`
+/// - codex: `-c developer_instructions=<toml string>`
+/// - an isolated worker gets nothing (no injected prompts, CLAUDE.md
+///   "Isolated workers"); other providers have no channel yet. Both are logged
+///   when rules exist, so a rule that cannot reach its worker says so.
+///
+/// Every launch logs verdict=rules_delivered|rules_not_delivered.
+pub(crate) fn worker_rules_args(name: &str, provider: &str, isolated: bool) -> Vec<String> {
+    let block = compose_rules_block(name);
+    let file = worker_rules_file(name);
+    if block.is_empty() {
+        let _ = std::fs::remove_file(&file);
+        return Vec::new();
+    }
+    let layers = block.matches("<!-- from ").count();
+    let refuse = |why: &str| {
+        tracing::warn!(session = name, provider, layers, measured = true, n_considered = layers,
+            verdict = "rules_not_delivered", why, "binding rules exist for this worker but its launch cannot carry them");
+        Vec::new()
+    };
+    if isolated {
+        let _ = std::fs::remove_file(&file);
+        return refuse("isolated workers receive no injected prompts");
+    }
+    let args = match provider {
+        "claude" | "" => {
+            let _ = std::fs::create_dir_all(home().join("rules"));
+            let tmp = file.with_extension("md.tmp");
+            if std::fs::write(&tmp, &block).and_then(|_| std::fs::rename(&tmp, &file)).is_err() {
+                return refuse("could not write the rules file");
+            }
+            vec!["--append-system-prompt-file".to_string(), file.to_string_lossy().into_owned()]
+        }
+        "codex" => vec![
+            "-c".to_string(),
+            format!("developer_instructions={}", serde_json::to_string(&block).unwrap_or_default()),
+        ],
+        _ => return refuse("this provider has no rules channel"),
+    };
+    tracing::info!(session = name, provider, layers, bytes = block.len(), measured = true,
+        n_considered = layers, verdict = "rules_delivered", "binding rules composed into this launch");
+    args
+}
+
+/// The non-archived workers a scope level covers: every worker for `global`,
+/// the members of group `name`, or the one worker `name`.
+pub(crate) fn workers_in_scope(level: &str, name: &str) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(sessions_dir()) else {
+        return Vec::new();
+    };
+    let group = name.trim().to_lowercase();
+    let mut out: Vec<String> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("env"))
+        .filter_map(|p| p.file_stem().and_then(|x| x.to_str()).map(String::from))
+        .filter(|w| parse_env(w).get("CC_ARCHIVED") != Some("1"))
+        .filter(|w| match level {
+            "global" => true,
+            "group" => lane_groups(w).contains(&group),
+            _ => w == name,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `worker_rules_args` as shell text, for a launch built as a command line.
+fn worker_rules_shell(name: &str, provider: &str, isolated: bool) -> String {
+    worker_rules_args(name, provider, isolated)
+        .iter()
+        .map(|a| format!(" {}", sh_quote(a)))
+        .collect()
 }
 
 /// Is `name` a fleet lane? The env file is the definition — it is what
@@ -48508,20 +48600,18 @@ mod commit_shape_tests {
         let _g = crate::api::settings::test_env::set_home(h);
         std::fs::write(h.join("sessions/ruled.env"), "CC_TAGS=\"alpha\"\n").unwrap();
 
-        let before = super::compose_memory_doc("ruled", "GLOBALTEXT", "WORKERTEXT");
+        // The block now rides in the worker's launch, not MEMORY.md (AH-233,
+        // see the test below); its composition is unchanged.
+        let before = super::compose_rules_block("ruled");
         assert!(
-            before.contains("WORKERTEXT"),
-            "premise gone — an empty document would pass the absence check below: {before}"
-        );
-        assert!(
-            !before.contains("Rules — binding"),
-            "no .rules.md exists, so restoring the consumer must compose nothing: {before}"
+            before.is_empty(),
+            "no .rules.md exists, so the consumer must compose nothing: {before}"
         );
 
         std::fs::write(h.join("memory/_rules.md"), "GLOBALRULE").unwrap();
         std::fs::write(h.join("memory/tags/alpha.rules.md"), "GROUPRULE").unwrap();
         std::fs::write(h.join("memory/ruled.rules.md"), "WORKERRULE").unwrap();
-        let after = super::compose_memory_doc("ruled", "GLOBALTEXT", "WORKERTEXT");
+        let after = super::compose_rules_block("ruled");
 
         assert!(
             after.starts_with("# Rules — binding"),
@@ -48548,6 +48638,58 @@ mod commit_shape_tests {
             after.find("WORKERRULE").unwrap(),
         );
         assert!(gi < wi, "layers compose least-specific first: {after}");
+    }
+
+    /// AH-233: rules reach each worker through ITS launch, never through the
+    /// per-directory MEMORY.md that lanes sharing a directory overwrite.
+    ///
+    /// The fixture is the live failure: `peer` shares a directory with `ruled`,
+    /// is outside group alpha, and has its own rule. Before the fix `peer` read
+    /// GROUPRULE and WORKERRULE (its neighbour's) and not PEERRULE.
+    #[tokio::test]
+    async fn rules_reach_each_worker_through_its_own_launch_and_never_a_neighbours() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join("sessions")).unwrap();
+        std::fs::create_dir_all(h.join("memory/tags")).unwrap();
+        let _g = crate::api::settings::test_env::set_home(h);
+        std::fs::write(h.join("sessions/ruled.env"), "CC_TAGS=\"alpha\"\n").unwrap();
+        std::fs::write(h.join("sessions/peer.env"), "").unwrap();
+        std::fs::write(h.join("memory/_rules.md"), "GLOBALRULE").unwrap();
+        std::fs::write(h.join("memory/tags/alpha.rules.md"), "GROUPRULE").unwrap();
+        std::fs::write(h.join("memory/ruled.rules.md"), "WORKERRULE").unwrap();
+        std::fs::write(h.join("memory/peer.rules.md"), "PEERRULE").unwrap();
+
+        let doc = super::compose_memory_doc("ruled", "GLOBALTEXT", "WORKERTEXT");
+        assert!(doc.contains("WORKERTEXT"), "premise: the memory doc composed: {doc}");
+        assert!(!doc.contains("RULE"), "rules must not ride in the shared per-directory doc: {doc}");
+
+        let read = |args: &[String]| {
+            assert_eq!(args[0], "--append-system-prompt-file", "{args:?}");
+            std::fs::read_to_string(&args[1]).unwrap()
+        };
+        let mine = read(&super::worker_rules_args("ruled", "claude", false));
+        for r in ["GLOBALRULE", "GROUPRULE", "WORKERRULE"] {
+            assert!(mine.contains(r), "{r} missing from ruled's launch: {mine}");
+        }
+        assert!(!mine.contains("PEERRULE"), "{mine}");
+        let peer = read(&super::worker_rules_args("peer", "claude", false));
+        assert!(peer.contains("GLOBALRULE") && peer.contains("PEERRULE"), "{peer}");
+        assert!(!peer.contains("GROUPRULE") && !peer.contains("WORKERRULE"),
+            "a neighbour's group and worker rules leaked into peer: {peer}");
+
+        let codex = super::worker_rules_args("ruled", "codex", false);
+        assert_eq!(codex[0], "-c");
+        assert!(codex[1].starts_with("developer_instructions=\"") && codex[1].contains("GROUPRULE"), "{codex:?}");
+        assert!(super::worker_rules_args("ruled", "claude", true).is_empty(), "isolated gets nothing");
+        assert!(super::worker_rules_args("ruled", "gemini", false).is_empty());
+
+        // Removing the rules removes the launch argument and the stale file.
+        for f in ["_rules.md", "tags/alpha.rules.md", "ruled.rules.md"] {
+            std::fs::remove_file(h.join("memory").join(f)).unwrap();
+        }
+        assert!(super::worker_rules_args("ruled", "claude", false).is_empty());
+        assert!(!super::worker_rules_file("ruled").exists());
     }
 }
 

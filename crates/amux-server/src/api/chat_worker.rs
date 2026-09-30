@@ -1023,7 +1023,21 @@ async fn execute(
             &[("chat_conversation_id", json!(conv)), ("cc_conversation_id", json!(conv))],
         );
     }
-    let args = turn_args(provider, &flags, &cc_model, &conv, fresh);
+    let mut args = turn_args(provider, &flags, &cc_model, &conv, fresh);
+    // Binding rules, composed at every turn (AH-233). A Chat tab is part of its
+    // worker, so it runs under the worker's rules.
+    {
+        let owner = companion_parent(name).unwrap_or(name);
+        let isolated =
+            super::session_verbs::env_flag_on(super::session_verbs::parse_env(owner).get("CC_ISOLATED"));
+        let rules = super::session_verbs::worker_rules_args(owner, provider, isolated);
+        if provider == "codex" {
+            // `-c` is an `exec` option: it must precede `resume <id> -`.
+            args.splice(1..1, rules);
+        } else {
+            args.extend(rules);
+        }
+    }
     let prelude = match companion_parent(name) {
         // The Chat tab runs with its worker's scope settings (credentials,
         // env) but under its own identity, so an `amux send` it makes is

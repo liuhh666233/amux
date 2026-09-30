@@ -1042,19 +1042,25 @@ async fn scope_write(
     )
     .await;
 
-    j(
-        200,
-        json!({
-            "ok": true,
-            "level": level,
-            "name": name,
-            "capability": key,
-            "set_here": set_here,
-            "value": after_value,
-            "actor": if actor.is_empty() { "human" } else { actor },
-            "why_allowed": why,
-        }),
-    )
+    let mut body = json!({
+        "ok": true,
+        "level": level,
+        "name": name,
+        "capability": key,
+        "set_here": set_here,
+        "value": after_value,
+        "actor": if actor.is_empty() { "human" } else { actor },
+        "why_allowed": why,
+    });
+    // A saved rule is not yet an applied one (AH-233): rules are composed into
+    // each worker's launch, so a running worker keeps the rules it started
+    // with. Say who this reaches and when, rather than a bare ok.
+    if key == "rules" {
+        let reached = crate::api::session_verbs::workers_in_scope(level, name);
+        body["takes_effect"] = json!("at each affected worker's next start (restart a running worker to apply now)");
+        body["affected_workers"] = json!(reached);
+    }
+    j(200, body)
 }
 
 // ---------------------------------------------------------------------------
