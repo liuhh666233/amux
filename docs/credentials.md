@@ -130,6 +130,17 @@ session cookie; it never puts the owner key in a link or browser storage.
 Unavailable identity checks leave ordinary token sign-in available and log
 `tailnet_owner_unmeasured`; completed checks log `tailnet_owner_checked`.
 
+`AMUX_TAILNET_MEMBER_AUTH=1` lets an invited org member sign in by Tailscale login
+alone (AC-439). When a tailnet request carries no member cookie and no owner
+credential, the server asks the local Tailscale daemon who owns the connecting
+device; if that login equals an accepted member's email, the request runs as
+`member:<email>` with that member's scope. Tagged, expired and the server
+owner's own devices never qualify. No cookie is minted: the daemon's answer is
+cached per address for 60 seconds, so removing someone from the tailnet revokes
+them within a minute, and deleting the member revokes them at once. Logs
+`tailnet_member_auth` with `outcome` = `matched`, `unmatched`, `no_person` or
+`whois_failed`. Disabled when unset.
+
 `AMUX_IOS_WEBDRIVER_PORT` selects the local Appium driver for real Simulator input.
 The maintained helper defaults to loopback port 18102. `AMUX_IOS_NATIVE_URL` and
 `AMUX_IOS_NATIVE_UDID` are optional test-runner overrides for an already running
