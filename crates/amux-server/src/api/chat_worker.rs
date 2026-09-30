@@ -753,13 +753,20 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
     update_meta(name, &[("last_send", json!(crate::config::now_f64() as i64))]);
 
     let mut out = execute(state, name, &provider, &q.text, lane, &turn_id, false).await;
-    // A resume id the provider no longer has (conversation deleted, new
-    // machine): start a fresh conversation once rather than failing forever.
+    // A resume id the provider no longer has, or a conversation stuck in a
+    // state the headless adapter cannot satisfy (deferred tool, stale marker):
+    // start a fresh conversation once rather than failing forever.
+    let unresumable = |e: &str| {
+        e.contains("No conversation found")
+            || e.contains("not found")
+            || e.contains("deferred tool marker")
+            || e.contains("no stdin data received")
+    };
     if out
         .asm
         .error
         .as_deref()
-        .is_some_and(|e| e.contains("No conversation found") || e.contains("not found"))
+        .is_some_and(unresumable)
         && out.asm.text.is_empty()
         && !lane.interrupt.load(Ordering::SeqCst)
     {
