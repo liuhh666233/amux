@@ -9033,6 +9033,24 @@ fn any_non_zombie(stat_output: &str) -> bool {
     stat_output.split_whitespace().any(|s| !s.starts_with('Z'))
 }
 
+/// The conversation id of the Claude process running in `name`'s pane, read
+/// from `~/.claude/sessions/<pid>.json`, which Claude Code writes for every
+/// live process. None when no pane, no child, or no such file.
+async fn live_claude_conversation(name: &str) -> Option<String> {
+    let out = tmux(&["list-panes", "-t", &st(name), "-F", "#{pane_pid}"]).await?;
+    let pane = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+    let kids = run_cmd("pgrep", &["-P", &pane], OP_TIMEOUT).await?;
+    String::from_utf8_lossy(&kids.stdout)
+        .split_whitespace()
+        .find_map(|pid| claude_session_file_id(&claude_home().join("sessions").join(format!("{pid}.json"))))
+}
+
+/// `sessionId` from one Claude Code process file.
+fn claude_session_file_id(path: &std::path::Path) -> Option<String> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    v["sessionId"].as_str().map(str::to_string).filter(|s| !s.is_empty())
+}
+
 async fn pane_has_live_child(name: &str) -> Option<bool> {
     let stq = st(name);
     let out = tmux(&["list-panes", "-t", &stq, "-F", "#{pane_pid}"]).await?;
@@ -31267,6 +31285,27 @@ async fn config_patch_with_liveness(
     // Explicit boolean rather than a toggle, so the UI switch is idempotent.
     if let Some(iv) = body.get("isolated") {
         let on = py_truthy(iv);
+        // KEEP THE CONVERSATION (2026-09-30). An isolated worker is a raw CLI,
+        // so amux never recorded which conversation it was on. Turning
+        // isolation off and restarting then minted a NEW conversation:
+        // mixpeek-override lost its 12 MB orchestration history that way, and
+        // the owner's answers landed in a conversation that had never seen the
+        // questions. Read the live process's conversation now, while it runs.
+        let mut conversation: Option<String> = None;
+        if !on && env_flag_on(cfg.get("CC_ISOLATED")) {
+            let mut meta = load_meta(name);
+            conversation = Some(meta_str(&meta, "cc_conversation_id")).filter(|c| !c.is_empty());
+            if let Some(live) = live_claude_conversation(name).await {
+                if conversation.as_deref() != Some(live.as_str()) {
+                    meta.insert("cc_conversation_id".into(), json!(live));
+                    save_meta(name, &meta);
+                }
+                conversation = Some(live);
+            }
+            tracing::info!(session = %name, conversation = ?conversation, measured = true, n_considered = 1,
+                verdict = if conversation.is_some() { "isolation_off_conversation_kept" } else { "isolation_off_conversation_unknown" },
+                "isolation off: the next start resumes this conversation, or starts a new one when none is known");
+        }
         cfg.set("CC_ISOLATED", if on { "1" } else { "" });
         if let Err(e) = cfg.write(&f) {
             return jresp(
@@ -31285,10 +31324,13 @@ async fn config_patch_with_liveness(
             "ok": true,
             "isolated": on,
             "rosters_refreshed": refreshed,
+            "conversation": conversation,
             "message": if on {
-                "isolated on (raw agent, no amux harness); restart the worker to apply"
+                "isolated on (raw agent, no amux harness); restart the worker to apply".to_string()
+            } else if let Some(c) = &conversation {
+                format!("isolated off; restart the worker to apply (it resumes conversation {c})")
             } else {
-                "isolated off; restart the worker to apply"
+                "isolated off; restart the worker to apply. No running conversation was found, so the restart starts a new one".to_string()
             },
         }));
     }
@@ -48983,6 +49025,20 @@ mod commit_shape_tests {
         }
         assert!(super::worker_rules_args("ruled", "claude", false).is_empty());
         assert!(!super::worker_rules_file("ruled").exists());
+    }
+}
+
+#[cfg(test)]
+mod claude_session_file_tests {
+    #[test]
+    fn reads_the_session_id_claude_code_writes_per_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("22815.json");
+        std::fs::write(&f, r#"{"pid":22815,"sessionId":"87563aa7-925f-4815-9c1d-09930a48ab7b","cwd":"/tmp","kind":"interactive"}"#).unwrap();
+        assert_eq!(super::claude_session_file_id(&f).as_deref(), Some("87563aa7-925f-4815-9c1d-09930a48ab7b"));
+        std::fs::write(&f, r#"{"pid":1,"sessionId":""}"#).unwrap();
+        assert_eq!(super::claude_session_file_id(&f), None);
+        assert_eq!(super::claude_session_file_id(&dir.path().join("missing.json")), None);
     }
 }
 
