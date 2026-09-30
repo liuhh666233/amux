@@ -608,6 +608,26 @@ impl EnvFile {
         std::fs::rename(&tmp, path)
     }
 
+    /// A value as it must appear in a file bash sources and both env parsers
+    /// read (2026-09-30). Unquoted, `CC_DESC=Orchestrator for goal spec 12`
+    /// ran `for` as a command when `amux start` sourced the worker file: the
+    /// scope writer used to write every value bare, and rewriting a worker's
+    /// file stripped the quotes Self::write had put there. Plain values stay
+    /// bare; anything else is single-quoted, which bash, Self::load and
+    /// crate::config::parse_env_file all read literally; a value containing a
+    /// single quote falls back to Self::write's escaped double quotes.
+    fn plain_quote(value: &str) -> String {
+        if !value.is_empty()
+            && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./:,@+=%".contains(&b))
+        {
+            value.to_string()
+        } else if !value.contains('\'') {
+            format!("'{value}'")
+        } else {
+            format!("\"{}\"", Self::env_quote(value))
+        }
+    }
+
     /// Merge key deltas into the legacy unquoted `KEY=value` representation.
     /// Scope configuration historically writes this shape, while worker env
     /// files use [`Self::write`]'s quoted/header form. Both paths share the
@@ -619,8 +639,11 @@ impl EnvFile {
         updates: &[(String, Option<String>)],
     ) -> std::io::Result<()> {
         let _guard = env_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Read with the worker-file parser: it un-escapes the double-quoted
+        // values Self::write produces, which crate::config::parse_env_file
+        // does not, so a round trip here cannot grow backslashes.
         let mut current: std::collections::BTreeMap<String, String> =
-            crate::config::parse_env_file(path).into_iter().collect();
+            Self::load(path).pairs.into_iter().collect();
         for (key, value) in updates {
             match value {
                 Some(value) => {
@@ -633,7 +656,7 @@ impl EnvFile {
         }
         let text: String = current
             .iter()
-            .map(|(key, value)| format!("{key}={value}\n"))
+            .map(|(key, value)| format!("{key}={}\n", Self::plain_quote(value)))
             .collect();
         use std::io::Write as _;
         if let Some(dir) = path.parent() {
@@ -48960,6 +48983,35 @@ mod commit_shape_tests {
         }
         assert!(super::worker_rules_args("ruled", "claude", false).is_empty());
         assert!(!super::worker_rules_file("ruled").exists());
+    }
+}
+
+#[cfg(test)]
+mod merge_plain_quoting_tests {
+    use super::EnvFile;
+
+    #[test]
+    fn a_scope_merge_keeps_a_worker_file_sourceable_and_round_trips_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("w.env");
+        // The shape Self::write leaves: quoted, one value escaped.
+        std::fs::write(&f, "# updated: x\nCC_DESC=\"Orchestrator for goal spec 12 (unified)\"\nCC_FLAGS=\"--model m --x\"\nCC_NOTE=\"costs \\$5\"\n").unwrap();
+        EnvFile::merge_plain(&f, &[("CC_AUTO_PICKUP".into(), Some("0".into())), ("CC_Q".into(), Some("it's".into()))]).unwrap();
+        let text = std::fs::read_to_string(&f).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-c").arg(format!("set -e; source {}; printf '%s|%s|%s|%s|%s' \"$CC_DESC\" \"$CC_FLAGS\" \"$CC_NOTE\" \"$CC_AUTO_PICKUP\" \"$CC_Q\"", f.display()))
+            .output().unwrap();
+        assert!(out.status.success(), "bash could not source it: {}\n{text}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout),
+            "Orchestrator for goal spec 12 (unified)|--model m --x|costs $5|0|it's", "{text}");
+        let env = EnvFile::load(&f);
+        assert_eq!(env.get("CC_NOTE"), Some("costs $5"), "{text}");
+        assert_eq!(env.get("CC_Q"), Some("it's"), "{text}");
+        let cfg = crate::config::parse_env_file(&f);
+        assert_eq!(cfg.get("CC_DESC").map(String::as_str), Some("Orchestrator for goal spec 12 (unified)"));
+        // A second merge changes nothing it did not name.
+        EnvFile::merge_plain(&f, &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), text);
     }
 }
 
