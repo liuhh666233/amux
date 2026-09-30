@@ -717,20 +717,20 @@ cmd_register() {
 
   # Worktree flags are amux's, not claude's: take them out before the rest is
   # parsed as claude flags (AMUX-5341). --worktree-profile implies --worktree.
-  local wt="" wt_profile="" rest=()
+  local wt="" wt_profile="" reg_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --worktree) wt=1; shift ;;
       --worktree-profile) [[ -n "${2:-}" ]] || die "--worktree-profile needs a profile name (see: amux worktree <name> profiles)"
                           wt=1; wt_profile="$2"; shift 2 ;;
       --worktree-profile=*) wt=1; wt_profile="${1#*=}"; shift ;;
-      *) rest+=("$1"); shift ;;
+      *) reg_args+=("$1"); shift ;;
     esac
   done
   if [[ -n "$wt_profile" && ! "$wt_profile" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*(,[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
     die "--worktree-profile '$wt_profile' is not a profile name (names joined by commas)"
   fi
-  set -- ${rest[@]+"${rest[@]}"}
+  set -- ${reg_args[@]+"${reg_args[@]}"}
 
   parse_claude_flags "$@"
 
