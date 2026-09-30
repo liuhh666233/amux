@@ -2272,3 +2272,24 @@ fn every_inline_handler_in_index_html_calls_a_defined_function() {
         "index.html inline handlers call functions no loaded script defines: {missing:?}"
     );
 }
+
+/// The schedule dialog's action row must be INSIDE its box. One stray `</div>`
+/// closed the box early and left Cancel/Save as a sibling of it in the
+/// overlay's row-flex, which on a phone split the screen in half: a 187px
+/// dialog and a detached button block (Ethan, 2026-09-30 screenshot). The
+/// markup still parses, so nothing else notices.
+#[test]
+fn the_schedule_dialog_keeps_its_action_row_inside_the_box() {
+    let html = asset("index.html");
+    let start = html.find("<div id=\"sched-overlay\"").expect("schedule overlay");
+    let end = start + html[start..].find("<!-- Board card \"add\" small modal -->").expect("next modal");
+    let seg = &html[start..end];
+    let opens = seg.matches("<div").count();
+    let closes = seg.matches("</div>").count();
+    assert_eq!(opens, closes, "schedule dialog divs do not balance: {opens} opens, {closes} closes");
+    // Walk the nesting: the action row must open at depth 3 (overlay > box > row).
+    let foot = seg.find("class=\"sched-modal-foot\"").expect("action row");
+    let before = &seg[..foot];
+    let depth = before.matches("<div").count() as i64 - before.matches("</div>").count() as i64;
+    assert_eq!(depth, 3, "the action row opens at depth {depth}; it must be a child of the box (3)");
+}
