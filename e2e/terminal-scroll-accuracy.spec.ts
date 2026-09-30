@@ -6,7 +6,9 @@ test.beforeEach(async ({ page }) => {
   await page.waitForFunction(() => typeof (window as any)._peekHtml === 'function');
   await page.evaluate(() => {
     eval("peekSession='scroll-worker'; _peekMsgRowsFor=peekSession; _peekMsgRows=[]; _peekMsgNavKind='all'; _peekMsgIndex=-1; _peekHistoryHTML=''; _peekEarlier={chunks:[],loadedKb:0,done:true,hidden:true,loading:false};");
-    document.getElementById('peek-overlay')!.classList.add('active');
+    { // Open it the way openPeek does: since 90bedca6 the overlay starts hidden, inert and aria-hidden.
+      const ov = document.getElementById('peek-overlay')!; ov.hidden = false; ov.inert = false;
+      ov.setAttribute('aria-hidden', 'false'); ov.classList.add('active'); }
     (window as any)._stopPeekPoll();
   });
 });

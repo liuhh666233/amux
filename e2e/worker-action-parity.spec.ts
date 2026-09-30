@@ -58,7 +58,9 @@ test('worker card and peek share all worker actions, plus both peek-only actions
     card.innerHTML = w._renderWorkerActionMenu(sample, 'card');
     w._renderPeekWorkerActions(sample);
     const peek = document.getElementById('peek-more-dropdown')!;
-    document.getElementById('peek-overlay')!.classList.add('active');
+    { // Open it the way openPeek does: since 90bedca6 the overlay starts hidden, inert and aria-hidden.
+      const ov = document.getElementById('peek-overlay')!; ov.hidden = false; ov.inert = false;
+      ov.setAttribute('aria-hidden', 'false'); ov.classList.add('active'); }
     peek.classList.add('open');
     const keys = (root: ParentNode) => Array.from(root.querySelectorAll('[data-worker-action]'))
       .map((el) => (el as HTMLElement).dataset.workerAction);
@@ -98,7 +100,9 @@ test('worker card and peek share all worker actions, plus both peek-only actions
   expect(state.card).toContain('task-queue');
   expect(state.card).toContain('copy-directory-link');
   expect(state.peek).toEqual(state.card);
-  expect(state.peekOnly).toEqual(['File browser', 'Focus mode']);
+  // 64f864c6 made the peek item toggle the split file browser, and the
+  // Chat tab's on/off moved into this menu (AMUX-5350).
+  expect(state.peekOnly).toEqual(['File browser (split)', 'Focus mode', 'Turn on chat']);
   expect(state.overflowY).toBe('auto');
   expect(state.maxHeight).not.toBe('none');
   expect(state.scrollHeight).toBeGreaterThan(state.clientHeight);
@@ -131,7 +135,6 @@ async function enterFiles(page: import('@playwright/test').Page, source: 'peek-f
 }
 
 test('peek file entries produce the exact same canonical Files route state', async ({ page }) => {
-  const fileBrowser = await enterFiles(page, 'peek-file-browser');
   const directoryPath = await enterFiles(page, 'peek-directory');
   const sharedBrowse = await enterFiles(page, 'browse-files');
 
@@ -142,7 +145,26 @@ test('peek file entries produce the exact same canonical Files route state', asy
     filesVisible: true,
     filesTabSelected: true,
   };
-  expect(fileBrowser).toEqual(expected);
-  expect(directoryPath).toEqual(fileBrowser);
-  expect(sharedBrowse).toEqual(fileBrowser);
+  expect(directoryPath).toEqual(expected);
+  expect(sharedBrowse).toEqual(directoryPath);
+});
+
+// 64f864c6: the peek menu's File browser opens the split pane beside the
+// terminal instead of leaving it. At phone width there is no room for a split,
+// so it takes the same Files route as the other two entries.
+test('the peek File browser item splits the terminal on desktop and routes to Files on a phone', async ({ page }) => {
+  await boot(page);
+  const narrow = await page.evaluate(() => window.innerWidth <= 600);
+  const before = page.url();
+  await page.evaluate((sample) => {
+    const w = window as any;
+    w._renderPeekWorkerActions(sample);
+    document.querySelector<HTMLElement>('[data-peek-action="file-browser"]')!.click();
+  }, SAMPLE);
+  if (narrow) {
+    await expect(page).toHaveURL(/#path=\/tmp\/$/);
+  } else {
+    await expect(page.locator('#peek-split-wrap')).toHaveClass(/split-active/);
+    expect(page.url()).toBe(before);
+  }
 });
