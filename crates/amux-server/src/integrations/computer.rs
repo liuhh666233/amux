@@ -987,7 +987,7 @@ pub async fn ensure_image(lim: &Limits) -> anyhow::Result<(String, bool)> {
     let t0 = std::time::Instant::now();
     let o = run(
         &bin,
-        &["build", "-t", &tag, "-"],
+        &["build", "--tag", &tag, "-"],
         Some(&recipe),
         Duration::from_secs(1800),
     )

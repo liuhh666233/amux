@@ -725,7 +725,7 @@ pub(crate) async fn companion_prompt(state: &AppState, worker: &str, fresh: bool
         a
     };
     let run = |a: Vec<String>| async move {
-        tokio::time::timeout(std::time::Duration::from_secs(5), tokio::process::Command::new("git").args(&a).output())
+        tokio::time::timeout(std::time::Duration::from_secs(5), tokio::process::Command::new("git").args(&a).kill_on_drop(true).output())
             .await
             .ok()
             .and_then(|r| r.ok())

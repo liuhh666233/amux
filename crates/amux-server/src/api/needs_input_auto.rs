@@ -370,11 +370,6 @@ pub fn never_reason(item: &Value) -> Option<&'static str> {
     None
 }
 
-/// Kept for callers and tests: true when an ask can never be auto-approved.
-pub fn is_credential_or_access(item: &Value) -> bool {
-    never_reason(item).is_some()
-}
-
 /// Parse one number starting at byte `i` of `b` (digits, `,` thousands groups,
 /// one `.`, optional `k` suffix). Returns (value, end).
 fn number_at(b: &[u8], mut i: usize) -> Option<(f64, usize)> {

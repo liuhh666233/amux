@@ -143,6 +143,7 @@ pub const NATIVE_FAMILIES: &[(&str, &str)] = &[
     ("/api/email", "email send/read (gmail api)"),
     ("/api/cal-events", "calendar events CRUD"),
     ("/api/browser", "full browser family: launch/profiles + CDP driver verbs (screenshot/state/action/inspect/navigate/search) against the server-machine Chrome, with durable redacted history in session_events; /agent answers 501 — the session's model drives the native verbs (api/browser.rs, AMUX-2598)"),
+    ("/api/computer", "CUA computer-use sandboxes: start/stop/status/screenshot/action per lane, rung 3 of the access ladder (api/computer.rs, AMUX-5300)"),
     ("/api/files", "modern files API (raw-body upload, rooted)"),
     ("/api/file", "file VIEWER: payload + raw range streaming + vtt + prepare/transcode with durable media jobs (api/file_viewer.rs)"),
     ("/api/library", "ebook library index — calibre metadata.db / opf scan (api/file_viewer.rs)"),

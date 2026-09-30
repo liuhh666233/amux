@@ -1204,6 +1204,7 @@ pub const TIMESTAMP_COLUMNS: &[(&str, &str, bool)] = &[
     ("task_attempts", "ended_at", false),
     ("task_attempts", "started_at", false),
     ("token_ledger", "ts", false),
+    ("skill_usage", "ts", false), // transcript timestamps, stored as unix seconds (AMUX-5340)
     ("trace_archive", "archived_at", false), // measured 2026-09-27: 1790517771..1790535244 over 5405 rows
     ("waitlist", "ts", false), // UNVERIFIED: no rows yet; seconds is the convention every sibling follows
 ];

@@ -5240,6 +5240,11 @@ async fn overwriting_a_trigger_records_the_value_it_destroyed() {
 #[tokio::test]
 async fn parking_with_a_trigger_records_time_and_prevents_immediate_redrain() {
     use amux_server::runtime_jobs::board_drive::{select_pickup_with, Pickup};
+    // The control below needs backlog drain ON. Unset, the switch resolves
+    // through the real ~/.amux scope files, so this passed on a box whose
+    // global scope turns it on and failed in CI, which has none. The process
+    // value wins over every scope, and every other test here passes with it on.
+    std::env::set_var("AMUX_DISPATCH_BACKLOG_WHEN_IDLE", "1");
     let (app, store, _dir) = app_with_store();
     let lane = "trigger-repair-fixture";
     let (_, _, card) = send_with(

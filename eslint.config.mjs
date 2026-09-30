@@ -31,6 +31,7 @@ const vendorGlobals = {
   Papa: 'readonly',          // papaparse
   marked: 'readonly',        // marked
   DOMPurify: 'readonly',     // dompurify
+  remend: 'readonly',        // remend, in the same vendor/md.js bundle (scripts/build-md.mjs)
   Sortable: 'readonly',      // sortablejs
   Quill: 'readonly',         // quill
   QuillMarkdown: 'readonly', // quilljs-markdown

@@ -68,10 +68,14 @@ pub fn spawn() {
         let mut t = tokio::time::interval(interval);
         loop {
             t.tick().await;
-            crate::runtime_jobs::registry::tick(
-                crate::runtime_jobs::registry::ids::COMPUTER_REAPER,
-            );
+            // Bracketed, so a slow docker pass reads as `slow`, never `stalled`.
+            // A None (no Docker on this host, or its daemon down) is a finished
+            // pass with nothing measured, so it ends the tick too; only a pass
+            // that never returns leaves it open.
+            let id = crate::runtime_jobs::registry::ids::COMPUTER_REAPER;
+            crate::runtime_jobs::registry::tick_start(id);
             let _ = tick().await;
+            crate::runtime_jobs::registry::tick_end(id);
         }
     });
     crate::runtime_jobs::registry::adopt(

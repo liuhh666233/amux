@@ -3137,6 +3137,8 @@ pub const SESSION_SCOPED_FIELDS: &[(&str, RenameDisposition)] = &[
     ("share_tokens", RenameDisposition::Migrate),
     ("cmd_history", RenameDisposition::Migrate),
     ("token_ledger", RenameDisposition::Migrate),
+    // Skill invocations are counted per lane on the Skills page; they follow it.
+    ("skill_usage", RenameDisposition::Migrate),
     ("tasks", RenameDisposition::Migrate),
     ("task_windows", RenameDisposition::Migrate),
     ("telegram_mappings", RenameDisposition::Migrate),
