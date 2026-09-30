@@ -139,8 +139,40 @@ Target: about 4 hours of our time, most of it waiting on the provider.
 - ACLs: both sides may reach this machine on screen sharing (5900), SSH (22)
   and amux (8824). Nothing else on our tailnet is reachable for them.
 - Turn on Tailscale SSH so shell access is also tied to a tailnet identity.
-- Once Tailscale works, close the public screen-sharing and SSH ports in the
-  provider firewall. After that the machine is reachable only over the tailnet.
+- Once Tailscale works, close public screen sharing (5900) and amux (8824) with
+  the macOS firewall (`pf`). Leave public SSH open for break-glass access, locked
+  down as described below.
+
+### Break-glass access: SSH outside amux and Tailscale
+
+We need a way in that does not depend on amux or Tailscale, for when either
+one is the thing that is broken.
+
+**Confirmed available, 2026-09-30:**
+- **Scaleway** gives SSH to every Mac mini. The console's overview page shows the
+  exact SSH command and default user, and login uses an SSH key uploaded to the
+  Scaleway project. Its docs also note a login-failure block (fail2ban) that a
+  reboot clears. The console and API can also reboot the machine, open remote
+  desktop, and reinstall macOS.
+- **AWS EC2 Mac** gives SSH with an EC2 key pair, plus Systems Manager Session
+  Manager as a second shell path that needs no open port.
+
+**How we lock it down** (Scaleway documents no network firewall in front of the
+Mac, so this is done in macOS by the Ansible playbook):
+- Key-only login: `PasswordAuthentication no` and `KbdInteractiveAuthentication
+  no` in `sshd_config`.
+- Only one break-glass account (`breakglass`, an admin) may log in over public
+  SSH (`AllowUsers breakglass`). Its key lives in the amux vault, and a copy
+  goes somewhere that does not depend on amux (a password manager), so we can
+  still reach it when amux is down.
+- Optionally, `pf` allows port 22 only from our fixed addresses, if we have any.
+  Without fixed addresses, key-only login plus fail2ban is the protection.
+- Everything else, including day-to-day shell access, goes over Tailscale SSH,
+  so it is tied to a person.
+
+**If SSH itself is broken,** we fall back in this order: Scaleway console
+reboot (clears fail2ban and restarts sshd), then Scaleway remote desktop, then
+restoring from backup onto a fresh Mac.
 
 ### 4. Remote screen (15 min)
 
@@ -487,7 +519,8 @@ something that goes red the moment it stops being true.
 | ID | Promise | Where | How it is checked | Passes when |
 |---|---|---|---|---|
 | CM-1 | amux is up | Outside-in | `GET https://<mac>:8824/health` over Tailscale | 200, and `commit` equals the pinned commit for this customer |
-| CM-2 | Reachable only over Tailscale | Outside-in | Connect to ports 22, 5900 and 8824 on the Mac's PUBLIC address | All three refused or time out |
+| CM-2 | amux and screen sharing only over Tailscale | Outside-in | Connect to ports 5900 and 8824 on the Mac's PUBLIC address | Both refused or time out |
+| CM-2b | Break-glass SSH works, and only with a key | Outside-in | Over the PUBLIC address: `ssh -o BatchMode=yes breakglass@<ip> true` with the vault key, then the same with a password only (`PreferredAuthentications=password`) | Key login succeeds; password login is refused |
 | CM-3 | Remote screen works | Outside-in | Open port 5900 over Tailscale and read the greeting | Greeting starts with `RFB` |
 | CM-4 | Stays up 24/7 | Outside-in | Compare `/health` start time with the previous run | No restart outside an announced maintenance window |
 | CM-5 | People sign in by Tailscale login | Outside-in | Our probe device is an invited member; `GET /api/identity` from it | `is_local_member` true, with our probe's email (needs MP-1) |
@@ -507,7 +540,7 @@ breaks isolation is rejected before it applies, which is stronger than a probe.
 
 ### What "live" means for a customer
 
-A customer Mac counts as live when all fifteen checks have been green for 24
+A customer Mac counts as live when every check above has been green for 24
 hours in a row and the one-off drills in the dogfood checklist have passed.
 Before that the customer can use it, and the board shows which promise is not
 yet kept.
@@ -547,3 +580,5 @@ yet kept.
 - MacStadium pricing: https://macstadium.com/pricing
 - Scaleway Terraform provider: https://registry.terraform.io/providers/scaleway/scaleway/latest/docs
 - MacStadium bare metal (portal ordering): https://docs.macstadium.com/docs/bare-metal-hosts
+- Scaleway: connect to a Mac mini using SSH: https://www.scaleway.com/en/docs/apple-silicon/how-to/connect-to-mac-mini-ssh/
+- Scaleway: SSH troubleshooting (fail2ban): https://www.scaleway.com/en/docs/apple-silicon/troubleshooting/cant-connect-using-ssh/
