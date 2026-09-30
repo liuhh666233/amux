@@ -17,7 +17,9 @@ test.beforeEach(async ({ page }) => {
   await page.evaluate(() => {
     document.querySelector('.wt-overlay')?.remove();
     eval("peekSession = 'nav-probe'; _peekMsgRowsFor = peekSession; _peekMsgRows = []; _peekMsgNavKind = 'all'; _peekMsgIndex = -1;");
-    document.getElementById('peek-overlay')!.classList.add('active');
+    { // Open it the way openPeek does: since 90bedca6 the overlay starts hidden, inert and aria-hidden.
+      const ov = document.getElementById('peek-overlay')!; ov.hidden = false; ov.inert = false;
+      ov.setAttribute('aria-hidden', 'false'); ov.classList.add('active'); }
     (window as any)._stopPeekPoll();
   });
 });
@@ -342,6 +344,52 @@ test('an explicit empty navigation loads earlier output and lands on its message
   await expect.poll(() => beacons.filter(b => b.verdict === 'loaded-earlier').length).toBe(1);
   await expect.poll(() => beacons.filter(b => b.verdict === 'landed').length).toBe(1);
   await expect(page.locator('#toast')).not.toHaveClass(/visible/);
+});
+
+// AMUX-5377: peer messages delivered mid-turn exist only in conversation
+// pages, often several pages back in a tool-heavy session. Picking Workers
+// must reach them, and up from the oldest match must keep going back.
+test('the Workers filter searches earlier pages until it finds a peer message', async ({ page }) => {
+  const beacons: any[] = [];
+  await page.route('**/api/client-debug', async route => {
+    beacons.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true } });
+  });
+  let served = 0;
+  await page.route('**/api/sessions/nav-probe/log?*', route => {
+    served++;
+    // Three pages of tool output, then a page holding two peer messages, then the start.
+    const body = served <= 3 ? 'tool output page ' + served + '\n'.repeat(3)
+      : served === 4 ? '› [amux-origin: peer-a — server-verified]\n  first peer note\nassistant\n› [amux-origin: peer-b — server-verified]\n  second peer note\n'
+      : '› [amux-origin: peer-c — server-verified]\n  oldest peer note\n';
+    return route.fulfill({ status: 200, body,
+      headers: { 'Content-Type': 'text/plain', 'X-Log-Remaining': served >= 5 ? '0' : '1000', 'X-Amux-Session': 'nav-probe' } });
+  });
+  await page.evaluate(() => {
+    eval('peekSearchQuery = ""; _peekMsgNavKind = "all"; _peekEarlier = { chunks: [], loadedKb: 0, done: false, hidden: false, loading: false }; _peekHistoryHTML = ""; _lastLiveHTML = ""; lastPeekHTML = "";');
+    document.getElementById('peek-body')!.innerHTML = '';
+  });
+  await page.evaluate(() => (window as any)._peekMsgNavSelect('session'));
+  await expect.poll(() => page.locator('#peek-body .peek-prompt[data-msg-kind="session"]').count()).toBe(2);
+  expect(served).toBe(4);
+  // Stand on the oldest loaded match, then go up: it must load the next page
+  // back and land there, not wrap round to the newest.
+  await page.evaluate(() => document.querySelector('#peek-body .peek-prompt[data-msg-kind="session"]')!.classList.add('peek-msg-current'));
+  await expect(page.locator('.peek-msg-current')).toContainText('first peer note');
+  await page.getByRole('button', { name: 'Previous message', exact: true }).click();
+  await expect(page.locator('.peek-msg-current')).toContainText('oldest peer note');
+  expect(served).toBe(5);
+  expect(beacons.some(b => b.kind === 'peek-earlier-search' && b.found)).toBe(true);
+});
+
+// A Chat-tab relay of the owner's own words is the owner, not a worker.
+test('an owner relay is Human and a peer envelope is Workers', async ({ page }) => {
+  const kinds = await page.evaluate(() => {
+    const w = window as any;
+    return [w._classifyPromptKind('[amux-origin: the owner, relayed by amux-chat] hi'),
+      w._classifyPromptKind('[amux-origin: mixpeek-cicd — server-verified] fixed')];
+  });
+  expect(kinds).toEqual(['human', 'session']);
 });
 
 test('rapid worker switch and reconnect cannot cross output, draft, status, card, or earlier-log identity', async ({ page }) => {

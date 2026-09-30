@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2351,
+  "n_considered": 2352,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -1930,6 +1930,12 @@
     },
     "_peekLoadEarlier": {
       "kind": "command._peekLoadEarlier",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_peekLoadEarlierUntil": {
+      "kind": "command._peekLoadEarlierUntil",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

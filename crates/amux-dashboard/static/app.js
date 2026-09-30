@@ -16014,6 +16014,10 @@ function _peekLiveHtml(raw) {
 // heuristic: each one is a literal prefix the server writes, so matching it is
 // reading amux's own label rather than guessing at prose.
 const _NON_HUMAN_PROMPT_MARKS = [
+  // The owner's own words relayed by a worker's Chat tab (AMUX-5350) carry the
+  // same envelope with the owner named first. The owner is a person, so these
+  // are Human; checked before the generic envelope because the first match wins.
+  ['[amux-origin: the owner', 'human'],
   ['[amux-origin:', 'session'],     // a peer worker, server-verified origin
   // CLAUDE CODE'S OWN PEER ENVELOPE (Ethan, 2026-09-23, on a screenshot of a
   // peek pane: "we still have shit not working or presenting accurately"). A
@@ -17332,6 +17336,28 @@ function _peekNavBeacon(verdict, prompts, target) {
         unclassified: body.querySelectorAll('.peek-prompt-unknown').length }) }).catch(() => {});
   } catch (e) {}
 }
+// Load earlier conversation pages until `found()` or the beginning (AMUX-5377).
+// Messages delivered mid-turn (peer sends, harness notices, a relay) are never
+// redrawn as prompts in the live frame, only in the conversation pages, and in
+// a tool-heavy session one 192 KB page often holds none of them. So one page
+// was not enough to answer "where are this worker's peer messages". Bounded:
+// twelve pages is about 2 MB of conversation per request.
+const _PEEK_EARLIER_MAX_PAGES = 12;
+async function _peekLoadEarlierUntil(found) {
+  let verdict = 'none', pages = 0;
+  while (pages < _PEEK_EARLIER_MAX_PAGES) {
+    verdict = await _peekLoadEarlier({quiet: true});
+    pages++;
+    _peekReclassifyPrompts();
+    if (found() || !(verdict === 'loaded' || verdict === 'empty')) break;
+  }
+  try {
+    fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'peek-earlier-search', session: peekSession, ver: APP_VER, verdict,
+        pages, found: !!found(), filter: _peekMsgNavKind, measured: true, n_considered: pages }) }).catch(() => {});
+  } catch (e) {}
+  return verdict;
+}
 async function _peekMsgMove(direction, event) {
   if (!_peekMsgNavIsExplicit(event)) {
     const prompts = _peekMsgPrompts();
@@ -17341,8 +17367,7 @@ async function _peekMsgMove(direction, event) {
   _peekReclassifyPrompts();
   let prompts = _peekMsgPrompts();
   if (!prompts.length) {
-    const earlier = await _peekLoadEarlier({quiet: true});
-    _peekReclassifyPrompts();
+    const earlier = await _peekLoadEarlierUntil(() => _peekMsgPrompts().length > 0);
     prompts = _peekMsgPrompts();
     if (prompts.length) {
       _peekNavBeacon('loaded-earlier', prompts, null);
@@ -17359,7 +17384,20 @@ async function _peekMsgMove(direction, event) {
       return;
     }
   }
-  const selected = prompts.findIndex(p => p.classList.contains(peekSearchQuery.trim() ? 'current' : 'peek-msg-current'));
+  let selected = prompts.findIndex(p => p.classList.contains(peekSearchQuery.trim() ? 'current' : 'peek-msg-current'));
+  // UP FROM THE OLDEST LOADED MATCH GOES FURTHER BACK, not round to the newest
+  // (AMUX-5377): the conversation continues above what is loaded.
+  if (direction < 0 && selected === 0 && !peekSearchQuery.trim() && !_peekEarlier.done) {
+    const had = prompts.length;
+    await _peekLoadEarlierUntil(() => _peekMsgPrompts().length > had);
+    const grown = _peekMsgPrompts();
+    if (grown.length > had) {
+      prompts = grown;
+      document.querySelectorAll('#peek-body .peek-msg-current').forEach(p => p.classList.remove('peek-msg-current'));
+      // The previous oldest is now at index grown.length - had; step to the one above it.
+      selected = grown.length - had;
+    }
+  }
   if (selected >= 0) _peekMsgIndex = (selected + direction + prompts.length) % prompts.length;
   else {
     const g = _peekJumpGeometry(prompts[0]);
@@ -17386,6 +17424,14 @@ function _peekMsgNavSelect(kind) {
   if (!Object.hasOwn(_PEEK_SOURCE_LABELS, kind)) return;
   _peekMsgNavKind = kind;
   _peekFiltersChanged();
+  // A filter that matches nothing on screen reads its answer from earlier
+  // conversation pages instead of showing a confident 0 (AMUX-5377).
+  if (kind !== 'all' && !_peekMsgPrompts().length && !_peekEarlier.done) {
+    const session = peekSession;
+    _peekLoadEarlierUntil(() => _peekMsgPrompts().length > 0).then(() => {
+      if (peekSession === session && _peekMsgNavKind === kind) _peekFiltersChanged();
+    });
+  }
 }
 
 // ── Peek command bar ──
