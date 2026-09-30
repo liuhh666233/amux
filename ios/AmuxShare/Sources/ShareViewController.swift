@@ -86,8 +86,8 @@ final class ShareViewController: UIViewController {
         let view = ShareView(
             attachmentCount: fileURLs.count,
             sharedText: sharedText,
-            onSend: { [weak self] worker, note, progress, done in
-                self?.deliver(to: worker, note: note, progress: progress, done: done)
+            onSend: { [weak self] workers, note, progress, done in
+                self?.deliver(to: workers, note: note, progress: progress, done: done)
             },
             onCancel: { [weak self] in self?.extensionContext?.completeRequest(returningItems: nil) }
         )
@@ -112,7 +112,10 @@ final class ShareViewController: UIViewController {
     /// `progress` names the step the sheet shows while sending; `done` is
     /// called only on failure (success closes the extension), so the sheet
     /// can unlock and the user can retry.
-    private func deliver(to worker: String, note: String,
+    /// Several workers: attachments upload ONCE and the same message goes to
+    /// each in the order they were picked. A failure part-way says which
+    /// workers already have it, so a retry does not double-send silently.
+    private func deliver(to workers: [String], note: String,
                          progress: @escaping (String) -> Void,
                          done: @escaping (String?) -> Void) {
         guard let server = AmuxStore.serverURL else {
@@ -142,10 +145,23 @@ final class ShareViewController: UIViewController {
                     await MainActor.run { showFailure("Nothing to send.") }
                     return
                 }
-                progress("Delivering the message…")
-                try await AmuxClient.send(text: text, to: worker, server: server)
-                AmuxStore.lastWorker = worker
-                AmuxStore.recordShare(worker)
+                var delivered: [String] = []
+                for (i, worker) in workers.enumerated() {
+                    progress(workers.count == 1
+                             ? "Delivering the message…"
+                             : "Delivering to \(worker) (\(i + 1) of \(workers.count))…")
+                    do {
+                        try await AmuxClient.send(text: text, to: worker, server: server)
+                    } catch {
+                        let why = delivered.isEmpty
+                            ? error.localizedDescription
+                            : "Sent to \(delivered.joined(separator: ", ")); \(worker) failed: \(error.localizedDescription)"
+                        throw NSError(domain: "amux.share", code: 1, userInfo: [NSLocalizedDescriptionKey: why])
+                    }
+                    delivered.append(worker)
+                    AmuxStore.recordShare(worker)
+                }
+                AmuxStore.lastWorker = workers.first
                 await MainActor.run {
                     extensionContext?.completeRequest(returningItems: nil)
                 }

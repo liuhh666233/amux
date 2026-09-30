@@ -1,20 +1,25 @@
 import SwiftUI
 
-/// Pick a worker, add an optional note, send.
+/// Pick one or more workers, add an optional note, send.
 ///
-/// Layout (Ethan, 2026-09-29): search pinned at the top, group chips under it,
-/// the worker list, and the note in a bar pinned above the keyboard so neither
-/// the list you are searching nor the note you are typing disappears behind it.
-/// The list paints from the last cached copy at once and refreshes behind it.
+/// Layout (Ethan, 2026-09-30): search by name at the top, then Filter and Sort
+/// on one row under it, then the worker list (tap to select, several allowed),
+/// then the note in a bar at the bottom. Cancel and Send live in the navigation
+/// bar and never leave it: Send turns into a spinner while sending instead of
+/// disappearing. The search header and the note bar are pinned safe-area
+/// insets, so the keyboard pushes them up and never covers them; scrolling the
+/// list puts the keyboard away. The list paints from the last cached copy and
+/// refreshes behind it, from the server's light `view=picker` list.
 struct ShareView: View {
     let attachmentCount: Int
     let sharedText: String
-    /// worker, note, progress(step text), done(error message or nil)
-    let onSend: (String, String, @escaping (String) -> Void, @escaping (String?) -> Void) -> Void
+    /// workers, note, progress(step text), done(error message or nil)
+    let onSend: ([String], String, @escaping (String) -> Void, @escaping (String?) -> Void) -> Void
     let onCancel: () -> Void
 
     @State private var workers: [AmuxClient.Worker] = []
-    @State private var selected: String = ""
+    /// In tap order, so a multi-send goes out in the order you chose.
+    @State private var selected: [String] = []
     @State private var note: String = ""
     @State private var loadError: String?
     @State private var loading = true
@@ -24,9 +29,11 @@ struct ShareView: View {
     @State private var staleNote: String?
     @State private var filter = ""
     @State private var group: String? = nil
-    @State private var sort: SortOrder = .mostShared
+    @State private var sort: SortOrder = .recentlyShared
     @State private var sending = false
     @State private var sendStep = ""
+    @FocusState private var focused: Field?
+    enum Field { case search, note }
     /// ACTIVE ONLY, BY DEFAULT (Ethan, 2026-09-23; AMUX-5015).
     ///
     /// LIFECYCLE, NOT `running`. A send to a stopped-but-active lane queues and
@@ -34,11 +41,11 @@ struct ShareView: View {
     /// (AMUX-5006). `@State`, so it resets to active for every share.
     @State private var activeOnly = true
 
-    /// MOST SHARED IS THE DEFAULT (Ethan, 2026-09-29): the workers you share to
-    /// are a small set, and the one you want is almost always one of them.
-    /// Counted on this device from successful sends (AmuxStore.recordShare).
-    /// Activity and Name stay for the other cases.
+    /// RECENTLY SHARED IS THE DEFAULT (Ethan, 2026-09-30: "sort by last shared
+    /// should be default"), then volume. Both are counted on this device from
+    /// successful sends (AmuxStore.recordShare). Activity and Name stay.
     enum SortOrder: String, CaseIterable, Identifiable {
+        case recentlyShared = "Recently shared"
         case mostShared = "Most shared"
         case activity = "Activity"
         case name = "Name"
@@ -48,15 +55,15 @@ struct ShareView: View {
     private let counts = AmuxStore.shareCounts
     private let lastShared = AmuxStore.shareLastAt
 
-    /// Every group any worker belongs to, for the chips.
+    /// Every group any worker belongs to, for the Filter menu.
     private var groups: [String] {
         Array(Set(workers.flatMap(\.groups))).sorted {
             $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
         }
     }
 
-    /// Search matches name, task and folder: the thing you remember is often
-    /// the task text or the directory, not the lane's name.
+    /// Search matches the name first; task and folder too, because the thing
+    /// you remember is sometimes the task text or the directory.
     private var shown: [AmuxClient.Worker] {
         // SEARCHING OVERRIDES THE ACTIVE FILTER: typing a name you know and
         // being told it does not exist is worse than a longer list. The group
@@ -75,17 +82,23 @@ struct ShareView: View {
             if $0.lastActivity != $1.lastActivity { return $0.lastActivity > $1.lastActivity }
             return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+        let (count, last) = ({ (w: AmuxClient.Worker) in counts[w.name] ?? 0 },
+                             { (w: AmuxClient.Worker) in lastShared[w.name] ?? 0 })
         switch sort {
         case .name:
             return matched.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         case .activity:
             return matched.sorted(by: byActivity)
+        case .recentlyShared:
+            return matched.sorted {
+                if last($0) != last($1) { return last($0) > last($1) }
+                if count($0) != count($1) { return count($0) > count($1) }
+                return byActivity($0, $1)
+            }
         case .mostShared:
             return matched.sorted {
-                let (a, b) = (counts[$0.name] ?? 0, counts[$1.name] ?? 0)
-                if a != b { return a > b }
-                let (la, lb) = (lastShared[$0.name] ?? 0, lastShared[$1.name] ?? 0)
-                if la != lb { return la > lb }
+                if count($0) != count($1) { return count($0) > count($1) }
+                if last($0) != last($1) { return last($0) > last($1) }
                 return byActivity($0, $1)
             }
         }
@@ -125,69 +138,114 @@ struct ShareView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     list
-                        .searchable(text: $filter,
-                                    placement: .navigationBarDrawer(displayMode: .always),
-                                    prompt: "Search name, task or folder")
-                        .safeAreaInset(edge: .bottom) { noteBar }
+                        .safeAreaInset(edge: .top, spacing: 0) { header }
+                        .safeAreaInset(edge: .bottom, spacing: 0) { noteBar }
                 }
             }
             .navigationTitle("Share to amux")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 // Identifiers, not labels: a toolbar Button is matched by
-                // identifier first (see ShareSheetUITests).
+                // identifier first (see ShareSheetUITests). Both stay in the bar
+                // for the whole life of the sheet, including while sending.
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", action: onCancel)
-                        .disabled(sending)
                         .accessibilityIdentifier("cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if sending {
-                        ProgressView().accessibilityIdentifier("sending")
-                    } else {
-                        Button("Send", action: send)
-                            .disabled(selected.isEmpty || loading)
-                            .accessibilityIdentifier("send")
+                    Button(action: send) {
+                        if sending {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                Text("Sending")
+                            }
+                        } else {
+                            Text(selected.count > 1 ? "Send (\(selected.count))" : "Send").bold()
+                        }
                     }
+                    .disabled(selected.isEmpty || loading || sending)
+                    .accessibilityIdentifier(sending ? "sending" : "send")
                 }
             }
             .overlay { if sending { sendingCard } }
         }
+        .navigationViewStyle(.stack)
         .task { await load() }
+    }
+
+    /// Search by name, and Filter + Sort on one row under it.
+    private var header: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search by name", text: $filter)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .focused($focused, equals: .search)
+                    .accessibilityIdentifier("search")
+                if !filter.isEmpty {
+                    Button { filter = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(minHeight: 40)
+            .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+            HStack(spacing: 8) {
+                Menu {
+                    Picker("Group", selection: $group) {
+                        Text("All groups").tag(String?.none)
+                        ForEach(groups, id: \.self) { Text($0).tag(String?.some($0)) }
+                    }
+                    Toggle("Active workers only", isOn: $activeOnly)
+                } label: {
+                    menuLabel("line.3.horizontal.decrease.circle",
+                              group.map { "Group: \($0)" } ?? (activeOnly ? "All groups · active" : "All groups"))
+                }
+                .accessibilityIdentifier("groupFilter")
+                Menu {
+                    Picker("Sort by", selection: $sort) {
+                        ForEach(SortOrder.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                } label: {
+                    menuLabel("arrow.up.arrow.down", sort.rawValue)
+                }
+                .accessibilityIdentifier("sortOrder")
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .disabled(sending)
+    }
+
+    private func menuLabel(_ icon: String, _ text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+            Text(text).lineLimit(1)
+            Image(systemName: "chevron.down").font(.caption2)
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, minHeight: 36)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
     }
 
     private var list: some View {
         Form {
-            if groups.count > 1 {
-                Section {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            chip("All", selected: group == nil) { group = nil }
-                            ForEach(groups, id: \.self) { g in
-                                chip(g, selected: group == g) { group = (group == g ? nil : g) }
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                    .accessibilityIdentifier("groupFilter")
-                }
-            }
-            Section {
-                Picker("Sort", selection: $sort) {
-                    ForEach(SortOrder.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("sortOrder")
-                Toggle("Active workers only", isOn: $activeOnly)
-                    .accessibilityIdentifier("activeOnly")
-            }
             Section {
                 ForEach(shown) { w in
                     Button {
-                        selected = w.name
+                        toggle(w.name)
                     } label: {
-                        row(w)
+                        row(w).contentShape(Rectangle())
                     }
+                    // Plain, so the row reads as text (name primary, details
+                    // secondary) instead of every line tinted like a link.
+                    .buttonStyle(.plain)
                     // A Button's accessibility label is everything inside it
                     // concatenated, so rows need an identifier.
                     .accessibilityIdentifier("worker-\(w.name)")
@@ -211,21 +269,12 @@ struct ShareView: View {
         }
         // Scrolling the list puts the keyboard away instead of leaving the
         // rows you are scrolling to behind it.
-        .scrollDismissesKeyboard(.interactively)
+        .scrollDismissesKeyboard(.immediately)
         .disabled(sending)
     }
 
-    private func chip(_ label: String, selected on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.subheadline)
-                .padding(.horizontal, 12)
-                .frame(minHeight: 32)
-                .background(on ? Color.accentColor : Color.secondary.opacity(0.15), in: Capsule())
-                .foregroundStyle(on ? Color.white : Color.primary)
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("group-\(label)")
+    private func toggle(_ name: String) {
+        if let i = selected.firstIndex(of: name) { selected.remove(at: i) } else { selected.append(name) }
     }
 
     private func row(_ w: AmuxClient.Worker) -> some View {
@@ -264,27 +313,30 @@ struct ShareView: View {
                 }
             }
             Spacer(minLength: 8)
-            if selected == w.name {
-                Image(systemName: "checkmark")
-                    .foregroundStyle(Color.accentColor)
-            }
+            Image(systemName: selected.contains(w.name) ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(selected.contains(w.name) ? Color.accentColor : Color.secondary.opacity(0.5))
+                .font(.title3)
+                .accessibilityHidden(!selected.contains(w.name))
         }
     }
 
-    /// The note sits in a bar pinned to the bottom safe area, which rides above
-    /// the keyboard: typing a note no longer pushes the list out of sight, and
-    /// the chosen worker and Send stay in view.
+    /// The note is a bar pinned to the bottom safe area, which rides above the
+    /// keyboard: typing a note never pushes the list out of sight, and the
+    /// chosen workers stay named right above it.
     private var noteBar: some View {
         VStack(spacing: 6) {
             if !selected.isEmpty {
-                Text("To \(selected)")
+                Text("To " + selected.joined(separator: ", "))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("recipients")
             }
             TextField("Note (optional)", text: $note, axis: .vertical)
                 .lineLimit(1...4)
                 .textFieldStyle(.roundedBorder)
+                .focused($focused, equals: .note)
                 .accessibilityIdentifier("note")
         }
         .padding(.horizontal)
@@ -300,7 +352,7 @@ struct ShareView: View {
         VStack(spacing: 10) {
             ProgressView()
                 .controlSize(.large)
-            Text("Sending to \(selected)…")
+            Text(selected.count == 1 ? "Sending to \(selected[0])…" : "Sending to \(selected.count) workers…")
                 .font(.headline)
             if !sendStep.isEmpty {
                 Text(sendStep)
@@ -317,6 +369,7 @@ struct ShareView: View {
 
     private func send() {
         guard !selected.isEmpty, !sending else { return }
+        focused = nil
         sending = true
         sendStep = ""
         onSend(selected, note, { step in
@@ -382,7 +435,7 @@ struct ShareView: View {
             AmuxStore.shareWorkersCache = try? JSONEncoder().encode(found)
             // A remembered selection that has since been deleted would look
             // selected and then fail at send time.
-            if !selected.isEmpty, !found.contains(where: { $0.name == selected }) { selected = "" }
+            selected.removeAll { name in !found.contains(where: { $0.name == name }) }
             if selected.isEmpty { preselect(from: found) }
             staleNote = nil
         } catch {
@@ -398,7 +451,7 @@ struct ShareView: View {
 
     private func preselect(from list: [AmuxClient.Worker]) {
         if let last = AmuxStore.lastWorker, list.contains(where: { $0.name == last }) {
-            selected = last
+            selected = [last]
         }
     }
 }

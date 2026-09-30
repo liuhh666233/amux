@@ -3786,10 +3786,76 @@ pub(crate) async fn legacy_sessions_values(
     Ok(serde_json::from_str(&json)?)
 }
 
+/// `GET /api/sessions?view=picker`: the few fields a worker PICKER needs
+/// (the iOS share sheet), from the cheap sources only (AMUX-5386).
+///
+/// The full list costs ~3.8s to build under fleet load (tmux calls and a
+/// process scan per worker, pane previews, status evidence) and ~773 KB before
+/// gzip, and the share sheet read nine fields of it. This reads each worker's
+/// env file and meta and makes ONE `tmux list-sessions` call. `running` here
+/// means "has a live tmux session", not the full list's agent-process check:
+/// enough for a picker's dot and sort, and cheaper by a scan per worker. The
+/// same isolation and local-member filters apply as on the full list.
+async fn picker_sessions() -> String {
+    let home = amux_home();
+    let live: BTreeSet<String> = crate::api::session_verbs::run_cmd(
+        "tmux", &["list-sessions", "-F", "#{session_name}"], std::time::Duration::from_secs(3),
+    )
+    .await
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect())
+    .unwrap_or_default();
+    let mut rows: Vec<Value> = Vec::new();
+    let Ok(dir) = std::fs::read_dir(home.join("sessions")) else {
+        return "[]".to_string();
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("env") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+        let env = crate::api::session_verbs::EnvFile::load(&path);
+        // A Chat tab's companion is part of its worker, never a share target.
+        if env.get("AMUX_CHAT_COMPANION") == Some("1") {
+            continue;
+        }
+        let archived = env.get("CC_ARCHIVED") == Some("1");
+        let paused = env.get("CC_PAUSED") == Some("1");
+        let meta = crate::api::session_verbs::load_meta(&name);
+        let last_activity = meta.get("last_send").and_then(Value::as_i64).filter(|v| *v != 0)
+            .or_else(|| meta.get("last_started").and_then(Value::as_i64))
+            .unwrap_or(0);
+        let tags: Vec<String> = env.get("CC_TAGS").unwrap_or("").split(',')
+            .map(|t| t.trim().trim_matches('"').to_string()).filter(|t| !t.is_empty()).collect();
+        rows.push(json!({
+            "name": name,
+            "lifecycle": crate::api::session_verbs::lifecycle_label_with_review(archived, paused, false),
+            "archived": archived,
+            "running": live.contains(&format!("amux-{name}")),
+            "last_activity": last_activity,
+            "dir": env.get("CC_DIR").unwrap_or(""),
+            "task_name": meta.get("task_name").and_then(Value::as_str).unwrap_or(""),
+            "tags": tags,
+        }));
+    }
+    rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    tracing::debug!(n = rows.len(), live = live.len(), measured = true, n_considered = rows.len(),
+        verdict = "sessions_picker_view", "worker picker list built from env, meta and one tmux call");
+    Value::Array(rows).to_string()
+}
+
 pub async fn list_sessions_legacy(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
 ) -> Response {
+    if crate::api::fs::parse_qs(q.as_deref().unwrap_or("")).iter().any(|(k, v)| k == "view" && v == "picker") {
+        let body = picker_sessions().await;
+        let body = filter_isolated_for_peer(&body, &headers);
+        let body = filter_for_local_member(&body, &headers);
+        return ([(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response();
+    }
     // OFF THE ASYNC RUNTIME (AF-300). `legacy_sessions_array` is synchronous and
     // shells out — `tmux list-sessions`, two `tmux list-panes`, and a `pgrep`
     // PER SESSION — so awaiting it inline blocks a tokio WORKER thread, and
@@ -4336,10 +4402,18 @@ pub async fn create_session_legacy(
         let p = prompt.clone();
         tokio::spawn(async move {
             if !p.is_empty() {
-                crate::api::session_verbs::queue_boot_prompt_pub(
+                // The owner's first instruction. Queued durably before the
+                // start, so a failed start keeps it; a failed QUEUE was
+                // discarded silently until AMUX-5371 and now says so.
+                let (queued, why) = crate::api::session_verbs::queue_boot_prompt_pub(
                     &st, &n, &p,
                     crate::api::session_verbs::SendOrigin::Owner,
                 ).await;
+                if !queued {
+                    tracing::warn!(session = %n, error = %why, measured = true, n_considered = 1,
+                        verdict = "create_prompt_not_queued",
+                        "the create-time prompt was not accepted into durable delivery");
+                }
             }
             let (ok, detail) = crate::api::session_verbs::start_session(&st, &n, "", false).await;
             if ok {
@@ -4349,6 +4423,28 @@ pub async fn create_session_legacy(
                 tracing::warn!(session = %n, detail = %detail, measured = true, n_considered = 1,
                     verdict = "created_worker_autostart_failed",
                     "worker was created but could not start; it stays stopped with this reason");
+            }
+        });
+    } else if !prompt.is_empty() {
+        // NOT STARTING IS NOT A REASON TO DROP THE OWNER'S FIRST INSTRUCTION
+        // (AMUX-5371). With start:false, or where spawning is refused, the
+        // create-time prompt used to be discarded without a trace; it is held
+        // in the same durable queue and delivered at the worker's first start.
+        let st = _state.clone();
+        let n = name.clone();
+        let p = prompt.clone();
+        tokio::spawn(async move {
+            let (queued, why) = crate::api::session_verbs::queue_boot_prompt_pub(
+                &st, &n, &p, crate::api::session_verbs::SendOrigin::Owner,
+            ).await;
+            if queued {
+                tracing::info!(session = %n, measured = true, n_considered = 1,
+                    verdict = "create_prompt_held_for_start",
+                    "the create-time prompt is queued for the worker's first start");
+            } else {
+                tracing::warn!(session = %n, error = %why, measured = true, n_considered = 1,
+                    verdict = "create_prompt_not_queued",
+                    "the create-time prompt was not accepted into durable delivery");
             }
         });
     }

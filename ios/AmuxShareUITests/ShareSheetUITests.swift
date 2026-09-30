@@ -204,10 +204,14 @@ final class ShareSheetUITests: XCTestCase {
         // The header states the whole population split, so it can be checked
         // without moving anything: active + hidden must equal the fleet, and
         // hidden must be non-zero or nothing is being filtered.
-        let activeOnly = ext.switches["activeOnly"]
-        XCTAssertTrue(activeOnly.waitForExistence(timeout: 10), "no active-only toggle")
-        XCTAssertEqual(activeOnly.value as? String, "1",
-                       "active-only must default ON, and must reset to ON for each share")
+        // The active-only switch lives in the Filter menu since 2026-09-30, so
+        // its default is read from the header below, which names "paused
+        // hidden" only while it is on. The Filter and Sort menus themselves
+        // must be on the screen, on the row under search.
+        XCTAssertTrue(ext.buttons["groupFilter"].waitForExistence(timeout: 10), "no Filter menu")
+        XCTAssertTrue(ext.buttons["sortOrder"].exists, "no Sort menu")
+        XCTAssertTrue(ext.buttons["sortOrder"].label.contains("Recently shared"),
+                      "recently shared must be the default sort: '\(ext.buttons["sortOrder"].label)'")
 
         let header = ext.staticTexts["population"]
         XCTAssertTrue(header.waitForExistence(timeout: 10), "no population count in the header")
@@ -251,10 +255,14 @@ final class ShareSheetUITests: XCTestCase {
 
         // SEARCH, then SELECT. Those are the two things this screen is for and
         // both are addressable by identifier.
-        let search = ext.searchFields.firstMatch
-        XCTAssertTrue(search.waitForExistence(timeout: 5), "no search field on the worker list")
+        let search = ext.textFields["search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5), "no search field above the worker list")
         search.tap()
         search.typeText(Self.target)
+
+        // Evidence of the layout (search on top, Filter + Sort under it, list,
+        // note at the bottom), kept on a pass too.
+        attach(ext, "share-sheet-layout")
 
         let row = ext.buttons["worker-\(Self.target)"]
         XCTAssertTrue(row.waitForExistence(timeout: 10),
@@ -267,9 +275,18 @@ final class ShareSheetUITests: XCTestCase {
         // this point in the session, on `ext` and on the host app alike, while
         // queries against the list keep working. Four runs, same error, three
         // different spellings of the query.
-        XCTAssertTrue(row.images.firstMatch.waitForExistence(timeout: 5)
-                      || ext.images["checkmark"].waitForExistence(timeout: 5),
+        XCTAssertTrue(ext.staticTexts["recipients"].waitForExistence(timeout: 5),
                       "tapping '\(Self.target)' did not mark it selected")
+        // With the keyboard up (search focused), Cancel, Send and the note must
+        // all stay on screen: the keyboard may not cover any of them.
+        search.tap()
+        let screen = XCUIScreen.main.screenshot().image.size
+        for (name, el) in [("cancel", ext.buttons["cancel"]), ("send", ext.buttons["send"]), ("note", ext.textFields["note"])] {
+            XCTAssertTrue(el.waitForExistence(timeout: 5), "\(name) is gone with the keyboard up")
+            XCTAssertTrue(el.isHittable, "\(name) is covered with the keyboard up")
+            XCTAssertLessThanOrEqual(el.frame.maxY, screen.height, "\(name) is off screen")
+        }
+        attach(ext, "share-sheet-keyboard-up")
 
         // DELIVERY IS NOT ASSERTED HERE. `AmuxClientLiveTests` drives the same
         // send through the same shipping client and then reads the recipient's

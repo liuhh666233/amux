@@ -215,8 +215,13 @@ enum AmuxClient {
     /// Workers a human would plausibly share to, newest activity first.
     static func workers(server: URL) async throws -> [Worker] {
         let data = try await authedData({
-            var req = URLRequest(url: server.appendingPathComponent("api/sessions"),
-                                 timeoutInterval: 15)
+            // The light picker view (AMUX-5386): env, meta and one tmux call
+            // instead of the full ~3.8s list. An older server ignores the
+            // parameter and answers with the full list, which decodes the same.
+            var comps = URLComponents(url: server.appendingPathComponent("api/sessions"),
+                                      resolvingAgainstBaseURL: false)!
+            comps.queryItems = [URLQueryItem(name: "view", value: "picker")]
+            var req = URLRequest(url: comps.url!, timeoutInterval: 15)
             req.httpMethod = "GET"
             return req
         }, server: server)
