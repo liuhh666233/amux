@@ -1098,26 +1098,9 @@
     -webkit-touch-callout: default; cursor: text;
     touch-action: pan-y;
   }
-  /* A quiet icon on the directory row (and the focus bar), not a boxed
-     button floating over the terminal. Dim until hovered or focused. */
-  .peek-copy-btn {
-    flex: 0 0 auto; margin-left: auto;
-    min-width: 32px; min-height: 28px; border-radius: 6px; padding: 0 6px;
-    border: 0; background: transparent;
-    color: var(--dim); opacity: 0.55; font-size: 0.95rem; line-height: 1; cursor: pointer;
-    display: inline-flex; align-items: center; justify-content: center;
-    -webkit-tap-highlight-color: transparent; transition: opacity 0.15s, background 0.15s;
-  }
-  .peek-copy-btn:hover, .peek-copy-btn:focus-visible { opacity: 1; background: rgba(127,127,127,0.12); }
-  .peek-copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .peek-copy-btn.copied { opacity: 1; color: var(--green); }
-  .peek-focus-bar .peek-copy-btn { margin-left: 0; }
   /* The floating controls now hold only the subagent navigator; with it
      hidden there is nothing to float, and no box should show. */
   .peek-output-controls:not(:has(.peek-agent-nav:not([hidden]))) { display: none; }
-  @media (max-width: 600px) {
-    .peek-copy-btn { min-width: 44px; min-height: 44px; }
-  }
   .peek-agent-nav {
     position: static;
     display: flex; gap: 4px;

@@ -262,12 +262,12 @@ test('terminal chrome cannot inject navigation or slash-picker keys', async ({ p
   });
   await boot(page);
 
-  // Nothing floats over the terminal (the copy button moved to the directory
-  // row, 2026-09-30), and copying from there still sends no keys.
+  // Nothing floats over the terminal, and there is no copy button at all
+  // (Ethan, 2026-09-30: "we dont use it"). Selecting text is the copy path.
   const controls = page.locator('.peek-output-controls');
   await expect(controls.locator('button:visible')).toHaveCount(0);
   await expect(controls.locator('[onclick*="peekQuickKeys"]')).toHaveCount(0);
-  await page.locator('.peek-dir-bar #peek-copy-btn').click();
+  await expect(page.locator('.peek-copy-btn')).toHaveCount(0);
   await page.waitForTimeout(100);
   expect(keyRequests).toEqual([]);
   await expect(page.locator('#peek-cmd-input')).toHaveValue('');

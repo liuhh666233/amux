@@ -12795,7 +12795,8 @@ fn direct_draft_watches() -> &'static std::sync::Mutex<std::collections::HashSet
 /// about another worker. It is the owner's conversation, so board automation
 /// (pickups, reminders, accountability nudges) never types into it.
 pub(crate) fn is_chat_companion(name: &str) -> bool {
-    !parse_env(name).get_or("CC_COMPANION_OF", "").trim().is_empty()
+    super::chat_worker::companion_parent(name).is_some()
+        || !parse_env(name).get_or("CC_COMPANION_OF", "").trim().is_empty()
 }
 
 /// The owner's words a companion is relaying to its worker, when that is what
@@ -12805,6 +12806,10 @@ pub(crate) fn is_chat_companion(name: &str) -> bool {
 pub(crate) fn owner_relay_quote(sender: &str, target: &str) -> Option<String> {
     if sender.is_empty() {
         return None;
+    }
+    // A Chat tab is `<worker>@chat`, with its state in the chat module.
+    if let Some(worker) = super::chat_worker::companion_parent(sender) {
+        return relay_quote_from(worker, &super::chat_worker::load_meta(sender), target);
     }
     relay_quote_from(parse_env(sender).get_or("CC_COMPANION_OF", ""), &load_meta(sender), target)
 }
@@ -22448,6 +22453,16 @@ async fn dispatch(
     // ONE exception: a RETRY of a partially-completed rename addresses the
     // OLD name after its env file already moved; admit it so the convergent
     // cascade can finish the remainder (owner addendum, AMUX-2598).
+    // A worker's Chat tab (`<worker>@chat`) is not a worker; its few routes
+    // are served by the chat module (AMUX-5350 redesign, 2026-09-30).
+    if let Some(worker) = super::chat_worker::companion_parent(&name) {
+        let worker = worker.to_string();
+        let receipt = qs_get(&qs, "msg_id");
+        return super::chat_worker::companion_route(
+            &state, &worker, method == Method::POST, &action, receipt, &body,
+        )
+        .await;
+    }
     if !env_path(&name).exists() {
         // Covers BOTH spellings, or the alias would diverge from the canonical
         // path on exactly the retry this exception exists for: a partially

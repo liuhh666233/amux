@@ -31,10 +31,7 @@
 //! `verdict="chat_conversation_reset"` when a stale resume id is replaced.
 
 use super::chat_stream::{parse_cursor, Assembly, Journal, Parser, Replay};
-use super::session_verbs::{
-    emit_event, env_path, home, load_meta, meta_i64, meta_str, parse_env, sh_quote, update_meta,
-    SendOrigin,
-};
+use super::session_verbs::{emit_event, env_path, home, meta_i64, meta_str, sh_quote, SendOrigin};
 use super::worker_exec::{Dispatch, ExecutionAdapter};
 use super::AppState;
 use amux_core::worker_type::WorkerTypeId;
@@ -55,6 +52,170 @@ use tokio::sync::broadcast;
 /// The `session_events.type` every chat message is stored under.
 pub(crate) const CHAT_EVENT: &str = "chat.message";
 const SOURCE: &str = "chat-adapter";
+
+// ---------------------------------------------------------------------------
+// COMPANION LANES: a worker's Chat tab.
+//
+// Ethan, 2026-09-30, on a screenshot of `mixpeek-override-chat`: "looks like u
+// make a dedicated worker for the chat - this isn't correct." AMUX-5350 made
+// the Chat tab a whole companion worker, `<worker>-chat`, so it showed up in
+// the fleet with its own board, schedules, steering and messages, its first
+// message was captured as a board card, and every worker-facing feature needed
+// a special case to leave it out (board_drive, messages, the owner relay).
+//
+// The chat now belongs to the worker. Its lane key is `<worker>@chat`, which
+// can never be a worker name (`@` is not allowed in one, see
+// `valid_session_name`), so nothing that lists workers can see it. Its
+// settings are derived from the worker, and its state lives in
+// `chat/companions/<worker>.meta.json`, never in `sessions/`. Everything below
+// that reads `parse_env`, `load_meta` or `update_meta` goes through the local
+// versions here, which is the whole seam: the engine itself is unchanged.
+// ---------------------------------------------------------------------------
+
+/// Suffix that turns a worker name into its Chat tab's lane key.
+pub(crate) const COMPANION_SUFFIX: &str = "@chat";
+
+pub(crate) fn companion_key(worker: &str) -> String {
+    format!("{worker}{COMPANION_SUFFIX}")
+}
+
+/// The worker a lane key is the Chat tab of, or None for any other key.
+pub(crate) fn companion_parent(key: &str) -> Option<&str> {
+    key.strip_suffix(COMPANION_SUFFIX)
+        .filter(|w| super::session_verbs::valid_session_name(w))
+}
+
+fn companions_dir() -> std::path::PathBuf {
+    home().join("chat").join("companions")
+}
+
+fn companion_meta_path(worker: &str) -> std::path::PathBuf {
+    companions_dir().join(format!("{worker}.meta.json"))
+}
+
+/// A chat lane's settings. A companion's are derived from its worker: the
+/// worker's directory, Claude, and the model in the worker's
+/// `AMUX_CHAT_MODEL` scope setting (default sonnet, what AMUX-5350 created).
+fn parse_env(name: &str) -> super::session_verbs::EnvFile {
+    let Some(worker) = companion_parent(name) else {
+        return super::session_verbs::parse_env(name);
+    };
+    let parent = super::session_verbs::parse_env(worker);
+    let mut env = super::session_verbs::EnvFile::default();
+    let dir = parent.get_or("CC_DIR", "").trim().to_string();
+    if !dir.is_empty() {
+        env.set("CC_DIR", &dir);
+    }
+    let model = super::session_verbs::scoped_setting_in(&home(), worker, "AMUX_CHAT_MODEL")
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "sonnet".into());
+    env.set("CC_PROVIDER", "claude");
+    env.set("CC_FLAGS", &format!("--model {}", model.trim()));
+    env.set("CC_WORKER_TYPE", WorkerTypeId::CHAT);
+    env.set("CC_COMPANION_OF", worker);
+    env
+}
+
+/// A chat lane's meta: the worker meta, or a companion's own file.
+pub(crate) fn load_meta(name: &str) -> serde_json::Map<String, Value> {
+    let Some(worker) = companion_parent(name) else {
+        return super::session_verbs::load_meta(name);
+    };
+    std::fs::read_to_string(companion_meta_path(worker))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn update_meta(name: &str, updates: &[(&str, Value)]) {
+    let Some(worker) = companion_parent(name) else {
+        return super::session_verbs::update_meta(name, updates);
+    };
+    let mut meta = load_meta(name);
+    for (k, v) in updates {
+        meta.insert((*k).to_string(), v.clone());
+    }
+    let path = companion_meta_path(worker);
+    let _ = std::fs::create_dir_all(companions_dir());
+    let tmp = path.with_extension(format!("json.{}.tmp", ulid::Ulid::new()));
+    let body = serde_json::to_string_pretty(&Value::Object(meta)).unwrap_or_default();
+    if std::fs::write(&tmp, body).is_err() || std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!(session = %name, verdict = "chat_companion_meta_write_failed",
+            "a worker's Chat tab state could not be written");
+    }
+}
+
+/// The session routes for `<worker>@chat` (AMUX-5350 redesign). Only `send`
+/// is served: the Chat tab's composer posts there through the dashboard's
+/// normal outbox, so offline retries carry the same `msg_id` and are answered
+/// from the dedupe list instead of running the turn twice. A GET on `send`
+/// with `msg_id` is the outbox's receipt check. Anything else names the
+/// worker to use instead, since the Chat tab is not a worker.
+pub(crate) async fn companion_route(
+    state: &AppState,
+    worker: &str,
+    is_post: bool,
+    action: &str,
+    receipt_msg_id: Option<&str>,
+    body: &Value,
+) -> Response {
+    let key = companion_key(worker);
+    if !env_path(worker).exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": format!("worker '{worker}' not found")}))).into_response();
+    }
+    if action != "send" {
+        return (StatusCode::NOT_FOUND, Json(json!({
+            "error": format!("{key} is {worker}'s Chat tab, not a worker; use /api/sessions/{worker}"),
+        }))).into_response();
+    }
+    let seen: Vec<String> = load_meta(&key)
+        .get("chat_seen_msg_ids")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if !is_post {
+        let id = receipt_msg_id.unwrap_or("").trim();
+        return if !id.is_empty() && seen.iter().any(|m| m == id) {
+            (StatusCode::OK, Json(json!({"ok": true, "accepted": true, "msg_id": id}))).into_response()
+        } else {
+            (StatusCode::NOT_FOUND, Json(json!({"ok": false, "accepted": false, "msg_id": id}))).into_response()
+        };
+    }
+    let msg_id: String = body.get("msg_id").and_then(Value::as_str).unwrap_or("").trim().chars().take(64).collect();
+    if !msg_id.is_empty() && seen.contains(&msg_id) {
+        return (StatusCode::OK, Json(json!({"ok": true, "msg_id": msg_id, "message": "already delivered", "deduped": true}))).into_response();
+    }
+    let text = body.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+    if text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "empty message"}))).into_response();
+    }
+    let Dispatch::Handled((ok, message)) = ChatAdapter.deliver(state, &key, &text, SendOrigin::Owner).await else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": "chat adapter did not handle the send"}))).into_response();
+    };
+    if !ok {
+        tracing::warn!(session = %key, error = %message, verdict = "chat_companion_send_failed", "a Chat tab send was not accepted");
+        return (StatusCode::CONFLICT, Json(json!({"ok": false, "error": message, "msg_id": msg_id}))).into_response();
+    }
+    if !msg_id.is_empty() {
+        let mut keep = seen;
+        keep.push(msg_id.clone());
+        let start = keep.len().saturating_sub(64);
+        update_meta(&key, &[("chat_seen_msg_ids", json!(keep[start..]))]);
+    }
+    tracing::info!(session = %key, worker, verdict = "chat_companion_send", "Chat tab message accepted");
+    (StatusCode::OK, Json(json!({"ok": true, "msg_id": msg_id, "message": message, "submission": "accepted"}))).into_response()
+}
+
+/// Does this chat lane exist? A chat worker has an env file; a Chat tab
+/// exists whenever its worker does.
+pub(crate) fn lane_exists(name: &str) -> bool {
+    match companion_parent(name) {
+        Some(worker) => env_path(worker).exists(),
+        None => super::session_verbs::valid_session_name(name) && env_path(name).exists(),
+    }
+}
 /// A turn that has produced nothing for this long is killed and recorded as
 /// failed, so a hung provider cannot pin a worker `working` forever.
 const TURN_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
@@ -210,6 +371,11 @@ async fn report_state(state: &AppState, name: &str, st: &str, event: &str, turn:
 /// `extra` keys (tool name, model, conversation id) ride along the way a
 /// provider hook's payload would carry them.
 async fn report_state_with(state: &AppState, name: &str, st: &str, event: &str, turn: &str, extra: Value) {
+    // A Chat tab is not a worker: it has no fleet status of its own, and its
+    // live state reaches the tab through the chat stream.
+    if companion_parent(name).is_some() {
+        return;
+    }
     let meta = load_meta(name);
     let run_id = meta_str(&meta, "chat_run_id");
     if run_id.is_empty() {
@@ -255,6 +421,19 @@ impl ExecutionAdapter for ChatAdapter {
             return Dispatch::Handled((false, format!("chat worker dir {dir}: {e}")));
         }
         let provider = provider_of(name);
+        if companion_parent(name).is_some() {
+            // No launch record, no session.started event and no steering
+            // sweep: those belong to workers.
+            update_meta(
+                name,
+                &[
+                    ("chat_running", json!(true)),
+                    ("cc_cwd", json!(dir)),
+                    ("last_started", json!(crate::config::now_f64() as i64)),
+                ],
+            );
+            return Dispatch::Handled((true, "chat ready".into()));
+        }
         let run_id = match super::native_status::begin_launch(name, &provider) {
             Ok((run, _)) => run,
             Err(e) => return Dispatch::Handled((false, format!("launch record: {e}"))),
@@ -845,7 +1024,17 @@ async fn execute(
         );
     }
     let args = turn_args(provider, &flags, &cc_model, &conv, fresh);
-    let prelude = super::session_verbs::headless_turn_prelude(name, provider, &work_dir);
+    let prelude = match companion_parent(name) {
+        // The Chat tab runs with its worker's scope settings (credentials,
+        // env) but under its own identity, so an `amux send` it makes is
+        // stamped as the worker's Chat tab (see owner_relay_quote).
+        Some(worker) => format!(
+            "{}export AMUX_SESSION={key}; export AMUX_WORKER={key}; ",
+            super::session_verbs::headless_turn_prelude(worker, provider, &work_dir),
+            key = sh_quote(name)
+        ),
+        None => super::session_verbs::headless_turn_prelude(name, provider, &work_dir),
+    };
     let script = format!("{prelude}exec {} \"$@\"", sh_quote(&provider_bin(provider)));
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg("-c")
@@ -1056,12 +1245,95 @@ pub async fn recover(state: &AppState, name: &str) -> (usize, usize) {
 }
 
 /// Recover every chat worker on this server (called once at boot).
+/// Move AMUX-5350's companion WORKERS (`<worker>-chat`, CC_COMPANION_OF) to
+/// Chat-tab lanes, once, at startup: the conversation ids to the lane's meta,
+/// the chat history rows to the lane key, the queue file to the lane's name,
+/// then the old env and meta files aside to chat/companions/retired/ (moved,
+/// not deleted). Idempotent: a moved companion has no env file left to find.
+pub async fn migrate_legacy_companions(state: &AppState) -> usize {
+    let Ok(rd) = std::fs::read_dir(home().join("sessions")) else {
+        return 0;
+    };
+    let mut moved = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("env") {
+            continue;
+        }
+        let Some(old) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let worker = super::session_verbs::parse_env(&old).get_or("CC_COMPANION_OF", "").trim().to_string();
+        if worker.is_empty() || !super::session_verbs::valid_session_name(&worker) || worker == old {
+            continue;
+        }
+        let key = companion_key(&worker);
+        if !companion_meta_path(&worker).exists() {
+            let old_meta = super::session_verbs::load_meta(&old);
+            let carry: Vec<(&str, Value)> = ["chat_conversation_id", "cc_conversation_id", "chat_codex_thread", "chat_turns"]
+                .iter()
+                .filter_map(|k| old_meta.get(*k).map(|v| (*k, v.clone())))
+                .collect();
+            update_meta(&key, &carry);
+        }
+        let (o, k) = (old.clone(), key.clone());
+        let rekeyed = state.store.write(move |c| {
+            c.execute(
+                "UPDATE session_events SET session=?1 WHERE session=?2 AND type=?3",
+                rusqlite::params![k, o, CHAT_EVENT],
+            )?;
+            Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+        });
+        if let Err(error) = rekeyed {
+            tracing::warn!(session = %old, worker, %error, verdict = "chat_companion_migrate_failed",
+                "could not move a companion worker's chat history; left it in place");
+            continue;
+        }
+        let q = queue_path(&old);
+        if q.exists() {
+            let _ = std::fs::rename(&q, queue_path(&key));
+        }
+        let retired = companions_dir().join("retired");
+        let _ = std::fs::create_dir_all(&retired);
+        for suffix in ["env", "meta.json"] {
+            let from = home().join("sessions").join(format!("{old}.{suffix}"));
+            if from.exists() {
+                let _ = std::fs::rename(&from, retired.join(format!("{old}.{suffix}")));
+            }
+        }
+        moved += 1;
+        tracing::info!(old = %old, worker, lane = %key, measured = true, n_considered = 1,
+            verdict = "chat_companion_migrated",
+            "moved a companion chat worker into its worker's Chat tab; old files kept in chat/companions/retired");
+    }
+    if moved > 0 {
+        crate::api::sessions_legacy::invalidate_sessions_cache();
+    }
+    moved
+}
+
 pub async fn recover_all(state: &AppState) -> (usize, usize, usize) {
+    migrate_legacy_companions(state).await;
+    // Chat tabs recover like chat workers: an interrupted turn is recorded,
+    // a queued one resumes.
+    let (mut workers, mut interrupted, mut resumed) = (0, 0, 0);
+    if let Ok(rd) = std::fs::read_dir(companions_dir()) {
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().into_owned();
+            let Some(worker) = fname.strip_suffix(".meta.json") else { continue };
+            if !env_path(worker).exists() {
+                continue;
+            }
+            workers += 1;
+            let (i, r) = recover(state, &companion_key(worker)).await;
+            interrupted += i;
+            resumed += r;
+        }
+    }
     let dir = home().join("sessions");
     let Ok(rd) = std::fs::read_dir(&dir) else {
-        return (0, 0, 0);
+        return (workers, interrupted, resumed);
     };
-    let (mut workers, mut interrupted, mut resumed) = (0, 0, 0);
     for e in rd.flatten() {
         let p = e.path();
         if p.extension().and_then(|x| x.to_str()) != Some("env") {
@@ -1177,7 +1449,7 @@ pub(crate) async fn history_route(
     AxumPath(name): AxumPath<String>,
     RawQuery(q): RawQuery,
 ) -> Response {
-    if !super::session_verbs::valid_session_name(&name) || !env_path(&name).exists() {
+    if !lane_exists(&name) {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown worker"}))).into_response();
     }
     let limit = qs_i64(&q, "limit").unwrap_or(200).clamp(1, 1000);
@@ -1239,7 +1511,7 @@ pub(crate) async fn stream_route(
     RawQuery(q): RawQuery,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if !super::session_verbs::valid_session_name(&name) || !env_path(&name).exists() {
+    if !lane_exists(&name) {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown worker"}))).into_response();
     }
     let params = super::fs::parse_qs(q.as_deref().unwrap_or(""));
@@ -1326,7 +1598,7 @@ fn sse_event(serialized: &str) -> Event {
 /// keep the worker (and its queue). The chat equivalent of pressing Escape in
 /// a terminal worker. The partial reply is kept and marked interrupted.
 pub(crate) async fn interrupt_route(AxumPath(name): AxumPath<String>) -> Response {
-    if !super::session_verbs::valid_session_name(&name) || !env_path(&name).exists() {
+    if !lane_exists(&name) {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown worker"}))).into_response();
     }
     let (interrupted, detail) = interrupt_turn(&name);
@@ -1353,6 +1625,21 @@ fn interrupt_turn(name: &str) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_tab_key_belongs_to_its_worker_and_no_worker_can_own_it() {
+        // Ethan 2026-09-30: the Chat tab is part of the worker, not a worker.
+        // Its key must round-trip to the worker and be a name no real worker
+        // can have, or the chat and a worker could collide.
+        let key = companion_key("mixpeek-override");
+        assert_eq!(key, "mixpeek-override@chat");
+        assert_eq!(companion_parent(&key), Some("mixpeek-override"));
+        assert!(!super::super::session_verbs::valid_session_name(&key));
+        assert_eq!(companion_parent("mixpeek-override-chat"), None);
+        assert_eq!(companion_parent("mixpeek-override"), None);
+        assert_eq!(companion_parent("@chat"), None);
+        assert_eq!(companion_parent("../x@chat"), None);
+    }
 
     #[test]
     fn conversation_id_is_uuid_v4_shaped() {

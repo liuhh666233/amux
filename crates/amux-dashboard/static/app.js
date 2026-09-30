@@ -11561,11 +11561,18 @@ async function _simpleRender(gen) {
 }
 
 // CHAT TAB (AMUX-5350, Ethan 2026-09-29): off by default per worker. When on,
-// a companion chat worker (`<worker>-chat`, worker_type chat, CC_COMPANION_OF)
-// renders here with the existing chat UI and the peek composer talks to it.
-// Each of its turns gets a fresh [context] block about this worker from the
-// server (chat_worker::companion_prompt), and it directs the worker with
-// `amux send`. Built from existing primitives: a worker, env and messages.
+// this worker's own chat renders here with the existing chat UI and the peek
+// composer talks to it. Each of its turns gets a fresh [context] block about
+// this worker from the server (chat_worker::companion_prompt), and it directs
+// the worker with `amux send`.
+//
+// IT IS PART OF THE WORKER, NOT A WORKER (Ethan, 2026-09-30: "looks like u
+// make a dedicated worker for the chat - this isn't correct"). It used to be a
+// companion worker, `<worker>-chat`, listed in the fleet with its own board,
+// schedules and steering. The chat is now addressed as `<worker>@chat`, a key
+// no worker can have, and the server keeps its state under the worker
+// (chat_worker.rs, COMPANION LANES). The on switch is AMUX_CHAT_COMPANION on
+// the worker; nothing else is created.
 // The worker the peek composer writes to: this worker, or its chat companion
 // while the Chat tab shows one. Drafts are keyed on it, so text typed in the
 // Chat tab is the companion's draft and a send there clears it (it used to
@@ -11587,8 +11594,11 @@ function _peekChatTarget() {
   if (_peekTab !== 'chat' || !peekSession) return null;
   const s = sessions.find(x => x.name === peekSession);
   if (!s || !s.chat_companion) return null;
-  const c = sessions.find(x => x.name === peekSession + '-chat' && x.companion_of === peekSession);
-  return c ? c.name : null;
+  return peekSession + '@chat';
+}
+// The worker a chat key belongs to (`<worker>@chat`), or null.
+function _chatCompanionOf(name) {
+  return (typeof name === 'string' && name.endsWith('@chat')) ? name.slice(0, -5) : null;
 }
 async function _peekChatScope(name, kv) {
   const r = await fetch(API + '/api/scope', { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'application/json' }),
@@ -11598,30 +11608,15 @@ async function _peekChatScope(name, kv) {
 async function _peekChatSet(on) {
   const w = peekSession;
   if (!w) return;
-  const c = w + '-chat';
   try {
-    if (on) {
-      const existing = sessions.find(x => x.name === c);
-      if (existing && existing.companion_of !== w) { showToast('A worker named ' + c + ' already exists and is not this chat'); return; }
-      if (!existing) {
-        const src = sessions.find(x => x.name === w) || {};
-        let r = await fetch(API + '/api/sessions', { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ name: c, dir: src.dir || '', start: false }), _skipOutbox: true });
-        if (!r.ok) throw new Error('create ' + c + ': ' + (await r.text()).slice(0, 160));
-        r = await fetch(API + '/api/sessions/' + encodeURIComponent(c) + '/config', { method: 'PATCH',
-          headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ worker_type: 'chat', desc: 'Chat about ' + w + ' (its Chat tab)' }), _skipOutbox: true });
-        if (!r.ok) throw new Error('make ' + c + ' a chat worker: ' + (await r.text()).slice(0, 160));
-      }
-      await _peekChatScope(c, { CC_COMPANION_OF: w });
-    }
     await _peekChatScope(w, { AMUX_CHAT_COMPANION: on ? '1' : null });
-    // The session list is cached server-side, so the new companion can be
-    // missing from the first refresh; the tab would then keep the off panel
-    // over the composer. Refresh until the state it shows is the one just set.
+    // The session list is cached server-side, so the switch can be missing
+    // from the first refresh; the tab would then keep the off panel over the
+    // composer. Refresh until the state it shows is the one just set.
     for (let i = 0; i < 12; i++) {
       if (typeof fetchSessions === 'function') await fetchSessions();
       const s = sessions.find(x => x.name === w) || {};
-      if (on ? (!!s.chat_companion && sessions.some(x => x.name === c && x.companion_of === w)) : !s.chat_companion) break;
+      if (!!s.chat_companion === on) break;
       await new Promise(r => setTimeout(r, 1000));
     }
     showToast(on ? 'Chat is on for ' + w : 'Chat is off for ' + w + ' (its history is kept)');
@@ -11700,7 +11695,10 @@ function setPeekTab(tab) {
     else chatPanel.classList.remove('active');
   }
   if (chatTarget) _chatMount(chatTarget);
-  else if (typeof _chat !== 'undefined' && _chat.name && _chat.name !== peekSession) _chatUnmount();
+  else if (typeof _chat !== 'undefined' && _chat.name && _chat.name !== peekSession) {
+    _chatUnmount();
+    if (tab === 'terminal') refreshPeek(false);
+  }
   _peekComposerSwap();
   const bodyShown = tab === 'terminal' || !!chatTarget;
   document.getElementById('peek-terminal-panel').style.display = bodyShown ? '' : 'none';
@@ -13427,7 +13425,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1187';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1188';   // bump together with the sw.js CACHE version
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -13820,7 +13818,15 @@ function _chatUnmount() {
   _chat.es = null; _chat.name = null; _chat.messages = []; _chat.streaming = null; _chat.gen++;
   _chat.cursor = ''; _chat.stick = true; _chat.unseen = false; _chat.raf = 0; _chat.onScroll = null; _chat.live = null;
   _chat.loadedAt = 0; _chat.offlineNote = ''; _chat.pendingShown = 0;
-  if (body) body.classList.remove('peek-chat');
+  if (body && body.classList.contains('peek-chat')) {
+    // Leaving the Chat tab for Terminal: the terminal frame repaints only when
+    // it CHANGES, so an idle worker's frame matched the last one painted and
+    // the chat bubbles stayed on screen under the Terminal tab (Ethan
+    // 2026-09-30, "still"). Forget the painted frame so the next poll paints.
+    body.classList.remove('peek-chat');
+    body.innerHTML = '';
+    lastPeekHTML = ''; _lastLiveHTML = '';
+  }
 }
 
 function _chatCursorParts(c) {
@@ -14094,12 +14100,15 @@ function _chatRender(errorText) {
   const body = document.getElementById('peek-body');
   if (!body || !_chatShowing()) return;
   const s = sessions.find(x => x.name === _chat.name) || {};
+  const chatOf = _chatCompanionOf(_chat.name);
   let html = '';
   if (_chat.offlineNote) html += '<div class="chat-offline-note" role="status">' + esc(_chat.offlineNote) + '</div>';
   if (errorText) html += '<div class="chat-empty">' + esc(errorText) + '</div>';
   const pendingSends = _pendingSendsFor(_chat.name);
   if (!_chat.messages.length && !_chat.streaming && !errorText && !pendingSends.length) {
-    html += '<div class="chat-empty">' + (s.running
+    html += '<div class="chat-empty">' + (chatOf
+      ? 'Ask anything about ' + esc(chatOf) + '\u2019s work below.'
+      : s.running
       ? 'No messages yet. Say something below.'
       : 'This chat worker is stopped. Sending a message starts it.') + '</div>';
   }
@@ -14628,21 +14637,6 @@ async function _peekAgentRefresh() {
     applyPeekSearch(true,false);
     _peekAgentsLog('output-failed',{agent:selected.id,error:String(e)});
   }
-}
-
-function copyPeekContent() {
-  const body = document.getElementById('peek-body');
-  if (!body) return;
-  const text = body.innerText || body.textContent || '';
-  navigator.clipboard.writeText(text).then(() => {
-    // Every copy button (directory row and focus bar) shows the tick.
-    document.querySelectorAll('.peek-copy-btn').forEach(btn => {
-      btn.innerHTML = '&#x2713;';
-      btn.classList.add('copied');
-      btn.setAttribute('aria-label', 'Copied');
-      setTimeout(() => { btn.innerHTML = '&#x2398;'; btn.classList.remove('copied'); btn.setAttribute('aria-label', 'Copy terminal output'); }, 1500);
-    });
-  }).catch(() => showToast('Copy failed'));
 }
 
 function closePeek() {
@@ -18306,7 +18300,8 @@ async function sendPeekCmd() {
   let message = text;
   if (files.length) message = [text, ...files.map(f => '@' + f.path)].filter(Boolean).join(' ');
   const atSelector = (sessions.find(s => s.name === session) || {}).status === 'waiting';
-  const queued = _sendMode === 'queue' && !atSelector;
+  // The Chat tab's chat queues turns itself and has no steering queue.
+  const queued = _sendMode === 'queue' && !atSelector && !_chatCompanionOf(session);
   if (!queued) {
     const routed = _atRoute(message);
     if (routed && routed.target !== session) {
