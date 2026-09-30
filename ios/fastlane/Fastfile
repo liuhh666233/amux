@@ -43,11 +43,36 @@ platform :ios do
 
     set_build_number
 
+    # NEVER UPLOAD A VERSION APPLE ALREADY APPROVED (2026-09-30). 1.1.0 was
+    # approved on 09-29 and every nightly after it failed at upload with
+    # "CFBundleShortVersionString [1.1.0] must contain a higher version than
+    # that of the previously approved", so no build reached TestFlight. Read the
+    # newest version in App Store Connect and, if project.yml is not above it,
+    # build the next patch and say so. project.yml stays the source of truth
+    # for the release lane; bump it there too when this fires.
+    spec = ["../project.yml", "project.yml"].find { |p| File.exist?(p) }
+    version = File.read(spec, encoding: "UTF-8")[/MARKETING_VERSION:\s*"([^"]+)"/, 1]
+    latest = begin
+      app_store_build_number(api_key: api_key, live: false)
+      lane_context[SharedValues::LATEST_VERSION]
+    rescue => e
+      UI.important("could not read the App Store Connect version (#{e.message}); building #{version} as is")
+      nil
+    end
+    if latest && Gem::Version.new(version) <= Gem::Version.new(latest)
+      parts = latest.split(".").map(&:to_i)
+      parts << 0 while parts.length < 3
+      parts[2] += 1
+      bumped = parts.join(".")
+      UI.important("verdict=ios_version_bumped project=#{version} app_store=#{latest} building=#{bumped}")
+      version = bumped
+    end
+
     build_app(
       scheme: "AmuxApp",
       configuration: "Release",
       export_method: "app-store",
-      xcargs: "-skipPackagePluginValidation -allowProvisioningUpdates"
+      xcargs: "-skipPackagePluginValidation -allowProvisioningUpdates MARKETING_VERSION=#{version}"
     )
 
     changelog = ENV["CHANGELOG"] || "Bug fixes and improvements."

@@ -9,7 +9,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: 5.9
-    MARKETING_VERSION: "1.1.0"
+    MARKETING_VERSION: "1.1.1"
     CURRENT_PROJECT_VERSION: 1
     PRODUCT_BUNDLE_IDENTIFIER: com.EthanSteininger.nextup
     DEVELOPMENT_TEAM: "M225B6YA42"
