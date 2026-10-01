@@ -3069,6 +3069,41 @@ EOF
 # 5 rev mismatch · 1 other refusal or malformed response (including a
 # continuation refusal, which --checked cannot clear). Refusals print the
 # server body to STDERR so pipelines keep clean stdout.
+# _board_move_finish <rc> <response> <id> <status>: after a status move,
+# (1) on a refusal, end with ONE line naming the refusal: the reason used to
+#     sit pages up, and `| tail -1` showed only a hint (gs12-restore and
+#     gs12-templates, 2026-10-01: "amux board doing GT-186" read as a hint);
+# (2) on success, read the card back a moment later and warn if another writer
+#     (board-drive re-asserting a lane's live claim, for one) has already
+#     changed it: "amux board todo GR-24" printed "-> todo" while the card read
+#     doing seconds later. Exit 3 then, so a script can tell.
+_board_move_finish() {
+  local rc="$1" resp="$2" id="$3" want="$4" got
+  if [ "$rc" -ne 0 ]; then
+    printf '%s' "$resp" | ID="$id" W="$want" python3 -c '
+import json, os, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    d = {}
+why = (d.get("error") or d.get("why") or "see the response above") if isinstance(d, dict) else "see the response above"
+code = d.get("code") if isinstance(d, dict) else None
+sys.stderr.write("amux board: %s was NOT moved to %s: %s%s\n" % (os.environ["ID"], os.environ["W"], str(why)[:240], " [" + str(code) + "]" if code else ""))
+' || true
+    return "$rc"
+  fi
+  case "$want" in todo|doing|done|backlog|verified|discarded|review) ;; *) return 0 ;; esac
+  sleep 1
+  got=$(_curl -sk "${AMUX_API:-$(cmd_url)}/api/board/$id" 2>/dev/null | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("status",""))
+except Exception: print("")')
+  if [ -n "$got" ] && [ "$got" != "$want" ]; then
+    echo "amux board: WARNING $id reads '$got' a second after the move to '$want': another writer changed it (board-drive re-asserts a card its lane is working on). Check: amux board show $id" >&2
+    return 3
+  fi
+  return 0
+}
+
 _board_outcome() {
   local _board_response
   _board_response="$(cat)"
@@ -3576,7 +3611,9 @@ if "ask_type" in ign or "ask_actor" in ign:
       shift
       local result
       result=$(_board_transition "$id" "$status" "$@")
-      echo "$result" | _board_outcome "$id" "$status"
+      local _rc=0
+      echo "$result" | _board_outcome "$id" "$status" || _rc=$?
+      _board_move_finish "$_rc" "$result" "$id" "$status"
       return $?
       ;;
     needs|report-blocker)
@@ -3596,13 +3633,22 @@ so the driver parks this card and resumes it when the blocker completes."
       local worker="${AMUX_WORKER:-${AMUX_SESSION:-}}"
       local api="${AMUX_API:-https://localhost:8824}"
       local created bid
+      # A structured create (tags) skips semantic intake, which otherwise read
+      # the blocker text as "the same work" as <ISSUE-ID> and FOLDED it into
+      # that card, handing back its own id, so the card was linked to itself
+      # ("circular depends_on: GG-5 -> GG-5", gs12-gates and gs12-templates,
+      # 2026-10-01). card_created is checked as well, so a fold can never be
+      # mistaken for a new card again.
       created=$(_curl -sk -X POST -H 'Content-Type: application/json' -H "X-Amux-Worker: $worker" \
-        -d "$(T="$title" S="$worker" python3 -c 'import json,os;print(json.dumps({"title":os.environ["T"],"session":os.environ["S"],"status":"todo"}))')" \
+        -d "$(T="$title" S="$worker" I="$id" python3 -c 'import json,os;print(json.dumps({"title":os.environ["T"],"session":os.environ["S"],"status":"todo","tags":["blocks:"+os.environ["I"]]}))')" \
         "$api/api/board") || die "cannot reach the board to create the blocker task"
       bid=$(printf '%s' "$created" | python3 -c 'import sys,json
-try: print((json.load(sys.stdin).get("id") or ""))
+try:
+    d=json.load(sys.stdin)
+    print(d.get("id") or "" if d.get("card_created", True) else "")
 except Exception: print("")')
-      [[ -n "$bid" ]] || die "the blocker task was not created: $created"
+      [[ -n "$bid" ]] || die "the blocker task was not created as a new card (the board answered: $(printf '%s' "$created" | head -c 300)); $id was not changed"
+      [[ "$bid" != "$id" ]] || die "the board returned $id itself for the blocker; $id was not changed. File the blocker with: amux board add \"<title>\" and then link it"
       # Append the new blocker to this card's existing depends_on (preserve them).
       local newdeps linkresp
       newdeps=$(_curl -sk "$api/api/board/$id" | B="$bid" python3 -c 'import sys,json,os
@@ -3661,7 +3707,9 @@ deps.append(b) if b not in deps else None; print(json.dumps(deps))') || die "cre
       shift 2
       local result
       result=$(_board_transition "$id" "$new_status" "$@")
-      echo "$result" | _board_outcome "$id" "$new_status"
+      local _rc=0
+      echo "$result" | _board_outcome "$id" "$new_status" || _rc=$?
+      _board_move_finish "$_rc" "$result" "$id" "$new_status"
       return $?
       ;;
     type)
@@ -6519,7 +6567,8 @@ cmd_land() {
   # lane's refusal. --no-batch keeps a lane out of batches in both roles.
   #
   # --priority queues ahead of every ordinary waiter (priority waiters keep
-  # their own arrival order) and, as the holder, pushes alone, never batching. For a push that makes every push behind it
+  # their own arrival order). A priority ticket is never batched by another
+  # holder; as the holder it batches ordinary waiters like any other. For a push that makes every push behind it
   # cheaper, e.g. a faster gate (gs12-gates, 2026-10-01). Logged; the
   # orchestrator, not each lane, should decide who uses it.
   #
@@ -6599,6 +6648,14 @@ cmd_land() {
       [ -f "$_f" ] || continue
       [ "$(sed -n 1p "$_f")" = "$me" ] && kill -0 "${_f##*/}" 2>/dev/null || continue
       _there="$(sed -n 3p "$_f")"
+      # Same checkout, no --sha: the pending land pushes this checkout's HEAD
+      # at its turn, commits made since included, so a second ticket only
+      # costs every lane behind it a slot and a no-op gate run (gs12-cicd,
+      # 2026-10-01: three --detach calls from one worktree held three slots).
+      if [ -z "$land_sha" ] && [ "$_there" = "$_here" ]; then
+        echo "amux land: already queued from this checkout (pid ${_f##*/}); it lands this checkout's HEAD at its turn, including commits made since. Not queuing another. Status: amux land --status"
+        return 0
+      fi
       [ -n "$_there" ] && [ "$_there" != "$_here" ] && echo "amux land: note: $me already has a detached land queued from $_there (pid ${_f##*/}); this one is for $_here. Cancel per checkout with: amux land --cancel (run in that checkout) or amux land --cancel <pid>." >&2
     done
     dlog="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-detached.log"
@@ -6653,6 +6710,23 @@ p.communicate(msg.encode())
   }
   local deferred_logged=""
 
+  # _land_conflicts: print the paths this land's commits conflict on against
+  # the remote tip, or nothing. A land that conflicts with origin can never
+  # land, so it says so and stops instead of waiting its turn (gs12-model,
+  # 2026-10-01: an hour at queue position 18 for a land that could not land).
+  _land_conflicts() {
+    local mine; mine="${land_sha:-$(git rev-parse HEAD)}"
+    git fetch -q "$remote" "$branch" 2>/dev/null || return 0
+    local out; out="$(git merge-tree --write-tree --name-only "$remote/$branch" "$mine" 2>/dev/null)" && return 0
+    printf '%s\n' "$out" | sed -n '2,/^$/p' | sed '/^$/d' | head -10 | tr '\n' ' '
+  }
+  local _cf
+  _cf="$(_land_conflicts)"
+  if [ -n "$_cf" ]; then
+    _land_log "conflicts with $remote/$branch on: $_cf; nothing queued. Rebase onto $remote/$branch, resolve, and land again"
+    return 2
+  fi
+
   # FIFO (gs12-compute, 2026-10-01): with only the mkdir lock, whichever waiter
   # polled first after a release won, and one waited 6030s behind later
   # arrivals. Each waiter drops a ticket named by its arrival time and pid into
@@ -6692,8 +6766,19 @@ p.communicate(msg.encode())
             _land_log "landed in a batch: ${res#landed } (--sha $(git rev-parse --short "$land_sha"))"
             return 0
           fi
-          if git fetch -q "$remote" "$branch" && ! git rebase -q "$remote/$branch" 2>/dev/null; then
-            git rebase --abort 2>/dev/null || true
+          # Bring a CLEAN checkout to the tip; a dirty one is left as it is
+          # (the lane is working in it) and told so below.
+          if [ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+            if git fetch -q "$remote" "$branch" && ! git rebase -q "$remote/$branch" 2>/dev/null; then
+              git rebase --abort 2>/dev/null || true
+            fi
+          else
+            git fetch -q "$remote" "$branch" 2>/dev/null || true
+            if [ -z "$(git log --format=%H --cherry-pick --right-only "$remote/$branch...HEAD" 2>/dev/null)" ]; then
+              rm -f -- "${q:?}/${tname:?}"
+              _land_log "landed in a batch: ${res#landed }; checkout left as is (uncommitted changes), rebase onto $remote/$branch when ready"
+              return 0
+            fi
           fi
           if [ -z "$(git rev-list "$remote/$branch..HEAD" 2>/dev/null)" ]; then
             rm -f -- "${q:?}/${tname:?}"
@@ -6703,6 +6788,15 @@ p.communicate(msg.encode())
           # Committed more while queued: the rest keeps this ticket's place.
           _land_ticket
           _land_log "a batch landed part of this checkout (${res#landed }); the rest keeps its place in the queue"
+          ;;
+        *excluded:\ its\ commits\ conflict*)
+          _cf="$(_land_conflicts)"
+          if [ -n "$_cf" ]; then
+            rm -f -- "${q:?}/${tname:?}"
+            _land_log "left out of a batch: conflicts with $remote/$branch itself on: $_cf; stopping, since it cannot land. Rebase, resolve, and land again"
+            return 2
+          fi
+          _land_log "left out of a batch ($res); conflicts only with the batch ahead, not with $remote/$branch; keeping its place"
           ;;
         *)
           # After a refused batch nobody knows whose commit was refused, so
@@ -6859,16 +6953,26 @@ p.communicate(msg.encode())
     fi
     date +%s > "$lock/since"
     git fetch -q "$remote" "$branch" || { _land_log "fetch failed (attempt $i)"; sleep 5; continue; }
-    if [ -n "$land_sha" ]; then
+    # A dirty tree cannot be rebased, and a lane often keeps working while its
+    # land waits hours (gs12-templates, 2026-10-01). Land HEAD by replay then,
+    # never touching the tree; a clean tree still rebases so HEAD is the
+    # pushed commit and the hook takes its fast path.
+    local _replay_head=""
+    if [ -z "$land_sha" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+      _replay_head="$(git rev-parse HEAD)"
+      _land_log "checkout has uncommitted changes; landing HEAD $(git rev-parse --short HEAD) by replay without touching the tree"
+    fi
+    if [ -n "$land_sha$_replay_head" ]; then
+      local land_sha_eff="${land_sha:-$_replay_head}"
       # Replay the commit's own range onto the remote tip, no checkout.
       local own_tip c tree base
       own_tip="$(git rev-parse "$remote/$branch")"
-      base="$(git merge-base "$own_tip" "$land_sha")"
-      if [ "$base" != "$land_sha" ]; then
-        for c in $(git rev-list --reverse "$base..$land_sha"); do
+      base="$(git merge-base "$own_tip" "$land_sha_eff")"
+      if [ "$base" != "$land_sha_eff" ]; then
+        for c in $(git rev-list --reverse "$base..$land_sha_eff"); do
           tree="$(git merge-tree --write-tree "$own_tip" "$c" 2>/dev/null | head -1)" || tree=""
           if [ -z "$tree" ]; then
-            _land_log "--sha $(git rev-parse --short "$land_sha") conflicts with $remote/$branch at $(git rev-parse --short "$c"); nothing pushed"
+            _land_log "$(git rev-parse --short "$land_sha_eff") conflicts with $remote/$branch at $(git rev-parse --short "$c"); nothing pushed"
             return 2
           fi
           [ "$tree" != "$(git rev-parse "$own_tip^{tree}")" ] || continue
@@ -6877,7 +6981,7 @@ p.communicate(msg.encode())
         done
       fi
       if [ "$own_tip" = "$(git rev-parse "$remote/$branch")" ]; then
-        _land_log "--sha $(git rev-parse --short "$land_sha") is already on $remote/$branch; nothing to push"
+        _land_log "$(git rev-parse --short "$land_sha_eff") is already on $remote/$branch; nothing to push"
         return 0
       fi
       stack_tip="$own_tip"; stack_in=""
@@ -6893,7 +6997,10 @@ p.communicate(msg.encode())
     # a batch carries other lanes' risk. Measured 2026-10-01: gs12-gates'
     # priority push batched three lanes at 15:05Z, a planes schema test in one
     # of them refused the batch at 15:54Z, and the priority push started over.
-    [ "$solo" = 1 ] || [ "$priority" = 1 ] || _land_stack "$stack_tip"
+    # A --priority holder batches again (mixpeek-override, MO-4077: with the
+    # faster gate a refused batch costs one short gate, not 50 minutes);
+    # priority TICKETS are still never taken into another holder's batch.
+    [ "$solo" = 1 ] || _land_stack "$stack_tip"
     lanes="$(printf '%s' "$stack_in" | awk 'NF {printf "%s%s", sep, $2; sep=", "}')"
     [ -z "$lanes" ] || _land_log "batching ${lanes} behind this push (one gate run)"
     # `|| rc=$?`, not `; rc=$?`: this CLI runs under set -e, and a rejected
@@ -6903,7 +7010,14 @@ p.communicate(msg.encode())
     # (a direct push moves the tip and forces the holder's gate to start over:
     # gtm ticks and homepage grafts did that to gs12-gates' 50-minute gate on
     # 2026-10-01). AMUX_LAND_LOCK names the lock to compare against.
-    rc=0; out="$(AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
+    # Without GH_TOKEN/GITHUB_TOKEN (mixpeek-override, MO-4077, 2026-10-01):
+    # a lane's exported App token expires within the hour, and Mixpeek's
+    # pre-push hook asked GitHub whether its CI twins are active with it, read
+    # the 401 body as the answer, and ran its slow legs in full instead of
+    # deferring them at 60s: a median hold of 23.7 min, 33 to 67 in the
+    # afternoon. gh's own stored login answers when the variables are unset,
+    # and git's credential helper already ignores them.
+    rc=0; out="$(env -u GH_TOKEN -u GITHUB_TOKEN AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
     if [ $rc -eq 0 ]; then
       if [ -n "$lanes" ]; then
         _land_tell "landed $(git rev-parse --short "$stack_tip") on $branch, batched by $me"
