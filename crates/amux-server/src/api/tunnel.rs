@@ -83,6 +83,12 @@ async fn start(State(_state): State<AppState>, body: Option<Json<Value>>) -> Res
         .and_then(|p| u16::try_from(p).ok());
     let mcp = body.as_ref().and_then(|Json(b)| b.get("mcp")).and_then(Value::as_bool).unwrap_or(false);
     let started = if mcp { tun::start_mcp().await } else { tun::start(port).await };
+    if mcp && started.is_ok() {
+        // Survive restarts: maybe_boot_start reads this (see the marker's doc).
+        if let Err(e) = std::fs::write(tun::mcp_published_marker(), b"1\n") {
+            tracing::warn!(error = %e, verdict = "tunnel_mcp_marker_unwritten", "tunnel: connector published but will not survive a restart");
+        }
+    }
     match started {
         Ok(s) => (
             StatusCode::OK,
@@ -104,6 +110,7 @@ async fn start(State(_state): State<AppState>, body: Option<Json<Value>>) -> Res
 
 async fn stop(State(_state): State<AppState>) -> Response {
     tun::stop();
+    let _ = std::fs::remove_file(tun::mcp_published_marker());
     tun::set_proxy_id(None);
     (
         StatusCode::OK,

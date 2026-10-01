@@ -207,6 +207,15 @@ pub fn mcp_path_allowed(path: &str) -> bool {
 /// the relay itself asserts. Compared lowercase.
 const RELAY_ASSERTED: &[&str] = &["x-amux-tunnel-relay", "x-amux-public-base"];
 
+/// Marker that the owner published the ChatGPT connector from the dashboard.
+/// The relay lives in this process, so without it every deploy restart took
+/// the connector offline until someone pressed Publish again (2026-09-30:
+/// ChatGPT's "Create" failed with "Couldn't create MCP app" right after a
+/// deploy). The API writes it on an MCP start and removes it on stop.
+pub fn mcp_published_marker() -> std::path::PathBuf {
+    crate::api::session_verbs::home().join("tunnel-mcp.published")
+}
+
 /// Start the relay in MCP-only mode: amux's own port, allow-listed paths.
 pub async fn start_mcp() -> Result<TunnelState, String> {
     start_mode(None, true).await
@@ -626,11 +635,15 @@ pub async fn maybe_boot_start() -> &'static str {
         return "no token";
     }
     let Some(port) = boot_target_port() else {
-        // AMUX_TUNNEL_MCP=1 publishes only the ChatGPT app surface (AMUX-5396).
-        if std::env::var("AMUX_TUNNEL_MCP").is_ok_and(|v| v.trim() == "1") {
+        // AMUX_TUNNEL_MCP=1, or the dashboard's Publish connector marker,
+        // publishes only the ChatGPT app surface (AMUX-5396).
+        let from_env = std::env::var("AMUX_TUNNEL_MCP").is_ok_and(|v| v.trim() == "1");
+        let from_marker = mcp_published_marker().exists();
+        if from_env || from_marker {
+            let source = if from_env { "AMUX_TUNNEL_MCP" } else { "published_marker" };
             return match start_mcp().await {
                 Ok(s) => {
-                    tracing::info!(url = ?s.url, "tunnel: auto-started in MCP-only mode from AMUX_TUNNEL_MCP");
+                    tracing::info!(url = ?s.url, source, "tunnel: auto-started in MCP-only mode");
                     "started mcp-only"
                 }
                 Err(e) => {
