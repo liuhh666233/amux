@@ -11,9 +11,11 @@ import SwiftUI
 /// list puts the keyboard away. The list paints from the last cached copy and
 /// refreshes behind it, from the server's light `view=picker` list.
 struct ShareView: View {
-    let attachmentCount: Int
-    let sharedText: String
-    /// workers, note, progress(step text), done(error message or nil)
+    /// What was shared. Filled in the background: the picker opens at once and
+    /// the list loads while photos or videos are still being copied (Ethan,
+    /// 2026-10-01: "make the workers load faster").
+    @ObservedObject var input: ShareInput
+    /// workers, note, progress(step text), done(nil = sent, else the error)
     let onSend: ([String], String, @escaping (String) -> Void, @escaping (String?) -> Void) -> Void
     let onCancel: () -> Void
 
@@ -31,6 +33,9 @@ struct ShareView: View {
     @State private var group: String? = nil
     @State private var sort: SortOrder = .recentlyShared
     @State private var sending = false
+    /// Sent: the card shows a check for a moment before the sheet closes, so a
+    /// fast send is still visibly a send (Ethan, 2026-10-01).
+    @State private var sent = false
     @State private var sendStep = ""
     @FocusState private var focused: Field?
     enum Field { case search, note }
@@ -350,11 +355,19 @@ struct ShareView: View {
     /// send indicate its sending").
     private var sendingCard: some View {
         VStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.large)
-            Text(selected.count == 1 ? "Sending to \(selected[0])…" : "Sending to \(selected.count) workers…")
-                .font(.headline)
-            if !sendStep.isEmpty {
+            if sent {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.green)
+                Text(selected.count == 1 ? "Sent to \(selected[0])" : "Sent to \(selected.count) workers")
+                    .font(.headline)
+            } else {
+                ProgressView()
+                    .controlSize(.large)
+                Text(selected.count == 1 ? "Sending to \(selected[0])…" : "Sending to \(selected.count) workers…")
+                    .font(.headline)
+            }
+            if !sent && !sendStep.isEmpty {
                 Text(sendStep)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -364,22 +377,26 @@ struct ShareView: View {
         .padding(24)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("sendingCard")
+        .accessibilityIdentifier(sent ? "sentCard" : "sendingCard")
     }
 
     private func send() {
         guard !selected.isEmpty, !sending else { return }
         focused = nil
         sending = true
+        sent = false
         sendStep = ""
         onSend(selected, note, { step in
             DispatchQueue.main.async { sendStep = step }
         }, { error in
-            // Success closes the extension; only a failure comes back here.
             DispatchQueue.main.async {
-                sending = false
-                sendStep = ""
-                _ = error
+                if error == nil {
+                    // Success: the controller closes the sheet a moment later.
+                    sent = true
+                } else {
+                    sending = false
+                    sendStep = ""
+                }
             }
         })
     }
@@ -398,18 +415,23 @@ struct ShareView: View {
             // COUNTED FROM `shown`, the rows actually on screen. The UI test
             // reads this label (active, running, hidden), so it must describe
             // the list, not a second filter.
+            // Running is counted over the same rows: counting the whole fleet
+            // read "13 active, 33 running", more running than shown, because
+            // paused lanes keep their tmux session alive.
             let onScreen = shown.count
-            return "\(onScreen) active, \(running) running · \(workers.count - onScreen) paused hidden"
+            let runningShown = shown.filter(\.running).count
+            return "\(onScreen) active, \(runningShown) running · \(workers.count - onScreen) paused hidden"
         }
         return "\(workers.count) workers · \(running) running"
     }
 
     private var summary: String {
         var parts: [String] = []
-        if attachmentCount > 0 {
-            parts.append("\(attachmentCount) attachment\(attachmentCount == 1 ? "" : "s")")
+        if !input.ready { return "Preparing what you shared…" }
+        if input.attachmentCount > 0 {
+            parts.append("\(input.attachmentCount) attachment\(input.attachmentCount == 1 ? "" : "s")")
         }
-        if !sharedText.isEmpty { parts.append("shared text") }
+        if !input.sharedText.isEmpty { parts.append("shared text") }
         return parts.isEmpty ? "Nothing attached" : parts.joined(separator: " + ")
     }
 

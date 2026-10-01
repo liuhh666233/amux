@@ -3887,6 +3887,11 @@ pub(crate) async fn legacy_sessions_values(
 /// means "has a live tmux session", not the full list's agent-process check:
 /// enough for a picker's dot and sort, and cheaper by a scan per worker. The
 /// same isolation and local-member filters apply as on the full list.
+/// True for a Chat tab's companion session, which the share picker hides.
+fn is_chat_companion_row(name: &str, companion_of: Option<&str>) -> bool {
+    name.ends_with("@chat") || companion_of.is_some_and(|c| !c.trim().is_empty())
+}
+
 async fn picker_sessions() -> String {
     let home = amux_home();
     let live: BTreeSet<String> = crate::api::session_verbs::run_cmd(
@@ -3908,7 +3913,11 @@ async fn picker_sessions() -> String {
         let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
         let env = crate::api::session_verbs::EnvFile::load(&path);
         // A Chat tab's companion is part of its worker, never a share target.
-        if env.get("AMUX_CHAT_COMPANION") == Some("1") {
+        // A companion is marked by CC_COMPANION_OF (or an `@chat` name).
+        // AMUX_CHAT_COMPANION=1 means the OPPOSITE: chat is turned ON for this
+        // worker. Filtering on it dropped every worker with Chat on from the
+        // iOS share list (amux and mixpeek-override among them, 2026-10-01).
+        if is_chat_companion_row(&name, env.get("CC_COMPANION_OF")) {
             continue;
         }
         let archived = env.get("CC_ARCHIVED") == Some("1");
@@ -9823,5 +9832,21 @@ mod discovery_race_tests {
         assert_eq!(retry_after_hint(&raced), Some("1"));
         assert_eq!(retry_after_hint(&busy), Some("5"));
         assert_eq!(retry_after_hint(&untyped), None);
+    }
+}
+
+#[cfg(test)]
+mod picker_companion_tests {
+    use super::is_chat_companion_row;
+
+    #[test]
+    fn chat_turned_on_keeps_the_worker_and_only_a_companion_is_hidden() {
+        // A worker with Chat on carries AMUX_CHAT_COMPANION=1 and no
+        // CC_COMPANION_OF: it stays a share target.
+        assert!(!is_chat_companion_row("amux", None));
+        assert!(!is_chat_companion_row("amux", Some("")));
+        // Its companion is hidden either way it is marked.
+        assert!(is_chat_companion_row("amux@chat", None));
+        assert!(is_chat_companion_row("amux-chat-1", Some("amux")));
     }
 }

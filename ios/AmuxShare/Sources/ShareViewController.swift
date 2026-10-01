@@ -2,18 +2,37 @@ import UIKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Share-sheet entry point: extract what was shared, show the picker, deliver.
+/// What the sheet shows about the shared items while they are still being
+/// copied in the background.
+@MainActor
+final class ShareInput: ObservableObject {
+    @Published var attachmentCount = 0
+    @Published var sharedText = ""
+    @Published var ready = false
+}
+
+/// Share-sheet entry point: show the picker at once, extract what was shared
+/// behind it, deliver.
 final class ShareViewController: UIViewController {
 
     private var fileURLs: [URL] = []
     private var sharedText: String = ""
+    private let input = ShareInput()
+    /// Copying a photo or video can take seconds. It used to run BEFORE the
+    /// picker existed, so the worker list (even the cached one) waited on it.
+    /// Send awaits this instead.
+    private var extraction: Task<Void, Never>?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         AmuxStore.migrateFromStandardIfNeeded()
-        Task {
-            await extractSharedItems()
-            presentPicker()
+        presentPicker()
+        extraction = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.extractSharedItems()
+            self.input.attachmentCount = self.fileURLs.count
+            self.input.sharedText = self.sharedText
+            self.input.ready = true
         }
     }
 
@@ -84,8 +103,7 @@ final class ShareViewController: UIViewController {
 
     private func presentPicker() {
         let view = ShareView(
-            attachmentCount: fileURLs.count,
-            sharedText: sharedText,
+            input: input,
             onSend: { [weak self] workers, note, progress, done in
                 self?.deliver(to: workers, note: note, progress: progress, done: done)
             },
@@ -124,8 +142,12 @@ final class ShareViewController: UIViewController {
             showFailure(why)
             return
         }
-        Task {
+        Task { @MainActor in
             do {
+                if !input.ready {
+                    progress("Preparing what you shared…")
+                    await extraction?.value
+                }
                 var paths: [String] = []
                 for (i, url) in fileURLs.enumerated() {
                     progress(fileURLs.count == 1
@@ -162,6 +184,10 @@ final class ShareViewController: UIViewController {
                     AmuxStore.recordShare(worker)
                 }
                 AmuxStore.lastWorker = workers.first
+                // Show "Sent" before closing: a quick send used to close the
+                // sheet before the spinner was ever visible.
+                done(nil)
+                try? await Task.sleep(nanoseconds: 900_000_000)
                 await MainActor.run {
                     extensionContext?.completeRequest(returningItems: nil)
                 }
