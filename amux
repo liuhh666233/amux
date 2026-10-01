@@ -6413,8 +6413,28 @@ ${BOLD}amux signal${RESET} — wait on, or raise, a named clearance signal
 USAGE
 }
 
+# _land_cancel: stop every detached `amux land` of this lane (whole process
+# group: the wrapper, the land, its git push and hook) and report each.
+_land_cancel() {
+  local me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" d="$HOME/.amux/locks/detached" f pid who n=0
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    pid="${f##*/}"; who="$(head -1 "$f" 2>/dev/null)"
+    [ "$who" = "$me" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      echo "amux land: cancelled detached land pid $pid (process group) for $me"
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "cancelled detached land (pid $pid)" >> "$HOME/.amux/logs/land.log"
+      n=$((n + 1))
+    fi
+    rm -f -- "${f:?}"
+  done
+  [ "$n" -gt 0 ] || echo "amux land: no detached land running for $me"
+  return 0
+}
+
 cmd_land() {
-  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>]
+  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel
   #
   # Rebase this checkout onto the remote branch and push HEAD there, holding a
   # per-repo, per-branch lock for the whole fetch -> rebase -> push loop, so
@@ -6452,7 +6472,8 @@ cmd_land() {
   # has no setsid(1); python's os.setsid does it), output goes to a log under
   # ~/.amux/logs/land/, and the lane gets a message when it lands or stops
   # (AMUX_LAND_NOTIFY=0 skips the message, for a scheduled caller that checks
-  # the result itself on its next run).
+  # the result itself on its next run). `amux land --cancel` stops every
+  # detached land of this lane, whole process group, and drops its ticket.
   # Claude Code kills a background command after 2 hours, and with the queue
   # 15 deep a lane lost its ticket that way at position 9 (gs12-templates,
   # 2026-10-01). A detached land is not the lane's child, so no limit reaches it.
@@ -6481,8 +6502,9 @@ cmd_land() {
       --batch-max) batch_max="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --detach) detach=1; shift ;;
       --sha) land_sha="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
+      --cancel) _land_cancel; return $? ;;
       -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
-      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>]" ;;
+      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | amux land --cancel" ;;
     esac
   done
   if [ -n "$land_sha" ]; then
@@ -6525,6 +6547,10 @@ with open(dlog, "ab") as out:
     rc = subprocess.call(["bash", amux, "land"] + sys.argv[1:], stdout=out, stderr=out, stdin=subprocess.DEVNULL)
 tail = [l for l in open(dlog, errors="replace").read().splitlines() if l.startswith("amux land:")][-3:]
 msg = f"amux land (detached) finished with rc {rc}:\n" + "\n".join(tail) + f"\nFull output: {dlog}"
+try:
+    os.remove(os.path.expanduser(f"~/.amux/locks/detached/{os.getpid()}"))
+except OSError:
+    pass
 if os.environ.get("AMUX_LAND_NOTIFY") == "0":
     sys.exit(0)
 p = subprocess.Popen(["bash", amux, "send", me, "--stdin"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -6532,8 +6558,13 @@ p.communicate(msg.encode())
 ' ${fwd_args[@]+"${fwd_args[@]}"} > /dev/null 2>&1 < /dev/null &
     dpid=$!
     disown "$dpid" 2>/dev/null || true
+    # The wrapper is its own session leader, so its pid is the process group
+    # of the whole land; --cancel kills that group (gs12-gates, 2026-10-01:
+    # killing the printed pid alone left the child land queued).
+    mkdir -p "$HOME/.amux/locks/detached"
+    printf '%s\n%s\n' "$me" "$dlog" > "$HOME/.amux/locks/detached/$dpid"
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "detached land started (pid $dpid, log $dlog)" >> "$log"
-    echo "amux land: detached (pid $dpid). Output: $dlog. You get a message when it lands or stops; nothing to poll."
+    echo "amux land: detached (pid $dpid). Output: $dlog. You get a message when it lands or stops; nothing to poll. Stop it with: amux land --cancel"
     return 0
   fi
   _land_log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "$*" >> "$log"; echo "amux land: $*" >&2; }
@@ -6680,6 +6711,9 @@ p.communicate(msg.encode())
     [ "$batch" = 1 ] && [ "$max" -gt 0 ] || return 0
     for tk in $(ls "$q" 2>/dev/null | sort); do
       [ "$n" -lt "$max" ] || break
+      # A --priority ticket lands alone in both roles (gs12-gates, 2026-10-01:
+      # gs12-cicd batched its priority ticket at 16:57Z).
+      case "$tk" in 000*) continue ;; esac
       kill -0 "${tk##*-}" 2>/dev/null || continue
       who=""; wsha=""; wcommon=""; wbatch=""
       { read -r who; read -r wsha; read -r wcommon; read -r wbatch; } < "$q/$tk" 2>/dev/null || true
