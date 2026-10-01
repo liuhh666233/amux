@@ -7796,3 +7796,11 @@ body.light .bd-answer-head { color: #bc4c00; }
 .bd-answer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .bd-answer-actions .btn { min-height: 44px; }
 .bd-answer-to { font-size: 0.75rem; color: var(--dim); }
+/* Worker Messages tab: Ask and Export sit in the row on wide screens and fold
+   into an ellipsis menu on a phone. */
+#peek-messages-panel .pm-more { display: none; margin-left: 0; flex: 0 0 auto; }
+@media (max-width: 600px) {
+  #peek-messages-panel .pm-wide { display: none; }
+  #peek-messages-panel .pm-more { display: block; }
+  #peek-messages-panel .pm-more summary { width: 44px; min-width: 44px; min-height: 44px; }
+}
