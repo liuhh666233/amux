@@ -16,5 +16,9 @@ cd "$(dirname "$0")/.."
 # lint can never pass against a stale picture of the SPA's global surface.
 node scripts/gen-spa-globals.mjs
 node scripts/build-state.mjs --check
+# Every async button press goes through the shared press-feedback layer, and
+# docs/ux/button-feedback-audit.md is current (AMUX-5417). Fails on a new
+# write started by pointerdown/touch, or an async control the layer cannot see.
+node scripts/button-audit.mjs --check
 
 exec ./node_modules/.bin/eslint 'crates/amux-dashboard/static/*.js'

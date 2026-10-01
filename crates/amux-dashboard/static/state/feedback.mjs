@@ -62,10 +62,51 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
       node.querySelectorAll(selectors).forEach(declare);
     }
   }).observe(document.body, {childList:true, subtree:true});
+  // PRESS CONTRACT (AMUX-5417, Ethan 2026-10-01: "audit every button press and
+  // make sure theres progress indicators/feedback"). Every press on a control
+  // whose handler reaches a request gets, from this one place:
+  //   1. busy: disabled + aria-busy + a bar on its bottom edge while running;
+  //   2. no double-fire: a press on a busy control is swallowed;
+  //   3. an outcome: a green outline, or a red one plus a toast on failure.
+  // Handlers stay plain fetch code; docs/ux/button-feedback-audit.md lists them.
+  //
+  // ARMED, not just synchronous. The synchronous `source` below only catches a
+  // request issued in the same tick as the click. A third of the command
+  // handlers await something first (a draft save, a lookup, a confirmation),
+  // and those presses got no busy state at all. A press on a command control
+  // stays armed for ARM_MS, and the first request accepted in that window binds
+  // to it. Reads never create receipts, so a background poll cannot borrow it.
+  const ARM_MS = 5000, DOUBLE_MS = 700, STUCK_MS = 30000, SPEAK_MS = 600;
+  let armed = null;
+  const outcome = new WeakMap();   // element -> {worst phase, toastAt baseline, label}
+  let lastToastAt = 0;
+  const toastEl = document.getElementById('toast');
+  if (toastEl) new MutationObserver(() => { if (toastEl.classList.contains('visible')) lastToastAt = Date.now(); })
+    .observe(toastEl, {attributes:true, attributeFilter:['class'], childList:true, characterData:true, subtree:true});
+  const isCommand = element => !!element.dataset.interactionKind && !('repeatable' in element.dataset);
+  const labelOf = element => (element.getAttribute('aria-label') || element.textContent || element.title || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  document.addEventListener('click', event => {
+    const element = event.target.closest(selectors);
+    if (!element || element.closest('#interaction-feedback') || !element.isConnected) return;
+    const busy = element.getAttribute('aria-busy') === 'true';
+    // The quick-repeat rule covers only controls this page has SEEN make a
+    // request. The static registry over-approximates (navigation that renders
+    // can reach a writer), so applying it to every declared control would eat
+    // the second tap of Next/Previous message.
+    const doubled = armed?.element === element && !armed.bound && element.dataset.commandObserved === 'true'
+      && Date.now() - armed.at < DOUBLE_MS;
+    if ((busy || doubled) && isCommand(element)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      diagnostic({verdict:'press_double_suppressed', measured:true, n_considered:1,
+        action:element.dataset.action, reason:busy ? 'busy' : 'within_' + DOUBLE_MS + 'ms'});
+    }
+  }, true);
   for (const eventName of ['click','change','submit']) document.addEventListener(eventName, event => {
     const element = event.target.closest(selectors);
     if (!element || element.closest('#interaction-feedback')) return;
     declare(element);
+    if (eventName === 'click' && isCommand(element)) armed = {element, at:Date.now(), bound:false};
     source = element;
     element.classList.add('action-responded');
     setTimeout(() => element.classList.remove('action-responded'), 450);
@@ -162,15 +203,107 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
         measured:true, n_considered:retainedExpanded.length, restored});
     }
   }
-  interactions.subscribe(receipt => {
-    if (receipt.phase === 'accepted' && source) {
-      source.dataset.commandObserved = 'true';
-      source.dataset.interactionKind = receipt.command.kind;
-      source.dataset.targetId = receipt.command.target.id || receipt.request?.path || source.dataset.targetId;
-      source.dataset.interactionId = receipt.id;
-      controls.set(receipt.id, source);
+  function bind(element, receipt) {
+    element.dataset.commandObserved = 'true';
+    element.dataset.interactionKind = receipt.command.kind;
+    element.dataset.targetId = receipt.command.target.id || receipt.request?.path || element.dataset.targetId;
+    element.dataset.interactionId = receipt.id;
+    controls.set(receipt.id, element);
+    if (!outcome.has(element)) outcome.set(element, {worst:null, since:Date.now(), label:labelOf(element)});
+    pressBusy(element, true);
+    // A request that never settles must not leave its button disabled forever.
+    setTimeout(() => {
+      if (controls.get(receipt.id) !== element) return;
+      pressBusy(element, false);
+      element.setAttribute('aria-busy', 'false');
+      const label = outcome.get(element)?.label;
+      globalThis.showToast?.((label ? label + ': ' : '') + 'still waiting on the server; you can try again');
+      diagnostic({verdict:'press_busy_released_unsettled', measured:true, n_considered:1,
+        action:element.dataset.action, after_ms:STUCK_MS, phase:receipt.phase});
+    }, STUCK_MS);
+  }
+  // Busy: disabled where the element can be (a native disabled control cannot
+  // be pressed twice at all), aria-busy everywhere, and the bar from CSS.
+  // `data-press-disabled` remembers that WE disabled it, so a handler that
+  // disables its own button keeps control of that state.
+  // Only press-type controls are disabled: a text field that saves on `change`
+  // (Enter) would lose focus and the phone keyboard if it were disabled.
+  const pressable = element => element.tagName === 'BUTTON'
+    || (element.tagName === 'INPUT' && /^(button|submit|reset|checkbox|radio)$/i.test(element.type));
+  function pressBusy(element, on) {
+    if (on) {
+      element.classList.add('press-busy');
+      if (pressable(element) && !element.disabled) { element.disabled = true; element.dataset.pressDisabled = 'true'; }
+    } else {
+      element.classList.remove('press-busy');
+      if (element.dataset.pressDisabled) { element.disabled = false; delete element.dataset.pressDisabled; }
     }
+  }
+  // Can the user still see this control? A closed dialog is often hidden by
+  // opacity or visibility, not display (the board editor fades out), and then
+  // it keeps a layout box, so getClientRects alone reads a closed dialog's
+  // button as visible and the outcome was never shown (AMUX-5417).
+  const seen = element => element.isConnected && element.getClientRects().length > 0
+    && (typeof element.checkVisibility !== 'function'
+      || element.checkVisibility({checkOpacity:true, checkVisibilityCSS:true}))
+    && !element.closest('[inert], [aria-hidden="true"], .modal-overlay:not(.active), .board-edit-overlay:not(.active)');
+  const RANK = {applied:0, reconciled:0, noop:0, queued:1, unknown:2, refused:3, failed:3};
+  // Outcome, once every request the press started has settled.
+  function settle(element, receipt) {
+    const state = outcome.get(element) || {worst:null, since:Date.now(), label:labelOf(element)};
+    // A 2xx whose body does not use the ok/applied vocabulary (the board's
+    // create answers with the card itself) settles the RECEIPT as 'unknown'.
+    // For the PRESS it is accepted: the server took the request. The receipt
+    // keeps its honest phase; only the button's outcome reads it as done.
+    const status = receipt.acknowledgement?.status;
+    const phase = receipt.phase === 'unknown' && status >= 200 && status < 300 ? 'applied' : receipt.phase;
+    if (state.worst === null || (RANK[phase] ?? 2) > (RANK[state.worst] ?? 2)) state.worst = phase;
+    state.message = ['refused','failed'].includes(receipt.phase) ? receipt.feedback?.message : state.message;
+    outcome.set(element, state);
+    if ([...controls.values()].includes(element)) return;   // another request from this press is still running
+    outcome.delete(element);
+    pressBusy(element, false);
+    const failed = ['refused','failed'].includes(state.worst);
+    const cls = failed ? 'press-failed' : state.worst === 'queued' ? 'press-queued'
+      : ['applied','reconciled','noop'].includes(state.worst) ? 'press-done' : null;
+    if (cls && element.isConnected) {
+      element.classList.remove('press-done','press-failed','press-queued');
+      element.classList.add(cls);
+      setTimeout(() => element.classList.remove(cls), failed ? 2400 : 1300);
+    }
+    // A failure is never silent: if the handler has not said anything by
+    // SPEAK_MS after the press settled, say what the server said. The wait
+    // matters: apiCall toasts the server's sentence only after the response
+    // reaches it, which is after this receipt settles. Success gets a toast
+    // only when the control is gone or hidden by then (a dialog that closes
+    // on Save), because then the green outline was never seen.
+    setTimeout(() => {
+      const handlerSpoke = lastToastAt >= state.since;
+      const toast = globalThis.showToast;
+      if (handlerSpoke || typeof toast !== 'function') return;
+      if (failed) {
+        toast((state.label ? state.label + ': ' : '') + (state.message || 'Not done'));
+        diagnostic({verdict:'press_failure_toast', measured:true, n_considered:1, action:element.dataset.action, phase:state.worst});
+      } else if (cls === 'press-done' && !seen(element)) {
+        toast(state.label ? state.label + ': done' : 'Done');
+      }
+    }, SPEAK_MS);
+  }
+  interactions.subscribe(receipt => {
+    if (receipt.phase === 'accepted') {
+      if (source) {
+        bind(source, receipt);
+        if (armed?.element === source) armed.bound = true;
+      } else if (armed && !armed.bound && armed.element.isConnected && Date.now() - armed.at < ARM_MS) {
+        armed.bound = true;
+        bind(armed.element, receipt);
+        diagnostic({verdict:'press_bound_async', measured:true, n_considered:1,
+          action:armed.element.dataset.action, delay_ms:Date.now() - armed.at});
+      }
+    }
+    const element = controls.get(receipt.id);
     render(receipt);
+    if (element && !['accepted','sending','running'].includes(receipt.phase)) settle(element, receipt);
   });
   render();
   return {render, source:() => source, coverage:() => {

@@ -38,6 +38,7 @@ Do not replace the owner's original toolbar symbols with a different icon family
 | Secondary button | `.btn` | Normal action, Cancel, or Close; wraps with its action group. |
 | Destructive button | `.btn.danger` | Explicit action label; confirmation when real data would be irreversibly affected. |
 | Unavailable/loading | `disabled`, `aria-busy="true"` | Prevent dispatch and explain the state. Do not disguise a failed request as loading forever. |
+| Press feedback | automatic: `state/feedback.mjs` (`.press-busy`, `.press-done`, `.press-failed`) | Every press whose handler makes a request is busy (disabled, `aria-busy`, a bar on its bottom edge) until it settles, refuses a second press, then shows the outcome; a failure always reaches a toast. Write plain handlers and do not hand-roll busy code. Opt a rapid-repeat control out with `data-repeatable`. Inventory: `docs/ux/button-feedback-audit.md` (`node scripts/button-audit.mjs`). |
 | Input/select/textarea | `.input`, `.ui-field`, `.ui-help` | Persistent label, consistent border/height/type size; native mobile selectors. |
 | Invalid field | `aria-invalid="true"`, `.ui-error` | Explain the correction beside the field; connect it with `aria-describedby`. |
 | Status | `.status-badge.active/.waiting/.idle` | Shared semantic treatment with a readable label. |

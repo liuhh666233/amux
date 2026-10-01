@@ -3915,6 +3915,9 @@ async function apiCall(url, options) {
       // delete or archive"; the worker WAS pinned and the server said so).
       showToast(await _apiErrText(r));
       amuxTrack('api_error', { url: url.split('?')[0], status: r.status, method: options.method || 'GET' });
+      // null also means "queued" (offline, unreachable, locally queued 202), so
+      // a caller that must undo optimistic UI ONLY on a real refusal asks here.
+      if (typeof options._onRefused === 'function') options._onRefused(r.status);
       return null;
     }
     // A LOCALLY-QUEUED 202 IS NOT PROOF OF CONNECTIVITY (AMUX-2585).
@@ -13543,7 +13546,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1198';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1199';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -36340,15 +36343,25 @@ async function addBoardItem(title, desc, status, worker, groups, due, ownerType,
   boardItems.push(tempItem);
   saveBoardCache();
   renderBoard();
+  let refused = false;
   const r = await apiCall(API + '/api/board', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ title, desc, status, session: worker || '', tags: groups || [], due: due || '', due_time: dueTime || '', gate: gate, creator: _getDeviceName(), owner_type: ownerType })
+    body: JSON.stringify({ title, desc, status, session: worker || '', tags: groups || [], due: due || '', due_time: dueTime || '', gate: gate, creator: _getDeviceName(), owner_type: ownerType }),
+    _onRefused: () => { refused = true; },
   });
   if (r) {
     const item = await r.json();
     boardItems = boardItems.filter(i => i.id !== tempId && i.id !== item.id);
     boardItems.push(item);
     if (item.intake && item.intake.action !== 'create') showToast('Existing task ' + item.id + (item.intake.action === 'update' ? ' updated' : ' received the additional context'));
+    saveBoardCache();
+    renderBoard();
+  } else if (refused) {
+    // REFUSED (apiCall already toasted the server's reason): take the
+    // optimistic card back off the board. Leaving it showed a card the server
+    // never created (AMUX-5417). A QUEUED create also returns null; that one
+    // keeps its placeholder, which is the queued card.
+    boardItems = boardItems.filter(i => i.id !== tempId);
     saveBoardCache();
     renderBoard();
   }

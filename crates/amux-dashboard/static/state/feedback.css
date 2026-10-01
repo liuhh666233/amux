@@ -29,3 +29,21 @@
 #notif-panel .interaction-list details > summary { min-height:44px; display:flex; align-items:center; gap:6px; cursor:pointer; }
 #notif-panel .interaction-list details > summary > svg { transform:rotate(-90deg); }
 #notif-panel .interaction-list details[open] > summary > svg { transform:none; }
+
+/* PRESS CONTRACT (AMUX-5417): busy, then an outcome, on every command press.
+   No pseudo-elements (many controls already use ::before/::after for carets
+   and icons) and no layout change (a 44px target keeps its size, a toolbar
+   does not jump, absolute children keep their containing block). Busy is a
+   dimmed control with a moving inset bar along its bottom edge; the outcome is
+   the outline colour. Theme tokens only, so both themes work. */
+.press-busy, [data-interaction-kind][aria-busy="true"].press-busy { cursor:progress !important; opacity:.72;
+  animation:amux-action-pending 1.3s ease-in-out infinite, amux-press-bar 0.9s ease-in-out infinite; }
+@keyframes amux-press-bar {
+  0%, 100% { box-shadow:inset 0 -3px 0 0 color-mix(in srgb, var(--accent, #3099c8) 35%, transparent); }
+  50% { box-shadow:inset 0 -3px 0 0 var(--accent, #3099c8); }
+}
+.press-done, .press-failed, .press-queued { outline-offset:2px; transition:outline-color .3s; }
+.press-done { outline:2px solid var(--green); }
+.press-failed { outline:3px solid var(--red); }
+.press-queued { outline:2px dashed var(--yellow, #d8a200); }
+@media (prefers-reduced-motion:reduce) { .press-busy, [data-interaction-kind][aria-busy="true"].press-busy { animation:none; box-shadow:inset 0 -3px 0 0 var(--accent, #3099c8); } }
