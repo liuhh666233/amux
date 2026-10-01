@@ -236,6 +236,28 @@ const TURN_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 /// status projection trusts a native report for).
 const HEARTBEAT: Duration = Duration::from_secs(45);
 
+/// Queue a finished chat delegate's answer into a Chat (AMUX-5432), as a
+/// message with origin `delegate`, so the Chat relays it to the owner. Only a
+/// RUNNING Chat gets a turn; the caller records it in the transcript otherwise.
+pub(crate) async fn deliver_delegate_result(state: &AppState, name: &str, text: &str) -> bool {
+    if !running(name) || text.trim().is_empty() {
+        return false;
+    }
+    let lane = lane(name);
+    {
+        let mut q = lane.queue.lock().unwrap();
+        q.push_back(Queued { text: text.to_string(), origin: "delegate".to_string() });
+        persist_queue(name, &q);
+    }
+    if !lane.busy.swap(true, Ordering::SeqCst) {
+        let st = state.clone();
+        let n = name.to_string();
+        tokio::spawn(async move { pump(st, n).await });
+    }
+    lane.publish(json!({"type": "queued", "ahead": 0, "waiting": 0, "busy": true}));
+    true
+}
+
 pub(crate) struct ChatAdapter;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -1011,6 +1033,18 @@ pub(crate) async fn companion_prompt(state: &AppState, worker: &str, fresh: bool
     if !last.trim().is_empty() {
         out.push_str(&format!("- its last reply (may be cut): {}\n", clip(last.trim(), 1500)));
     }
+    // THE ESCALATION LADDER (AMUX-5432, Ethan 2026-10-01). Sent every turn,
+    // not only on a fresh conversation, so existing Chats learn it too.
+    out.push_str(&format!(
+        "- if you lack a tool or the answer needs the worker's own access (web, inbox, calendar, its files \
+         including uncommitted edits, or what is in the worker's head), do not tell the owner to look it up: \
+         1) read what it produced (`amux peek {worker}`, `amux get <api path>`, the board, its last reply); \
+         2) else run `amux delegate-job run --worker {worker} --wait 120 --stdin <<'EOF'` with the question: \
+         a read-only background job on the worker's own agent that sees its uncommitted work and, where it can, \
+         a fork of its conversation; it never touches the live worker. Say when an answer came from that fork; \
+         3) if only the live worker can answer, say so and offer the owner two choices: ask the worker \
+         directly, or queue the question for its next idle turn. Never send to the worker without the owner saying so.\n"
+    ));
     out.push_str("\n[owner]\n");
     out.push_str(text);
     out
@@ -1176,7 +1210,7 @@ impl TurnFiles {
 }
 
 /// True while any process of the turn's group is alive.
-fn group_alive(pgid: u32) -> bool {
+pub(crate) fn group_alive(pgid: u32) -> bool {
     if pgid == 0 {
         return false;
     }
@@ -1186,7 +1220,7 @@ fn group_alive(pgid: u32) -> bool {
 }
 
 /// SIGTERM the turn's whole process group (the provider and its shell).
-fn signal_turn(pgid: u32) {
+pub(crate) fn signal_turn(pgid: u32) {
     if pgid == 0 {
         return;
     }

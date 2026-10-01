@@ -133,6 +133,7 @@ pub const NATIVE_FAMILIES: &[(&str, &str)] = &[
     ("/api/traces", "agent trace archive: list archived transcripts and fetch one (api/traces.rs, runtime_jobs/trace_archive.rs)"),
     ("/api/pinned", "pinned launchers: list, create, edit, delete, launch (api/pinned.rs)"),
     ("/api/vault", "credential vault entries and form fill (api/vault.rs)"),
+    ("/api/chat-delegate", "read-only background jobs a worker's Chat starts on the worker's own provider (api/chat_delegate.rs, AMUX-5432)"),
     ("/api/chatgpt-app", "ChatGPT app connections: approve, deny, revoke (api/chatgpt_app.rs, AMUX-5396)"),
     ("/api/signals", "named clearance signals: a card waits on a name, another lane raises it (api/signals.rs, AMUX-5237)"),
     ("/api/reclaim", "disk scan, reclaim findings, treemap, quarantine"),

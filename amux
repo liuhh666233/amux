@@ -6075,6 +6075,82 @@ print(("COVERED by %s: " % d.get("id")) + d.get("instruction", "") if d.get("app
   esac
 }
 
+# Read-only API access (AMUX-5432): GET only, so a chat delegate's allowlist
+# can permit it without permitting any change. `amux get api/email/inbox?count=5`
+cmd_get() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || die "usage: amux get <api path>   (GET only, e.g. api/email/inbox?count=5)"
+  path="${path#/}"
+  [[ "$path" == api/* || "$path" == health* ]] || path="api/$path"
+  local AMUX_API="${AMUX_API:-$(cmd_url)}"
+  _curl -sk -m 60 -H "X-Amux-Session: ${AMUX_SESSION:-}" "$AMUX_API/$path" || die "server unreachable"
+  echo
+}
+
+# A worker's Chat asks a read-only background job on the worker's own agent
+# (AMUX-5432, docs/design/chat-delegate.md). It never touches the live worker.
+#   amux delegate-job run [--worker W] [--mode auto|fork|fresh] [--wait S] (--stdin | --prompt TEXT)
+#   amux delegate-job status <job-id>
+#   amux delegate-job ls [W]
+cmd_delegate_job() {
+  local sub="${1:-}"; shift || true
+  local AMUX_API="${AMUX_API:-$(cmd_url)}"
+  case "$sub" in
+    run)
+      local worker="" mode="auto" wait=120 prompt="" from_stdin=0
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --worker|-w) worker="${2:-}"; shift 2 ;;
+          --mode) mode="${2:-auto}"; shift 2 ;;
+          --wait) wait="${2:-120}"; shift 2 ;;
+          --prompt|-p) prompt="${2:-}"; shift 2 ;;
+          --stdin) from_stdin=1; shift ;;
+          *) die "unknown option: $1" ;;
+        esac
+      done
+      [[ "$from_stdin" == 1 ]] && prompt="$(cat)"
+      [[ -n "$prompt" ]] || die "the question is empty (use --stdin or --prompt)"
+      [[ -n "$worker" ]] || worker="${AMUX_SESSION%@chat}"
+      local body resp id
+      body=$(WORKER="$worker" MODE="$mode" WAIT="$wait" PROMPT="$prompt" python3 -c '
+import json, os
+print(json.dumps({"worker": os.environ["WORKER"], "mode": os.environ["MODE"],
+                  "wait_s": float(os.environ["WAIT"] or 0), "prompt": os.environ["PROMPT"]}))')
+      resp=$(_curl -sk -m 30 -X POST -H 'Content-Type: application/json' \
+        -H "X-Amux-Session: ${AMUX_SESSION:-}" -d "$body" "$AMUX_API/api/chat-delegate") || die "server unreachable"
+      id=$(printf '%s' "$resp" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+if not d.get("ok"): sys.stderr.write("refused: "+str(d.get("error"))+"\n"); sys.exit(1)
+print(d["job"]["id"])') || exit 1
+      local deadline=$(( $(date +%s) + ${wait%.*} )) job
+      while :; do
+        job=$(_curl -sk -m 20 -H "X-Amux-Session: ${AMUX_SESSION:-}" "$AMUX_API/api/chat-delegate/$id?consume=1") || job=""
+        if printf '%s' "$job" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status")=="done" else 1)' 2>/dev/null; then
+          printf '%s' "$job" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(d.get("record",""))
+print()
+print(d.get("result",""))'
+          return 0
+        fi
+        if (( $(date +%s) >= deadline )); then
+          echo "job $id is still running. Its answer will be posted into this chat when it finishes."
+          return 0
+        fi
+        sleep 2
+      done ;;
+    status)
+      [[ -n "${1:-}" ]] || die "usage: amux delegate-job status <job-id>"
+      _curl -sk -m 20 "$AMUX_API/api/chat-delegate/$1" || die "server unreachable"; echo ;;
+    ls|list)
+      local w="${1:-${AMUX_SESSION%@chat}}"
+      _curl -sk -m 20 "$AMUX_API/api/chat-delegate?worker=$w" | python3 -c 'import json,sys
+for j in json.load(sys.stdin).get("jobs", []):
+    print(j.get("id"), j.get("status"), j.get("outcome",""), j.get("provider"), j.get("mode"), (j.get("prompt") or "")[:60])' ;;
+    *) die "usage: amux delegate-job run|status|ls" ;;
+  esac
+}
+
 cmd_whoami() {
   # Live identity vs inherited env (MG audit #8 / AMUX-2203): $AMUX_SESSION is
   # per-process and inherited from whoever launched the pane; `claude --resume`
@@ -6741,6 +6817,8 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
     land)             shift; cmd_land "$@" ;;
     browser|br)      shift; cmd_browser "$@" ;;
     delegate)        shift; cmd_delegate "$@" ;;
+    delegate-job|dj) shift; cmd_delegate_job "$@" ;;
+    get)              shift; cmd_get "$@" ;;
     crm)              shift; cmd_crm "$@" ;;
     order)            shift; cmd_order "$@" ;;
     tunnel|t)         shift; cmd_tunnel "$@" ;;

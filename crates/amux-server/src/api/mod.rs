@@ -19,6 +19,7 @@ pub mod browser_scope;
 pub mod calendar;
 pub mod channels;
 pub mod chat_stream;
+pub mod chat_delegate;
 pub mod chat_worker;
 pub mod commit_mentions;
 pub mod computer;
@@ -321,6 +322,7 @@ pub fn router(state: AppState) -> Router {
         .merge(vault::routes())
         .merge(vault_secrets::routes())
         .merge(chatgpt_app::routes())
+        .merge(chat_delegate::routes())
         .merge(self_update::routes())
         .nest("/api/proxies", proxies::routes())
         // AMUX-2888: the client controls the SPA and CLI already call. Status
@@ -620,6 +622,8 @@ pub fn router(state: AppState) -> Router {
     // Synthesizes ONLY into an empty body: a handler that returned its own 405
     // with prose knows more than this layer does and must not be overwritten.
     let app = app.layer(axum::middleware::from_fn(explain_method_not_allowed));
+    // A chat delegate may only read (AMUX-5432): refused before any handler.
+    let app = app.layer(axum::middleware::from_fn(chat_delegate::delegate_read_only));
     let app = app.layer(axum::middleware::from_fn_with_state(
         store_for_reqlog.clone(),
         interactions::middleware,

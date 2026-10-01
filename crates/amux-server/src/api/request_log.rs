@@ -1934,6 +1934,14 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         methods: &["PUT", "DELETE"],
     },
     RouteEntry {
+        path: "/api/chat-delegate",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/chat-delegate/{id}",
+        methods: &["GET"],
+    },
+    RouteEntry {
         path: "/api/chatgpt-app",
         methods: &["GET"],
     },

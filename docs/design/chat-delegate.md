@@ -101,17 +101,26 @@ Per provider:
 |---|---|---|---|---|
 | claude | `-p --output-format stream-json` | `--permission-mode dontAsk` with an allowlist (Read, Grep, Glob, WebFetch, WebSearch, amux read verbs), `--disallowedTools Edit Write MultiEdit NotebookEdit`, `--max-budget-usd` | OS sandbox, API guard, timeout | yes: `--resume <id> --fork-session --no-session-persistence` |
 | codex | `exec --json` | `--sandbox read-only`, `approval_policy="never"` | OS sandbox, API guard, timeout, budget by tokens unavailable | no: fresh, seeded |
-| gemini | `--output-format json` | `--approval-mode default` (prompts auto-deny headless) | OS sandbox, API guard, timeout | no: fresh, seeded |
-| other | none | none | refused (`chat_delegate_refused`, `provider_unsupported`) | n/a |
+| gemini | n/a | none amux can rely on | refused (`chat_delegate_refused`, `provider_unsupported`) | n/a |
+| other | n/a | none | refused, same reason | n/a |
 
 MCP servers can write (a mail tool can send), so they are not allowed by
 default. `AMUX_CHAT_DELEGATE_TOOLS` (scoped env) adds tool patterns for a
 worker whose owner wants a specific read tool.
 
-Where no OS sandbox exists (Linux without one), claude and codex still run,
-on their own CLI enforcement plus the API guard; gemini is refused with
-`no_read_only_enforcement`, since its headless mode cannot be shown to deny
-writes on its own.
+Why gemini is refused for now: its headless mode can run a shell, and a shell
+can reach the amux API without the delegate identity, so the API guard would
+not hold. Claude cannot (its allowlist has no general shell); codex cannot
+(its read-only sandbox has no network). Gemini joins once its headless shell
+can be restricted. Where no OS sandbox exists (Linux), claude and codex still
+run on their own CLI enforcement plus the API guard.
+
+The claude allowlist: Read, Grep, Glob, WebFetch, WebSearch, TodoWrite, the
+amux read verbs (`peek`, `info`, `ls`, `board ls`, `board status`, `get`,
+`crm get`, `crm list`, `whoami`) and the read-only git verbs (`log`, `show`,
+`diff`, `status`, `blame`). `amux get <api path>` is a new GET-only CLI verb,
+so a delegate can read messages, history, email and calendar without any verb
+that can change them.
 
 ### 2. How does the result get back to the Chat?
 

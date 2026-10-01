@@ -559,6 +559,11 @@ async fn async_main() {
             crate::api::session_verbs::purge_stale_rules_from_memory();
             let (workers, interrupted, resumed) =
                 crate::api::chat_worker::recover_all(&state).await;
+            let delegates = crate::api::chat_delegate::recover_all(&state).await;
+            if delegates > 0 {
+                tracing::info!(delegates, measured = true, n_considered = delegates,
+                    verdict = "chat_delegate_recovery_pass", "chat delegates re-attached after restart");
+            }
             tracing::info!(workers, interrupted, resumed, measured = true, n_considered = workers,
                 verdict = "chat_recovery_pass", "chat worker restart recovery complete");
             // A browser tab still on a pre-2026-09-30 client creates a

@@ -14307,7 +14307,8 @@ function _chatLimitHtml(limit) {
 
 function _chatMessageHtml(m) {
   if (m.role === 'user') {
-    const who = m.origin === 'automation' ? 'amux' : 'you';
+    // A chat delegate's answer arrives as its own message (AMUX-5432).
+    const who = m.origin === 'automation' ? 'amux' : m.origin === 'delegate' ? 'background job' : 'you';
     // The send-time stamp stays in what the model received (the shared send
     // contract); the bubble's meta line already shows the time.
     const shown = _hasSendTimeStamp(m.text) ? (m.text || '').replace(/^\[[^\]]*\]\s/, '') : (m.text || '');
