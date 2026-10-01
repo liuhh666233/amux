@@ -142,6 +142,19 @@ function assertRoutesUsed(st: RouteState): void {
 
 export const test = base.extend({
   context: async ({ context }, use, testInfo) => {
+    // FIRST-RUN WALKTHROUGH OFF unless a test asks for it. The scratch server
+    // starts with no workers, and the walkthrough correctly opens for an empty
+    // fleet ~1.5s after load (_wtMaybeStart). On slower ios-safari runners it
+    // opened before the test's first click and #wt-backdrop swallowed it:
+    // browser-history, message-context-filter and mobile-header-visibility
+    // timed out on main (run 36921271354). Opt in with
+    // test.info().annotations.push({type:'walkthrough'}) set before navigation,
+    // or {annotation:{type:'walkthrough'}} on the test.
+    if (!testInfo.annotations.some(a => a.type === 'walkthrough')) {
+      await context.addInitScript(() => {
+        try { if (!localStorage.getItem('amux_walkthrough_done')) localStorage.setItem('amux_walkthrough_done', '1'); } catch (_) {}
+      });
+    }
     // A second tab must run the same candidate asset as the first. Page-only
     // overrides silently mixed the candidate outbox with the installed one.
     for (const asset of dashboardAssets) {
