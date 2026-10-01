@@ -867,9 +867,14 @@ async fn finish_turn(
         ],
     );
     // Removed only after the reply is persisted and the marker cleared, so a
-    // restart between the two can still re-attach and record it.
+    // restart between the two can still re-attach and record it. By turn id as
+    // well as the marker: a worker deleted mid-turn has no meta left to name
+    // them (seen live 2026-10-01: the stopped turn's files stayed behind).
     if !stem.is_empty() {
         TurnFiles::from_stem(&stem).remove();
+    }
+    for attempt in 0..=1 {
+        TurnFiles::new(&turn_id, attempt).remove();
     }
     lane.publish(json!({"type": "done", "turn_id": turn_id, "message": msg}));
     match &error {
