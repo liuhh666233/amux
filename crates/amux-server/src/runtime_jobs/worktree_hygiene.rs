@@ -29,7 +29,8 @@
 //! The same sweep reaps a `pre-push` hook or `git remote-https` whose parent is
 //! gone (PPID 1) and whose cwd is a worker worktree, once it has run 2 minutes.
 //! Its `git push` is dead, so nothing will ever read its result or send the
-//! pack; it only burns CPU on the gates every other push is waiting behind.
+//! pack (a worktree with any live `git push` is spared: a hook stage can be
+//! reparented to PID 1 while its push lives, verdict=orphaned_push_spared_live_push); it only burns CPU on the gates every other push is waiting behind.
 //! Found 2026-09-30: three such pipelines, 24 to 28 minutes old, in exactly the
 //! three worktrees whose skip-worktree flag kept flipping. A stale hook writing
 //! the index while the worker's next push runs is the likely source of the
@@ -163,12 +164,42 @@ async fn kill_tree(pid: u32) {
     let _ = cmd_out("kill", &["-9", &pid.to_string()]).await;
 }
 
+/// PIDs of live `git push` processes in `ps -Ao pid=,ppid=,etime=,command=`.
+pub(crate) fn live_git_push_pids(ps: &str) -> Vec<u32> {
+    ps.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let pid: u32 = it.next()?.parse().ok()?;
+            let (_ppid, _etime) = (it.next()?, it.next()?);
+            let cmd: Vec<&str> = it.collect();
+            let is_push = cmd.first().is_some_and(|c| *c == "git" || c.ends_with("/git")) && cmd.get(1) == Some(&"push");
+            is_push.then_some(pid)
+        })
+        .collect()
+}
+
 async fn reap_orphaned_pushes(worktrees: &[(String, std::path::PathBuf)]) -> usize {
     let Some(ps) = cmd_out("ps", &["-Ao", "pid=,ppid=,etime=,command="]).await else { return 0 };
+    // PPID 1 alone does not prove the push is dead (2026-10-01, gs12-compute):
+    // a hook stage whose intermediate subshell exited is reparented to PID 1
+    // while the hook's own `git push` is still alive. A worktree with ANY live
+    // `git push` is never reaped.
+    let mut pushing: Vec<std::path::PathBuf> = Vec::new();
+    for pid in live_git_push_pids(&ps) {
+        if let Some(cwd) = process_cwd(pid).await {
+            pushing.push(std::path::PathBuf::from(cwd));
+        }
+    }
     let mut reaped = 0;
     for pid in orphan_push_pids(&ps, 120) {
         let Some(cwd) = process_cwd(pid).await else { continue };
-        let Some((lane, _)) = worktrees.iter().find(|(_, wt)| Path::new(&cwd).starts_with(wt)) else { continue };
+        let Some((lane, wt)) = worktrees.iter().find(|(_, wt)| Path::new(&cwd).starts_with(wt)) else { continue };
+        if pushing.iter().any(|p| p.starts_with(wt)) {
+            tracing::info!(session = %lane, pid, measured = true, n_considered = 1,
+                verdict = "orphaned_push_spared_live_push",
+                "a PPID-1 push process shares its worktree with a live git push; not reaped");
+            continue;
+        }
         kill_tree(pid).await;
         reaped += 1;
         tracing::warn!(session = %lane, pid, cwd = %cwd, measured = true, n_considered = 1,
@@ -218,6 +249,16 @@ mod tests {
                   777 1 50:00 /usr/sbin/cron\n";
         assert_eq!(orphan_push_pids(ps, 120), vec![92498, 91989],
             "live-parent hooks, young orphans and unrelated PPID-1 processes are left alone");
+    }
+
+    #[test]
+    fn live_git_push_processes_are_found_by_argv() {
+        let ps = "95959 1200 25:00 git push origin HEAD:main\n\
+                  47045 39576 17:55 /usr/local/bin/git push origin c80236:main\n\
+                  47082 47045 17:55 /usr/local/Cellar/git/2.39.0/libexec/git-core/git remote-https origin x\n\
+                  555 1 01:00 bash -c echo git push later\n";
+        assert_eq!(live_git_push_pids(ps), vec![95959, 47045],
+            "only a real `git push` argv counts, not remote-https or a shell mentioning it");
     }
 
     #[test]
