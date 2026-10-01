@@ -2537,11 +2537,18 @@ pub(crate) fn live_state(row: &IssueRow) -> (bool, &'static str) {
 }
 
 fn designate_owner_reach(obj: &mut serde_json::Map<String, Value>, row: &IssueRow) {
-    if !row
+    let isolated = row
         .session
         .as_deref()
-        .is_some_and(crate::api::session_verbs::session_is_isolated)
-    {
+        .is_some_and(crate::api::session_verbs::session_is_isolated);
+    designate_owner_reach_known(obj, isolated);
+}
+
+/// `designate_owner_reach` with the isolation answer already looked up, so a
+/// list can ask once per SESSION instead of once per ROW (AMUX-5374: one env
+/// file open per row, ~6,700 per default read for ~40 distinct sessions).
+fn designate_owner_reach_known(obj: &mut serde_json::Map<String, Value>, isolated: bool) {
+    if !isolated {
         // Absent rather than `false`: this is a rare property and a key on every
         // one of 1700+ cards saying "normal" is payload for nothing.
         return;
@@ -3553,6 +3560,12 @@ mod callback_dispatch_tests {
 /// `_board_item_stale` flag — set ONLY when true, on both paths (Python's
 /// `_BOARD_SLIM_DROP` is `("desc","log")`; `stale` rides through slim).
 pub fn list_body(row: &IssueRow, slim: bool, stale: bool) -> Value {
+    list_body_known(row, slim, stale, None)
+}
+
+/// `list_body` for a caller that already knows whether the row's owner is
+/// isolated (looked up once per session, not once per row). `None` looks it up.
+pub fn list_body_known(row: &IssueRow, slim: bool, stale: bool, isolated: Option<bool>) -> Value {
     // The slim base never allocates the prose it will not ship (AMUX-3496):
     // this used to build the FULL snapshot (cloning desc+log, 6MB+ across a
     // live list) and then delete both keys. The derivations below read
@@ -3566,7 +3579,10 @@ pub fn list_body(row: &IssueRow, slim: bool, stale: bool) -> Value {
     // Only the SLIM branch needs this here: the non-slim branch got it inside
     // `detail_body` above, which is also the function the single-card GET calls.
     if slim {
-        designate_owner_reach(obj, row);
+        match isolated {
+            Some(known) => designate_owner_reach_known(obj, known),
+            None => designate_owner_reach(obj, row),
+        }
         designate_lease(obj, row);
     }
     // BOTH paths, unlike designate_owner_reach above: the full branch gets its
@@ -3637,7 +3653,15 @@ pub fn list_body(row: &IssueRow, slim: bool, stale: bool) -> Value {
         // LAST "NEEDS-YOU:" marker, which is what a card shows when it is
         // waiting on a human. Last rather than first — a re-marked card should
         // show its freshest question, which is the client's own rule.
-        let ny = {
+        // Every marker below contains "need", and no character outside ASCII
+        // lowercases to an ASCII n/e/d, so a row without "need" in any case
+        // cannot produce a note. Checked first because the scan below
+        // allocates a lowercased copy of every line of every row (AMUX-5374).
+        let may_carry_marker = contains_ascii_ci(&row.desc, "need")
+            || row.log.as_deref().is_some_and(|l| contains_ascii_ci(l, "need"));
+        let ny = if !may_carry_marker {
+            None
+        } else {
             let hay = format!("{}\n{}", row.desc, row.log.as_deref().unwrap_or(""));
             let mut found: Option<String> = None;
             for line in hay.lines() {
@@ -4627,10 +4651,19 @@ pub async fn list_board(
     };
 
     let rows_started = std::time::Instant::now();
+    // Isolation is a property of the SESSION, read from its env file. Ask once
+    // per distinct session rather than once per row (AMUX-5374).
+    let mut isolated_by_session: std::collections::HashMap<&str, bool> =
+        std::collections::HashMap::new();
     let items: Vec<Value> = page
         .iter()
         .map(|r| {
-            let mut v = list_body(r, slim, is_stale(r, now, &working));
+            let isolated = r.session.as_deref().is_some_and(|s| {
+                *isolated_by_session
+                    .entry(s)
+                    .or_insert_with(|| crate::api::session_verbs::session_is_isolated(s))
+            });
+            let mut v = list_body_known(r, slim, is_stale(r, now, &working), Some(isolated));
             if let (Some(n), Some(lease)) = (attempt_nums.get(&r.id), v.get_mut("lease")) {
                 lease["attempt"] = json!(n);
             }
@@ -10286,6 +10319,12 @@ pub(crate) const SLIM_OMITS: [&str; 6] = [
     "log",
     "source_ref",
 ];
+
+/// ASCII case-insensitive substring test, without allocating a lowercased copy.
+fn contains_ascii_ci(hay: &str, needle: &str) -> bool {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    !n.is_empty() && h.len() >= n.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
 
 /// Keys a slim row ships even when their value is null; every other null-valued
 /// key is left off (AMUX-5374, see `list_body`).
@@ -18062,6 +18101,22 @@ mod slim_tests {
             !SLIM_OMITS.contains(&"live") && !SLIM_OMITS.contains(&"live_reason"),
             "adding either to SLIM_OMITS reintroduces the absent-key-reads-as-answer bug"
         );
+    }
+
+    /// AMUX-5374. The needs-you prefilter must pass every marker spelling the
+    /// extractor accepts, in any ASCII case, or a card's question silently
+    /// disappears from the list. The control: a row with no "need" is skipped.
+    #[test]
+    fn the_needsyou_prefilter_passes_every_marker_and_skips_rows_without_one() {
+        for m in ["NEEDS-YOU: x", "needs you: x", "NeedsYou: x", "NEEDS ETHAN: x", "needs-human: x"] {
+            assert!(contains_ascii_ci(m, "need"), "{m}");
+            let row = IssueRow { desc: format!("first\n{m}"), ..Default::default() };
+            assert_eq!(list_body(&row, true, false)["needsyou_note"], "x", "{m}");
+            let row = IssueRow { log: Some(m.into()), ..Default::default() };
+            assert_eq!(list_body(&row, true, false)["needsyou_note"], "x", "{m} in log");
+        }
+        assert!(!contains_ascii_ci("deploy the gateway", "need"));
+        assert!(list_body(&IssueRow::default(), true, false).get("needsyou_note").is_none());
     }
 
     /// AMUX-5374. A slim row leaves off null values, keeps every populated key,
