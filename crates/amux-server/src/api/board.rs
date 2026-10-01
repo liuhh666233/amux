@@ -379,7 +379,7 @@ async fn derived_board(State(state): State<AppState>) -> Response {
     let joined = crate::db::interactions::spawn_blocking(move || -> anyhow::Result<_> {
         let conn = store.read()?;
         let rows = bs::list_issues(&conn, &[], &[], ArchivedFilter::ActiveOnly)?;
-        let working = crate::api::sessions_legacy::active_python_sessions(&conn);
+        let working = crate::api::sessions_legacy::active_python_sessions_recent(&conn);
         let now = now_secs();
 
         let mut items: Vec<Value> = Vec::with_capacity(rows.len());
@@ -1569,6 +1569,12 @@ async fn get_contract(
             // failure mode AF-161 names — one fact, two spellings, drift is a
             // matter of time — reintroduced by the fix for it.
             "slim_omits": SLIM_OMITS,
+            "slim_null_values": {
+                "rule": "a slim row leaves off every key whose value is null, except the ones listed in `kept_even_when_null`",
+                "kept_even_when_null": SLIM_KEEPS_NULL,
+                "read_it_as": "an absent key on a slim row means null: row.get(k) is None either way. A key with a value is never dropped this way; the keys dropped regardless of value are `slim_omits`",
+                "why": "AMUX-5374: ~21 always-null keys per row took the 10k-card list from 4.1MB to 6.8MB",
+            },
             "not_a_filter": {
                 "q / query / search": "REFUSED with 400 — /api/board does not search, it would \
                                        return the entire board. Use /api/search?q=",
@@ -3727,6 +3733,19 @@ pub fn list_body(row: &IssueRow, slim: bool, stale: bool) -> Value {
         // An array is truthy exactly where `1` was, and nothing tests the value:
         // the SPA detects slim via `items[0].desc !== undefined` (app.js:22577).
         obj.insert("slim".into(), json!(SLIM_OMITS));
+
+        // A NULL VALUE IS NOT SHIPPED ON A SLIM ROW (AMUX-5374). Every board
+        // feature since 2026-09-01 added a column to the snapshot (ask_*,
+        // decision_*, callback, blocked_on, next_action, evidence, ...), and on an
+        // ordinary card all of them are null: 21 to 23 keys per row, ~430 bytes,
+        // which took the 10k-card nightly corpus from 4.1MB to 6.8MB and its
+        // board read past the 200ms gate. Dropping only NULL values changes no
+        // answer: `row.get(k)` is None, `row[k]` is undefined, and `x || ''`
+        // is '' for an absent key exactly as for a null one. A key that carries
+        // a value is never dropped here (AF-161 was a POPULATED reviewer being
+        // omitted). `session` and `reviewer` stay even when null, because they
+        // are the two keys fleet scripts index directly and audits census.
+        obj.retain(|k, v| !v.is_null() || SLIM_KEEPS_NULL.contains(&k.as_str()));
     }
     if stale {
         obj.insert("stale".into(), json!(true));
@@ -3739,16 +3758,84 @@ pub fn list_body(row: &IssueRow, slim: bool, stale: bool) -> Value {
 /// for 30 minutes. `working` is the derived active-session set — the SAME
 /// derivation the session list serves, so the two views cannot disagree.
 pub fn is_stale(row: &IssueRow, now: i64, working: &std::collections::BTreeSet<String>) -> bool {
-    if !matches!(row.status.as_str(), "doing" | "review") {
-        return false;
+    stale_candidate(row, now)
+        && row
+            .session
+            .as_deref()
+            .is_some_and(|sess| !working.contains(sess))
+}
+
+/// Everything `is_stale` asks before it reads the active-session set: in
+/// progress, owned, and untouched for 30 minutes. ONE definition, because the
+/// list uses it to decide whether the set is worth deriving at all (AMUX-5374),
+/// and a second spelling would let the two disagree about which rows can be stale.
+fn stale_candidate(row: &IssueRow, now: i64) -> bool {
+    matches!(row.status.as_str(), "doing" | "review")
+        && row.session.as_deref().is_some_and(|s| !s.is_empty())
+        && row.updated != 0
+        && now - row.updated >= 1800
+}
+
+/// The nightly perf gate's budget for a default board read (scripts/perf-baseline.sh).
+const BOARD_LIST_SLOW_MS: u128 = 200;
+/// At most one `board_list_slow` line per this many seconds; the line carries
+/// how many slow reads it stands for, so throttling loses no count.
+const BOARD_LIST_SLOW_EVERY_S: i64 = 600;
+
+static SLOW_LIST_SUPPRESSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SLOW_LIST_LAST_WARN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// TWO-FIX (AMUX-5374). The default board read crossed the nightly's 200ms gate
+/// on 2026-09-01 and stayed red for 30 nights, visible only in a CI job nobody
+/// read. Payload growth was the cause, one null column per feature, and the
+/// live server never said so. Now it does, where the logs are swept: a read
+/// over budget warns with its row count and the per-1k-row cost, so the next
+/// growth shows up on the day it lands rather than a month later.
+/// Where a board read spent its time, in milliseconds. `queued` is the wait for
+/// a blocking thread, `conn` for a read connection, `sql` the filter+cap and
+/// hydration, `sessions` the stale/attempt lookups, `rows` building the JSON
+/// rows. Serialization happens after the handler returns and is not in here.
+#[derive(Debug, Default, Clone, Copy)]
+struct ListPhases {
+    queued_ms: u64,
+    conn_ms: u64,
+    sql_ms: u64,
+    sessions_ms: u64,
+    rows_ms: u64,
+}
+
+fn note_slow_board_list(elapsed: std::time::Duration, rows: usize, slim: bool, phases: ListPhases) {
+    use std::sync::atomic::Ordering;
+    let ms = elapsed.as_millis();
+    if ms < BOARD_LIST_SLOW_MS {
+        return;
     }
-    let Some(sess) = row.session.as_deref().filter(|s| !s.is_empty()) else {
-        return false;
-    };
-    if row.updated == 0 || now - row.updated < 1800 {
-        return false;
+    let now = now_secs();
+    let last = SLOW_LIST_LAST_WARN.load(Ordering::Relaxed);
+    if now - last < BOARD_LIST_SLOW_EVERY_S {
+        SLOW_LIST_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+        return;
     }
-    !working.contains(sess)
+    SLOW_LIST_LAST_WARN.store(now, Ordering::Relaxed);
+    let also = SLOW_LIST_SUPPRESSED.swap(0, Ordering::Relaxed);
+    tracing::warn!(
+        target: "board",
+        verdict = "board_list_slow",
+        elapsed_ms = ms as u64,
+        budget_ms = BOARD_LIST_SLOW_MS as u64,
+        rows,
+        ms_per_1k_rows = (ms as usize * 1000).checked_div(rows).unwrap_or(0) as u64,
+        slim,
+        queued_ms = phases.queued_ms,
+        conn_ms = phases.conn_ms,
+        sql_ms = phases.sql_ms,
+        sessions_ms = phases.sessions_ms,
+        rows_ms = phases.rows_ms,
+        other_slow_reads_since_last_line = also,
+        measured = true,
+        "GET /api/board took {ms}ms for {rows} rows (budget {BOARD_LIST_SLOW_MS}ms, the nightly perf gate). \
+         If ms_per_1k_rows is climbing, a row grew: check what list_body ships (AMUX-5374)."
+    );
 }
 
 // ---- GET /api/board ------------------------------------------------------
@@ -4389,8 +4476,18 @@ pub async fn list_board(
     };
     let quota = qp_truthy(p.quota.as_deref());
     let store = state.store.clone();
+    let list_started = std::time::Instant::now();
     let joined = crate::db::interactions::spawn_blocking(move || -> anyhow::Result<_> {
+        // Phase marks for `board_list_slow` (AMUX-5374): a slow read has to say
+        // WHICH part was slow, or the next person profiles from scratch.
+        let mut phases = ListPhases {
+            queued_ms: list_started.elapsed().as_millis() as u64,
+            ..Default::default()
+        };
+        let mark = std::time::Instant::now();
         let conn = store.read()?;
+        phases.conn_ms = mark.elapsed().as_millis() as u64;
+        let mark = std::time::Instant::now();
         // Fused filter+cap with lazy hydration (AMUX-3491): the old
         // list_issues + cap_terminal pair decoded every undeleted row's
         // desc+log (~27MB of prose) to ship the ~20% that survive the cap.
@@ -4415,13 +4512,16 @@ pub async fn list_board(
         } else {
             bs::list_issues_capped(&conn, &status_f, &session_f, archived, done_limit, prose)?
         };
-        // The `stale` flag needs the active-session set only when an
-        // in-progress card is present (Python computes it in `_load_board`).
-        let working = if kept
-            .iter()
-            .any(|r| matches!(r.status.as_str(), "doing" | "review"))
-        {
-            crate::api::sessions_legacy::active_python_sessions(&conn)
+        phases.sql_ms = mark.elapsed().as_millis() as u64;
+        let mark = std::time::Instant::now();
+        // The `stale` flag needs the active-session set only when some row
+        // could BE stale: in progress, owned, and untouched for 30 minutes.
+        // `is_stale` returns false before reading the set for every other
+        // row, so asking the same three questions here skips the fleet probe
+        // without changing one flag (AMUX-5374).
+        let now_for_stale = now_secs();
+        let working = if kept.iter().any(|r| stale_candidate(r, now_for_stale)) {
+            crate::api::sessions_legacy::active_python_sessions_recent(&conn)
         } else {
             Default::default()
         };
@@ -4432,10 +4532,11 @@ pub async fn list_board(
         } else {
             Default::default()
         };
-        Ok((kept, term_total, term_kept, working, attempt_nums))
+        phases.sessions_ms = mark.elapsed().as_millis() as u64;
+        Ok((kept, term_total, term_kept, working, attempt_nums, phases))
     })
     .await;
-    let (kept, term_total, term_kept, working, attempt_nums) = match joined {
+    let (kept, term_total, term_kept, working, attempt_nums, mut phases) = match joined {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return internal(e),
         Err(e) => return internal(e),
@@ -4525,6 +4626,7 @@ pub async fn list_board(
         &kept[offset..]
     };
 
+    let rows_started = std::time::Instant::now();
     let items: Vec<Value> = page
         .iter()
         .map(|r| {
@@ -4535,6 +4637,8 @@ pub async fn list_board(
             v
         })
         .collect();
+    phases.rows_ms = rows_started.elapsed().as_millis() as u64;
+    note_slow_board_list(list_started.elapsed(), items.len(), slim, phases);
 
     let mut headers = HeaderMap::new();
     let put = |h: &mut HeaderMap, k: &'static str, v: String| {
@@ -10182,6 +10286,10 @@ pub(crate) const SLIM_OMITS: [&str; 6] = [
     "log",
     "source_ref",
 ];
+
+/// Keys a slim row ships even when their value is null; every other null-valued
+/// key is left off (AMUX-5374, see `list_body`).
+pub(crate) const SLIM_KEEPS_NULL: [&str; 2] = ["session", "reviewer"];
 
 pub(crate) fn desc_replace_destroys_peer_prose(
     owner: &str,
@@ -17956,6 +18064,42 @@ mod slim_tests {
         );
     }
 
+    /// AMUX-5374. A slim row leaves off null values, keeps every populated key,
+    /// and keeps the two named keys even when null. The CONTROL is the full row:
+    /// it must still carry the nulls, or this would pass for a serializer that
+    /// dropped them everywhere.
+    #[test]
+    fn slim_rows_omit_null_values_but_never_a_populated_key() {
+        let bare = IssueRow {
+            id: "T-9".into(),
+            status: "todo".into(),
+            ..Default::default()
+        };
+        let slim = list_body(&bare, true, false);
+        let full = list_body(&bare, false, false);
+        assert!(slim.get("evidence").is_none(), "a null evidence must not ship on a slim row: {slim}");
+        assert!(slim.get("closed_at").is_none(), "a null closed_at must not ship on a slim row");
+        assert!(full.get("evidence").is_some_and(Value::is_null), "the full row keeps its nulls: {full}");
+        for k in SLIM_KEEPS_NULL {
+            assert!(slim.get(k).is_some(), "`{k}` is kept on a slim row even when null");
+        }
+        for (k, v) in slim.as_object().unwrap() {
+            assert!(
+                !v.is_null() || SLIM_KEEPS_NULL.contains(&k.as_str()),
+                "null `{k}` survived on a slim row"
+            );
+        }
+
+        let populated = IssueRow {
+            evidence: Some("ran it".into()),
+            reviewer: Some("amux".into()),
+            ..bare.clone()
+        };
+        let slim = list_body(&populated, true, false);
+        assert_eq!(slim["evidence"], serde_json::json!("ran it"), "a populated key is never dropped");
+        assert_eq!(slim["reviewer"], serde_json::json!("amux"), "AF-161: a populated reviewer ships");
+    }
+
     #[test]
     fn slim_drops_the_prose_but_keeps_the_two_things_the_list_renders() {
         let row = IssueRow {
@@ -18253,19 +18397,40 @@ mod slim_tests {
             .keys()
             .map(|k| k.as_str())
             .collect();
-        let actually_omitted: Vec<&str> = full_keys.difference(&slim_keys).copied().collect();
-        let declared: Vec<&str> = {
-            let mut d: Vec<&str> = SLIM_OMITS.to_vec();
-            d.sort_unstable();
-            d
-        };
-        assert_eq!(
-            actually_omitted, declared,
-            "SLIM_OMITS must name exactly the fields the slim body drops. Left is what \
-             the payloads actually differ by, right is what the const claims — a field \
-             in one and not the other is a consumer being told the wrong thing about \
-             what it may trust."
-        );
+        // Two rules drop keys from a slim row, and they are checked separately
+        // so neither can hide the other (AMUX-5374): SLIM_OMITS drops a field
+        // WHATEVER its value, and the null rule drops a key only when its value
+        // is null. So a key that carried a VALUE in the full row and is missing
+        // from the slim one must be declared — that is AF-161's property, a
+        // populated field silently withheld — and every other missing key must
+        // be a null the null rule explains.
+        let full_obj = full.as_object().unwrap();
+        let dropped: Vec<&str> = full_keys.difference(&slim_keys).copied().collect();
+        let dropped_with_value: Vec<&str> = dropped
+            .iter()
+            .copied()
+            .filter(|k| !full_obj[*k].is_null())
+            .collect();
+        for k in &dropped_with_value {
+            assert!(
+                SLIM_OMITS.contains(k),
+                "`{k}` carried a value and was dropped from the slim row without being in \
+                 SLIM_OMITS — a consumer is being told the wrong thing about what it may trust"
+            );
+        }
+        for k in &dropped {
+            assert!(
+                SLIM_OMITS.contains(k) || full_obj[*k].is_null(),
+                "`{k}` was dropped but is neither declared nor null"
+            );
+            assert!(!SLIM_KEEPS_NULL.contains(k), "`{k}` must ship even when null");
+        }
+        for k in SLIM_OMITS {
+            assert!(
+                full_keys.contains(k),
+                "SLIM_OMITS declares `{k}`, which the full row does not even carry"
+            );
+        }
         assert_eq!(full["reviewer"], "amux-frustrations");
         assert!(full.get("desc").is_some());
         assert!(

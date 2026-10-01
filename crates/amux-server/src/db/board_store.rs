@@ -3275,14 +3275,28 @@ fn hydrate_light(
     prose: Prose,
 ) -> rusqlite::Result<Vec<IssueRow>> {
     // The projection and the two extra numbers, or neither. Building both here
-    // keeps the "when is desc a prefix" decision in ONE place: a row is
-    // prefixed exactly when `desc_prefixed` comes back 1, and that flag is
-    // computed by the same CASE that chose the projection, so the value and the
-    // claim about it cannot disagree.
+    // keeps the "when is desc a prefix" decision in ONE place: the CASE below
+    // chose the projection, and a row is prefixed exactly when what it returned
+    // is SHORTER than its whole length (see the read side for why `<` decides
+    // it on every row, NUL-bearing ones included).
+    //
+    // The CASE is evaluated ONCE per row (AMUX-5374). It used to be evaluated
+    // twice, once for the projection and once for a `d_prefixed` flag, and each
+    // evaluation is eighteen LIKE scans over desc and log. On the nightly's
+    // 10k-card corpus the slim query took 170ms against 65ms for the FULL one,
+    // so the optimization cost more than the prose it saved.
     let (cols, prefixed) = match prose {
         Prose::Full => (COLS.to_string(), false),
         Prose::SlimDerivations => {
-            let marker = needsyou_marker_sql();
+            // Every marker spelling contains "need", and SQLite's LIKE and
+            // lower() both fold ASCII case only, so this one pass is a NECESSARY
+            // condition for the eighteen LIKEs: a row it rejects cannot match
+            // any of them. Measured 2026-09-30 on the 10k corpus: 98ms vs 131ms
+            // with the LIKEs alone, same rows hydrated whole.
+            let marker = format!(
+                "(instr(lower(COALESCE(i.\"desc\",'')||' '||COALESCE(i.log,'')), 'need') > 0 AND ({}))",
+                needsyou_marker_sql()
+            );
             // WHY A NUL ESCAPES TO THE FULL COLUMN. SQLite's LENGTH() on TEXT
             // stops at the first NUL byte, so `desc_len` would be short for any
             // card carrying one. Two live cards do today (MF-563: a NUL at
@@ -3299,13 +3313,10 @@ fn hydrate_light(
             // `desc_len` is only READ when the row was prefixed, and the CASE
             // above guarantees a prefixed row has no NUL, so plain LENGTH() is
             // exact on every row that uses it.
-            let extra = format!(
-                ", LENGTH(COALESCE(i.\"desc\",'')) AS d_len, \
+            let extra = ", LENGTH(COALESCE(i.\"desc\",'')) AS d_len, \
                  (LENGTH(COALESCE(i.\"desc\",'')||COALESCE(i.log,'')) \
                   - LENGTH(REPLACE(COALESCE(i.\"desc\",'')||COALESCE(i.log,''),'New task:',''))) / 9 \
-                 AS d_folded, \
-                 CASE WHEN {full_desc_when} THEN 0 ELSE 1 END AS d_prefixed"
-            );
+                 AS d_folded";
             (format!("{}{}", cols_with_desc(&desc_expr), extra), true)
         }
     };
@@ -3325,11 +3336,21 @@ fn hydrate_light(
         // to an off-by-one that silently reads the neighbouring field.
         let rows = stmt.query_map(params.as_slice(), |r| {
             let mut row = issue_from_row(r)?;
-            if prefixed && r.get::<_, i64>("d_prefixed")? == 1 {
-                row.desc_prefixed = Some(DescPrefixed {
-                    desc_len: r.get::<_, i64>("d_len")?.max(0) as usize,
-                    folded_n: r.get::<_, i64>("d_folded")?.max(0) as usize,
-                });
+            if prefixed {
+                // PREFIXED EXACTLY WHEN WHAT CAME BACK IS SHORTER THAN THE WHOLE.
+                // A truncated row returns DESC_PREFIX_CHARS against a longer
+                // `d_len`. A whole row returns exactly `d_len`, or MORE when it
+                // carries a NUL (LENGTH stops at the first one, chars() does
+                // not), and a NUL row is always hydrated whole. So `<` is false
+                // for every whole row and true for every cut one, and a short
+                // desc (prefix == whole) takes the ordinary None arm.
+                let d_len = r.get::<_, i64>("d_len")?.max(0) as usize;
+                if row.desc.chars().count() < d_len {
+                    row.desc_prefixed = Some(DescPrefixed {
+                        desc_len: d_len,
+                        folded_n: r.get::<_, i64>("d_folded")?.max(0) as usize,
+                    });
+                }
             }
             Ok(row)
         })?;

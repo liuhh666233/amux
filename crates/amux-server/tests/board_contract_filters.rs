@@ -422,10 +422,33 @@ async fn the_contract_names_exactly_what_the_slim_payload_drops() {
         "the slim payload dropped NOTHING, so this comparison is empty-vs-empty and \
          would pass against a slim mode that does not slim"
     );
-    assert_eq!(
-        actual, claimed,
-        "the contract's slim_omits must equal what the payloads actually differ by. \
-         Left is reality, right is the contract's claim — a field in one and not the \
-         other is a consumer being told the wrong thing about what it may trust."
-    );
+    // TWO RULES, CHECKED APART (AMUX-5374). `slim_omits` drops a field whatever
+    // its value; `slim_null_values` drops a key only when it is null. So:
+    //   - a key that carried a VALUE and is missing must be claimed in slim_omits
+    //     (the populated-field-withheld failure AF-161 was);
+    //   - every claimed field must really be missing;
+    //   - any other missing key must be null in the full row, and must not be one
+    //     the contract says is kept even when null.
+    let kept_null: std::collections::BTreeSet<String> = contract["list"]["slim_null_values"]
+        ["kept_even_when_null"]
+        .as_array()
+        .expect("the contract must publish the null rule under list.slim_null_values")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    for k in &actual {
+        let had_value = !full[k.as_str()].is_null();
+        assert!(
+            claimed.contains(k) || !had_value,
+            "`{k}` carried a value in the full row and is missing from the slim one without \
+             being in slim_omits — a consumer is being told the wrong thing about what it may trust"
+        );
+        assert!(!kept_null.contains(k), "`{k}` is published as kept even when null, yet it is missing");
+    }
+    for k in &claimed {
+        assert!(actual.contains(k), "slim_omits claims `{k}` is dropped, and the slim row carries it");
+    }
+    for k in &kept_null {
+        assert!(slim.get(k.as_str()).is_some(), "`{k}` must ship on a slim row even when null");
+    }
 }

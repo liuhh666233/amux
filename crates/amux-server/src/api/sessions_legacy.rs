@@ -2790,6 +2790,43 @@ pub fn active_python_sessions(conn: &rusqlite::Connection) -> BTreeSet<String> {
     out
 }
 
+/// How long a board read may reuse the last `active_python_sessions` set.
+const BOARD_ACTIVE_SET_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`active_python_sessions`] for the BOARD, reused for a few seconds (AMUX-5374).
+///
+/// The board needs this set only for the `stale` flag, which fires after 30
+/// MINUTES without an update, so a set a few seconds old changes no answer. But
+/// deriving it runs the fleet probes: `tmux list-sessions`, pane captures, `ps`,
+/// the transcript scan. Measured 2026-09-30 with the new `board_list_slow`
+/// phase split on a 68-session machine: sessions_ms=1900 of a 2197ms board read
+/// whose SQL took 165ms and whose rows took 129ms. The dashboard polls the board
+/// constantly, so every poll paid for a fleet scan the session list had already
+/// done.
+///
+/// Same derivation, same function; only the reuse is new, so the two views
+/// still share one predicate. Keyed by home so parallel tests with their own
+/// AMUX_HOME never read each other's set. The lock is held across the probe on
+/// purpose: concurrent board reads wait for one scan instead of each running
+/// their own.
+pub fn active_python_sessions_recent(conn: &rusqlite::Connection) -> BTreeSet<String> {
+    type Slot = Option<(std::path::PathBuf, std::time::Instant, BTreeSet<String>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Slot>> = std::sync::OnceLock::new();
+    let home = amux_home();
+    let mut slot = CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some((h, at, set)) = slot.as_ref() {
+        if *h == home && at.elapsed() < BOARD_ACTIVE_SET_TTL {
+            return set.clone();
+        }
+    }
+    let set = active_python_sessions(conn);
+    *slot = Some((home, std::time::Instant::now(), set.clone()));
+    set
+}
+
 // ---- preview (AMUX-2588) -------------------------------------------------
 
 /// Python's strip_ansi (amux-server.py:20225) — ported verbatim, OSC
