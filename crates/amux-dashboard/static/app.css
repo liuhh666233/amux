@@ -7779,3 +7779,5 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
 /* Continue/Enter/Up/Down are terminal keystrokes; the Chat tab has its own
    composer, so the terminal quick chips do not belong under it. */
 #peek-overlay:has(#peek-body.peek-chat) #peek-chips { display: none; }
+/* Says when the worker-list filters narrow a section ("3 paused (group amux · 22 total)"). */
+.worker-group-scope { color: var(--dim); font-weight: 400; font-size: 0.85em; }

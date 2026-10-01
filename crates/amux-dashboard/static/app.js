@@ -2819,7 +2819,41 @@ function _workerGroupMenu(kind) {
   }).filter(Boolean).join('')+(_workerGroupDeleteNote[kind]?'<span class="worker-group-note">'+esc(_workerGroupDeleteNote[kind])+'</span>':'');
   return '<details class="worker-group-menu"'+(_workerGroupMenuOpen.get(kind)?' open':'')+' ontoggle="_workerGroupMenuOpen.set(\''+kind+'\',this.open)"><summary aria-label="Actions for '+esc(kind)+' workers" title="Actions for this group">⋯</summary><div class="worker-group-dropdown">'+(items||'<span>No available actions</span>')+'</div></details>';
 }
+// The whole population of a section, before the worker-list filters (group
+// pill, hidden groups, provider, model) and the search. Ethan, 2026-10-01: "i
+// see only 3 paused workers and 9 archived, there should be many many more" —
+// the amux group pill was selected, so the sections showed that group only
+// (22 paused and 138 archived fleet-wide) and nothing on screen said so.
+function _workerGroupTotal(kind) {
+  if(kind==='project') return sessions.filter(s=>!!s.project).length;
+  if(kind==='review') return sessions.filter(s=>s.lifecycle==='review'&&!s.archived&&!s.project).length;
+  if(kind==='paused') return sessions.filter(s=>s.lifecycle==='paused'&&!s.archived&&!s.project).length;
+  if(kind==='archived') return sessions.filter(s=>!!s.archived&&!s.project).length;
+  return null;
+}
+function _workerListFilterLabel() {
+  const parts=[];
+  if(activeTag) parts.push('group '+activeTag);
+  if(hiddenTags.size) parts.push(hiddenTags.size+' hidden group'+(hiddenTags.size===1?'':'s'));
+  if(filterProviders.size) parts.push([...filterProviders].join('/'));
+  if(filterModels.size) parts.push([...filterModels].join('/'));
+  return parts.join(', ');
+}
+function _workerGroupScope(kind) {
+  const total=_workerGroupTotal(kind);
+  const scope=_workerListFilterLabel();
+  if(total===null || !scope) return '';
+  const shown=sessions.filter(s=>{
+    if(kind==='project') return !!s.project;
+    if(kind==='review') return s.lifecycle==='review'&&!s.archived&&!s.project;
+    if(kind==='paused') return s.lifecycle==='paused'&&!s.archived&&!s.project;
+    return !!s.archived&&!s.project;
+  }).filter(_workerListFilterPass).length;
+  if(shown===total) return '';
+  return ' <span class="worker-group-scope">('+esc(scope)+' · '+total+' total)</span>';
+}
 function _workerGroupFooter(kind,label,expanded,onclick) {
+  label += _workerGroupScope(kind);
   const members=_workerGroupMembers(kind).map(s=>s.name);
   const nSel=members.filter(n=>_workerSel.has(n)).length;
   const all=members.length&&nSel===members.length;
@@ -13591,7 +13625,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1203';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1204';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
