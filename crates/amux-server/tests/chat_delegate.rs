@@ -118,6 +118,17 @@ async fn a_chat_delegate_reads_the_live_worker_without_ever_touching_it() {
     };
     let app = router(state.clone());
 
+    // A delegate is a background job on the EXISTING worker, never a worker of
+    // its own (Ethan, 2026-10-01: "it should be a background task on the
+    // existing chats worker"). The worker list must not change around a job.
+    let worker_names = |v: &Value| -> Vec<String> {
+        let mut n: Vec<String> = v.as_array().map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+        n.sort();
+        n
+    };
+    let (_, before_list) = call(&app, "GET", "/api/sessions", "", None).await;
+    let workers_before = worker_names(&before_list);
+
     // 1. A fresh delegate: read-only, sees uncommitted work, answers into the Chat.
     let (code, r) = call(&app, "POST", "/api/chat-delegate", "social@chat",
         Some(json!({"prompt": "what is the dress code?", "wait_s": 0}))).await;
@@ -140,9 +151,12 @@ async fn a_chat_delegate_reads_the_live_worker_without_ever_touching_it() {
     }
     assert!(!repo.join("pwned.txt").exists(), "nothing may be written into the worker's checkout");
     assert_eq!(index_fingerprint(&repo), index_before, "the shared git index is untouched");
-    // Never anything into the worker's pane: tmux was only asked to PRINT.
+    // Never anything into the worker's pane: no tmux verb that sends input.
+    assert!(logged.lines().any(|l| l.starts_with("TMUX capture-pane ")), "the seed read the pane: {logged}");
     for line in logged.lines().filter(|l| l.starts_with("TMUX ")) {
-        assert!(line.starts_with("TMUX capture-pane "), "a delegate may only read the pane: {line}");
+        for input in ["send-keys", "paste-buffer", "load-buffer", "set-buffer", "respawn-pane", "kill-"] {
+            assert!(!line.contains(input), "nothing may be sent to the worker's pane: {line}");
+        }
     }
     // The answer reaches the Chat exactly once (the Chat is not running, so it is recorded).
     let mut delivered = 0;
@@ -158,6 +172,12 @@ async fn a_chat_delegate_reads_the_live_worker_without_ever_touching_it() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (_, h) = call(&app, "GET", "/api/sessions/social@chat/chat", "", None).await;
     assert_eq!(delegate_messages(&h), 1, "and never twice");
+    let (_, after_list) = call(&app, "GET", "/api/sessions", "", None).await;
+    let workers_after = worker_names(&after_list);
+    assert_eq!(workers_after, workers_before, "a delegate job never creates or lists a worker");
+    assert!(!workers_after.iter().any(|n| n.contains("@delegate") || n.starts_with("dg-")), "{workers_after:?}");
+    assert!(!home.join("sessions").read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("delegate")),
+        "no session file is written for a delegate");
 
     // 1b. Attribution: a LANE posting to a Chat tab is that lane, not the owner.
     // An owner send would start the stopped Chat; a lane's is refused instead.
