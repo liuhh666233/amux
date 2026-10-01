@@ -3642,6 +3642,14 @@ so the driver parks this card and resumes it when the blocker completes."
       created=$(_curl -sk -X POST -H 'Content-Type: application/json' -H "X-Amux-Worker: $worker" \
         -d "$(T="$title" S="$worker" I="$id" python3 -c 'import json,os;print(json.dumps({"title":os.environ["T"],"session":os.environ["S"],"status":"todo","tags":["blocks:"+os.environ["I"]]}))')" \
         "$api/api/board") || die "cannot reach the board to create the blocker task"
+      # A full todo queue refuses the create (todo_wip_limit_reached); the
+      # blocker still has to exist, so file it in backlog and say so.
+      if printf '%s' "$created" | grep -q 'todo_wip_limit_reached'; then
+        created=$(_curl -sk -X POST -H 'Content-Type: application/json' -H "X-Amux-Worker: $worker" \
+          -d "$(T="$title" S="$worker" I="$id" python3 -c 'import json,os;print(json.dumps({"title":os.environ["T"],"session":os.environ["S"],"status":"backlog","tags":["blocks:"+os.environ["I"]]}))')" \
+          "$api/api/board") || die "cannot reach the board to create the blocker task"
+        echo "note: your todo queue is full, so the blocker was filed in backlog" >&2
+      fi
       bid=$(printf '%s' "$created" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin)
@@ -6528,7 +6536,9 @@ _land_cancel() {
     rm -f -- "${f:?}"
   done
   if [ "$n" -eq 0 ]; then
-    echo "amux land: no detached land of $me found for ${want:+pid $want}${want:-this checkout ($here)}. Others of this session:"
+    local _what="this checkout ($here)"
+    [ -n "$want" ] && _what="pid $want"
+    echo "amux land: no detached land of $me found for $_what (a land launched by hand, without --detach, is not recorded: stop it with kill -TERM -- -<its process group>). Others of this session:"
     for f in "$d"/*; do
       [ -f "$f" ] && [ "$(sed -n 1p "$f")" = "$me" ] && kill -0 "${f##*/}" 2>/dev/null && echo "  pid ${f##*/} from $(sed -n 3p "$f" || echo '?')"
     done
