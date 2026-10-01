@@ -451,6 +451,28 @@ impl MatchVerdict {
 ///
 /// The candidate with the most shared words wins. Its caps then decide
 /// Applied versus CapReached.
+/// Phrases that mean the ask needs the OWNER IN PERSON: their identity, their
+/// sign-in, their second factor. An approval answers a decision ("may I?"); it
+/// cannot perform a Persona ID check or type a password. Found 2026-09-30:
+/// SA-6, learned from "should amux get a ChatGPT directory listing?", matched
+/// the follow-up "complete the OpenAI identity check (ID + selfie)" on shared
+/// words and refused to park it, leaving no truthful way to record the ask.
+/// Lowercase substrings; deliberately not a bare "password", which also names
+/// work a lane can do itself ("rotate the database password").
+const OWNER_PRESENCE_TERMS: &[&str] = &[
+    "identity verification", "identity check", "verify your identity",
+    "verified developer identity", "government id", "selfie", "persona check",
+    "withpersona.com", "passkey", "two-factor", "2fa", "one-time code",
+    "your password", "his password", "owner's password", "biometric",
+    "face id", "touch id", "in person",
+];
+
+/// The first owner-presence phrase in `text`, if any.
+pub fn owner_presence_term(text: &str) -> Option<&'static str> {
+    let t = text.to_ascii_lowercase();
+    OWNER_PRESENCE_TERMS.iter().copied().find(|p| t.contains(p))
+}
+
 pub fn match_ask(
     approvals: &[StandingApproval],
     text: &str,
@@ -460,6 +482,13 @@ pub fn match_ask(
     now: i64,
     uses_today: &dyn Fn(i64) -> i64,
 ) -> MatchVerdict {
+    if let Some(term) = owner_presence_term(text) {
+        return MatchVerdict::NoMatch {
+            reason: format!(
+                "owner_presence_required: the ask needs the owner to act in person (\"{term}\"); a standing approval answers a decision, not that"
+            ),
+        };
+    }
     let ask_toks = tokens(text);
     let cats = infer_categories(text);
     let declared = declared_category
@@ -1769,6 +1798,30 @@ pub(crate) mod tests {
 
     fn m(text: &str, cat: Option<&str>, session: &str, used: i64) -> MatchVerdict {
         match_ask(&seeded(), text, cat, session, &[], 1000, &|_| used)
+    }
+
+    #[test]
+    fn an_owner_presence_ask_is_never_covered_and_the_decision_still_is() {
+        // The SA-6 shape: learned from the owner approving a listing decision.
+        let mut a = seeded().remove(0);
+        a.category = "decision".into();
+        a.title = "Approved AMUX-5397: public ChatGPT directory listing via cloud.amux.io/mcp".into();
+        a.allowed = "Should amux get a public ChatGPT directory listing (cloud.amux.io/mcp front door)?".into();
+        a.require_terms.clear();
+        a.max_per_day = None;
+        a.max_amount_usd = None;
+        let ask = "Will you complete the OpenAI identity check (government ID + selfie) so amux can upload the ChatGPT directory listing?";
+        match match_ask(std::slice::from_ref(&a), ask, Some("decision"), "amux", &[], 1000, &|_| 0) {
+            MatchVerdict::NoMatch { reason } => assert!(reason.starts_with("owner_presence_required"), "{reason}"),
+            other => panic!("an ID check was answered by an approval: {other:?}"),
+        }
+        // THE CONTROL: the same approval still covers the decision it was learned from.
+        let decision = "Should amux get a public ChatGPT directory listing through the cloud.amux.io/mcp front door?";
+        assert!(
+            matches!(match_ask(std::slice::from_ref(&a), decision, Some("decision"), "amux", &[], 1000, &|_| 0), MatchVerdict::Applied { .. }),
+            "the guard swallowed the decision it must leave alone"
+        );
+        assert_eq!(owner_presence_term("rotate the database password"), None);
     }
 
     #[test]
