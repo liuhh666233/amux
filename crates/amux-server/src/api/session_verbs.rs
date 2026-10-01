@@ -19763,13 +19763,65 @@ pub(crate) async fn steer_delivery_for(state: &AppState, name: &str, age_s: f64)
             warn_background_override_once(name, raw, status == "idle");
         }
     }
-    steer_decide_with_background(
+    let held = steer_decide_with_background(
         Some(&status),
         None,
         age_s,
         steer_max_age_s(),
         background_working,
+    );
+    steer_background_ceiling(
+        name,
+        held,
+        age_s,
+        background_working,
+        &provider_of(&parse_env(name)),
+        steer_background_max_age_s(),
     )
+}
+
+/// How long the background-work hard hold may keep a message from a Claude
+/// lane. `AMUX_STEER_BACKGROUND_MAX_AGE_S`, default 30 minutes; 0 means never
+/// release (the pre-2026-10-01 behaviour).
+pub(crate) fn steer_background_max_age_s() -> f64 {
+    env_secs_i64("AMUX_STEER_BACKGROUND_MAX_AGE_S", 1800) as f64
+}
+
+/// The ceiling on the background-work hard hold (AH-279, 2026-10-01).
+///
+/// The hold was added for Codex (ATE-45), where input during a live
+/// background terminal interrupted the parent turn and killed a test run. It
+/// had no end: a Claude lane with a forgotten background shell, or one running
+/// a long push hook, never reached a boundary, so nothing queued for it was
+/// ever delivered. Measured: amux-helper held the owner's SCHED-543 "Send
+/// now" presses and an hourly run for 94 minutes, gs12-model for 48 and
+/// gs12-obs for 17, with the only signal a WARN in the server log.
+///
+/// Claude Code takes a mid-turn paste into its own queue and folds it in at
+/// the turn's end without interrupting it (AMUX-2909), so for a Claude lane
+/// the hold is released at the ceiling. Other providers keep the hard hold.
+pub(crate) fn steer_background_ceiling(
+    name: &str,
+    held: SteerDelivery,
+    age_s: f64,
+    background_working: bool,
+    provider: &str,
+    ceiling_s: f64,
+) -> SteerDelivery {
+    if held != SteerDelivery::Hold || !background_working || provider != "claude" {
+        return held;
+    }
+    if ceiling_s <= 0.0 || age_s < ceiling_s {
+        return held;
+    }
+    tracing::warn!(
+        session = %name, age_s = age_s as i64, ceiling_s = ceiling_s as i64,
+        measured = true, n_considered = 1,
+        verdict = "steer_background_hold_released",
+        "steering held past AMUX_STEER_BACKGROUND_MAX_AGE_S behind live background work; \
+         delivering by paste, which Claude Code queues to the end of the turn"
+    );
+    SteerDelivery::OverdueMidTurn
 }
 
 /// One pass: deliver queued steering to every lane that is at a turn boundary.
@@ -46052,6 +46104,21 @@ mod steer_freeze_tests {
     /// was still running. Delivery interrupted the conversation. The shared
     /// steering predicate must hold until the row reaches its terminal form.
     #[test]
+    fn the_background_hold_on_a_claude_lane_ends_at_its_ceiling() {
+        let c = |held, age, bg, prov, ceil| steer_background_ceiling("x", held, age, bg, prov, ceil);
+        assert_eq!(c(SteerDelivery::Hold, 1799.0, true, "claude", 1800.0), SteerDelivery::Hold, "young: still held");
+        assert_eq!(
+            c(SteerDelivery::Hold, 1800.0, true, "claude", 1800.0),
+            SteerDelivery::OverdueMidTurn,
+            "94 minutes behind a forgotten shell (AH-279) must end"
+        );
+        assert_eq!(c(SteerDelivery::Hold, 86_400.0, true, "claude", 0.0), SteerDelivery::Hold, "0 disables the ceiling");
+        assert_eq!(c(SteerDelivery::Hold, 86_400.0, false, "claude", 1800.0), SteerDelivery::Hold,
+            "a hold with no background work is not this hold");
+        assert_eq!(c(SteerDelivery::AtBoundary, 0.0, true, "claude", 1800.0), SteerDelivery::AtBoundary);
+    }
+
+    #[test]
     fn board_drive_and_steering_hold_for_a_codex_background_terminal() {
         assert_eq!(detect_claude_status(CODEX_BACKGROUND_TERMINAL), "active");
         assert!(provider_background_working(CODEX_BACKGROUND_TERMINAL));
@@ -46069,6 +46136,11 @@ mod steer_freeze_tests {
             steer_decide_with_background(Some("idle"), None, 86_400.0, 600.0, true),
             SteerDelivery::AtBoundary,
             "a weaker background hint cannot contradict the shared idle verdict and starve steering"
+        );
+        assert_eq!(
+            steer_background_ceiling("x", SteerDelivery::Hold, 86_400.0, true, "codex", 1800.0),
+            SteerDelivery::Hold,
+            "a Codex lane keeps the hard hold at any age"
         );
 
         assert!(matches!(
