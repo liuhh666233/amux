@@ -6523,8 +6523,14 @@ _land_cancel() {
     if [ -n "$want" ]; then
       [ "$pid" = "$want" ] || continue
     else
-      # A record from before checkouts were recorded has no line 3: leave it
-      # to an explicit pid rather than guess which checkout it belongs to.
+      # A record from before checkouts were recorded has no line 3 (gs12-cicd,
+      # 2026-10-01: such a land was skipped and left queued). Read the
+      # checkout from the process's own cwd instead of guessing.
+      if [ -z "$where" ] && kill -0 "$pid" 2>/dev/null; then
+        local _pcwd
+        _pcwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+        [ -n "$_pcwd" ] && where="$(git -C "$_pcwd" rev-parse --show-toplevel 2>/dev/null || echo "$_pcwd")"
+      fi
       [ "$where" = "$here" ] || continue
     fi
     if kill -0 "$pid" 2>/dev/null; then
@@ -6535,6 +6541,28 @@ _land_cancel() {
     fi
     rm -f -- "${f:?}"
   done
+  # Lands with no record at all (started before --cancel recorded them, or by
+  # hand): find running `amux land` processes whose cwd is this checkout and
+  # stop their process groups (gs12-tiering, 2026-10-01: a 16:31Z land was
+  # invisible to --cancel and needed SIGKILL by hand).
+  if [ -z "$want" ]; then
+    local line ppid_ pgid cmd pcwd ptop
+    while read -r pid pgid cmd; do
+      [ "$pid" != "$$" ] && [ "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] || continue
+      case "$cmd" in *"amux land"*) ;; *) continue ;; esac
+      case "$cmd" in *--cancel*|*--status*|*--help*) continue ;; esac
+      pcwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+      [ -n "$pcwd" ] || continue
+      ptop="$(git -C "$pcwd" rev-parse --show-toplevel 2>/dev/null || echo "$pcwd")"
+      [ "$ptop" = "$here" ] || continue
+      kill -TERM -- "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      sleep 3
+      kill -0 "$pid" 2>/dev/null && { kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; }
+      echo "amux land: cancelled unrecorded land pid $pid (process group $pgid) in $here"
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "cancelled unrecorded land (pid $pid, pgid $pgid, $here)" >> "$HOME/.amux/logs/land.log"
+      n=$((n + 1))
+    done < <(ps -Ao pid=,pgid=,command= 2>/dev/null | awk '/amux land/ && !/awk/')
+  fi
   if [ "$n" -eq 0 ]; then
     local _what="this checkout ($here)"
     [ -n "$want" ] && _what="pid $want"
@@ -6815,6 +6843,13 @@ p.communicate(msg.encode())
           _land_log "left out of a batch ($res); keeping its place in the queue"
           ;;
       esac
+    fi
+    # Keep the ticket's commit current: a batch replays what the ticket names,
+    # and a lane that rebased while waiting was excluded for conflicts its
+    # queue-time commit had (gs12-planes, 2026-10-01: three exclusions after a
+    # clean rebase at 18:25Z).
+    if [ -z "$land_sha" ] && [ -f "${q:?}/${tname:?}" ] && [ "$(sed -n 2p "$q/$tname")" != "$(git rev-parse HEAD 2>/dev/null)" ]; then
+      _land_ticket
     fi
     for t in "$q"/*; do
       [ -e "$t" ] || continue
