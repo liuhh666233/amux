@@ -6444,7 +6444,7 @@ cmd_land() {
   # lane's refusal. --no-batch keeps a lane out of batches in both roles.
   #
   # --priority queues ahead of every ordinary waiter (priority waiters keep
-  # their own arrival order). For a push that makes every push behind it
+  # their own arrival order) and, as the holder, pushes alone, never batching. For a push that makes every push behind it
   # cheaper, e.g. a faster gate (gs12-gates, 2026-10-01). Logged; the
   # orchestrator, not each lane, should decide who uses it.
   #
@@ -6680,7 +6680,11 @@ cmd_land() {
       return 2
     fi
     stack_tip="$(git rev-parse HEAD)"; stack_in=""
-    [ "$solo" = 1 ] || _land_stack "$stack_tip"
+    # A --priority holder pushes alone: it jumped the queue to land fast, and
+    # a batch carries other lanes' risk. Measured 2026-10-01: gs12-gates'
+    # priority push batched three lanes at 15:05Z, a planes schema test in one
+    # of them refused the batch at 15:54Z, and the priority push started over.
+    [ "$solo" = 1 ] || [ "$priority" = 1 ] || _land_stack "$stack_tip"
     lanes="$(printf '%s' "$stack_in" | awk 'NF {printf "%s%s", sep, $2; sep=", "}')"
     [ -z "$lanes" ] || _land_log "batching ${lanes} behind this push (one gate run)"
     # `|| rc=$?`, not `; rc=$?`: this CLI runs under set -e, and a rejected
