@@ -71,6 +71,15 @@ test('needs-input chip has its own row, is not clipped, and opens the card with 
   await page.fill('#bd-answer-text', 'Go ahead tonight.');
   await page.click('#bd-answer-send');
   await expect(page.locator('#toast')).toContainText('Answered', { timeout: 10000 });
+  // The toast must say which it was, never claim delivery it has not seen.
+  await expect(page.locator('#toast')).toContainText(/queued for ni-worker|sent to ni-worker/);
+  // An owner message is accepted durably into the device outbox and delivered
+  // by the outbox replay right after (by design: the composer never waits on
+  // the terminal). So the toast can precede the HTTP send, and on WebKit it
+  // does (CI run 36935815491). Wait for the delivery, then require exactly one:
+  // a second, duplicate send would still fail here.
+  await expect.poll(() => sent.length, { timeout: 15000 }).toBeGreaterThanOrEqual(1);
+  await page.waitForTimeout(1500);
   expect(sent).toHaveLength(1);
   expect(sent[0].text).toContain('Go ahead tonight.');
   expect(String(sent[0].msg_id)).toMatch(/^triage-/);
