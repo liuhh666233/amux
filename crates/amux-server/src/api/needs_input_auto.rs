@@ -367,6 +367,16 @@ pub fn never_reason(item: &Value) -> Option<&'static str> {
     if owner_act.iter().any(|re| regex::Regex::new(re).map(|r| r.is_match(&t)).unwrap_or(false)) {
         return Some("owner_must_act");
     }
+    // A CALL THE TEXT RESERVES FOR THE OWNER ("your call", "Ethan's call").
+    // 2026-10-01: AH-296, a goal-spec scope choice for Ethan, was approved
+    // automatically minutes after he had questioned that very scope cut. An
+    // either/or alone is NOT enough: the policy deliberately approves "now, or
+    // wait for gs-4?" as the worker's call; the lane has to SAY the choice is
+    // the owner's, and then approval cannot answer it.
+    let reserved = r"\b(your call|your decision|your choice|yours to (decide|make|call)|up to you|you decide|you choose|(ethan|the owner)'?s (call|decision|choice))\b";
+    if regex::Regex::new(reserved).map(|r| r.is_match(&t)).unwrap_or(false) {
+        return Some("reserved_for_owner");
+    }
     None
 }
 

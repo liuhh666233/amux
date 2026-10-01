@@ -1946,18 +1946,34 @@ fn self_owned_backlog_blockers(
     dep_ids
         .iter()
         .filter(|d| {
-            let row: Option<(String, Option<String>)> = conn
+            // status, session, source_ref, last_verified_at
+            type DepRow = (String, Option<String>, Option<String>, Option<i64>);
+            let row: Option<DepRow> = conn
                 .query_row(
-                    "SELECT status, session FROM legacy_execution_issues AS issues WHERE id=?1 AND deleted IS NULL",
+                    "SELECT status, session, source_ref, last_verified_at FROM legacy_execution_issues AS issues WHERE id=?1 AND deleted IS NULL",
                     rusqlite::params![d],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()
                 .ok()
                 .flatten();
-            matches!(row, Some((ref st, Some(ref sess)))
-                if sess == session
-                    && matches!(bs::parse_status(st), Some(TaskStatus::Backlog)))
+            let Some((st, Some(sess), source_ref, verified_at)) = row else { return false };
+            if sess != session || !matches!(bs::parse_status(&st), Some(TaskStatus::Backlog)) {
+                return false;
+            }
+            // A dependency PARKED ON A TRIGGER (`--trigger`: source_ref plus a
+            // fresh last_verified_at) is a decision, not an oversight; the
+            // drain already honours it for SOURCE_REF_STALE_S. Promoting it
+            // anyway re-claimed gs12-planes' GP-189 three times within ten
+            // minutes of parking (2026-10-01, blocked card GP-190).
+            let parked = source_ref.as_deref().unwrap_or("").trim() != ""
+                && verified_at.is_some_and(|at| at > crate::config::now_f64() as i64 - SOURCE_REF_STALE_S);
+            if parked {
+                tracing::info!(session, dep = %d, measured = true, n_considered = 1,
+                    verdict = "self_owned_blocker_parked_skip",
+                    "own backlog dependency is parked on an external trigger; not promoted");
+            }
+            !parked
         })
         .cloned()
         .collect()
@@ -9801,6 +9817,32 @@ mod tests {
     ///
     /// The cost was not the park. The workaround was to CLEAR depends_on on both
     /// cards, destroying the dependency graph the parker exists to enforce.
+    #[test]
+    fn a_dependency_parked_on_a_trigger_is_not_promoted_by_its_blocked_sibling() {
+        // gs12-planes, 2026-10-01: GP-189 parked with --trigger was promoted
+        // back to todo three times in ten minutes because GP-190 depended on it.
+        let mut conn = Connection::open_in_memory().expect("memdb");
+        crate::db::migrate::apply_all(&mut conn).expect("schema");
+        let now = crate::config::now_f64() as i64;
+        for (id, source_ref, verified) in [
+            ("GP-PARKED", "waits on GP-186's tenant plane", Some(now - 60)),
+            ("GP-STALE-PARK", "an old trigger", Some(now - SOURCE_REF_STALE_S - 60)),
+            ("GP-PLAIN", "", None),
+        ] {
+            conn.execute(
+                "INSERT INTO issues (id, title, status, type, session, owner_type, source_ref, last_verified_at, created, updated)
+                 VALUES (?1, ?1, 'backlog', 'code', 'gs12-planes', 'agent', ?2, ?3, ?4, ?4)",
+                rusqlite::params![id, source_ref, verified, 1_760_000_000.0_f64],
+            )
+            .expect("insert");
+        }
+        let deps: Vec<String> = ["GP-PARKED", "GP-STALE-PARK", "GP-PLAIN"].iter().map(|s| s.to_string()).collect();
+        let promotable = self_owned_backlog_blockers(&conn, &deps, "gs12-planes");
+        assert!(!promotable.contains(&"GP-PARKED".to_string()), "a fresh trigger park is a decision");
+        assert!(promotable.contains(&"GP-STALE-PARK".to_string()), "a trigger past SOURCE_REF_STALE_S is promotable again");
+        assert!(promotable.contains(&"GP-PLAIN".to_string()), "an ordinary own backlog dep is still promoted");
+    }
+
     #[test]
     fn a_park_names_why_a_done_dependency_still_blocks() {
         let mut conn = Connection::open_in_memory().expect("memdb");

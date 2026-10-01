@@ -435,3 +435,15 @@ fn a_new_primitive_or_route_is_public_surface() {
     assert_eq!(d("Should app slug availability be checkable (for example a new GET) before a create or PATCH attempt?"), Decision::Never("public_surface"));
     assert_eq!(d("Should I get a new test fixture for the flaky suite?"), Decision::Approve);
 }
+
+#[test]
+fn a_call_the_lane_reserves_for_the_owner_is_never_approved() {
+    // AH-296, 2026-10-01: a scope choice for Ethan, approved automatically.
+    let ah296 = item("card", "decision", "decision",
+        "This is Ethan's call: keep goal spec 12's full scope and accept a later finish, or keep Sunday and narrow to what the 66 completion cards depend on?");
+    assert_eq!(never_reason(&ah296), Some("reserved_for_owner"));
+    let reserved = item("card", "decision", "judgment", "Cutting scope or moving the date is your call.");
+    assert_eq!(never_reason(&reserved), Some("reserved_for_owner"));
+    let worker_choice = item("card", "decision", "decision", "Want me to go after the Gemini source now, or wait for gs-4?");
+    assert_eq!(never_reason(&worker_choice), None, "an either/or the lane did not reserve stays approvable (policy)");
+}

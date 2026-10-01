@@ -386,7 +386,24 @@ pub(crate) fn boundary_of(context: &str) -> Option<Boundary> {
     {
         return Some(Boundary::OwnerOnly);
     }
+    // A DECISION THE TEXT RESERVES FOR THE OWNER. amux-helper, 2026-10-01: a
+    // turn ended "That's when to decide between cutting scope and moving the
+    // date, which is your call, not the orchestrator's", the steer answered
+    // "proceed ... take your recommended one", and the lane sent goal spec 12's
+    // orchestrator a scope cut Ethan had not made ("wait hang on ur limiting
+    // the scope of GS-12?"). It fired again on the apology that explained it.
+    // When the lane itself says a choice is the owner's, "proceed" decides it
+    // in his name; a card asks him instead.
+    if reserved_for_owner(&c) {
+        return Some(Boundary::OwnerOnly);
+    }
     None
+}
+
+/// The text says a choice is the owner's to make (see boundary_of).
+fn reserved_for_owner(lower: &str) -> bool {
+    rx!(r"\b(your call|your decision|your choice|yours to (decide|make|call)|up to you|you decide|you choose|you'?ll decide|(ethan|the owner)'?s (call|decision|choice))\b")
+        .is_match(lower)
 }
 
 /// Classify the final assistant text of a turn.
@@ -421,8 +438,19 @@ pub(crate) fn classify_owner_ask(text: &str) -> OwnerAsk {
         .enumerate()
         .flat_map(|(p, chunk)| std::iter::repeat_n(p, sentences(chunk).len()))
         .collect();
+    // A reserved decision ("which is your call") in the ask's OWN paragraph
+    // counts even when the picked ask is the sentence before it (the
+    // 2026-10-01 scope-cut steer). An earlier paragraph does not: a report's
+    // "Needs your call:" bullets above a standalone ask stay out (AMH-17).
+    let mut reserved_in_para = false;
     let (sentence, context) = match (hit, marker) {
         (Some((i, s)), _) => {
+            if para_of.len() == sents.len() {
+                reserved_in_para = sents
+                    .iter()
+                    .zip(&para_of)
+                    .any(|(t, p)| *p == para_of[i] && reserved_for_owner(t));
+            }
             // A short ask ("Want me to do it?") leans on the sentence before it
             // wherever that sits; a full one stands alone across a paragraph.
             let same_para = para_of.len() == sents.len() && i > 0 && para_of[i - 1] == para_of[i];
@@ -445,6 +473,7 @@ pub(crate) fn classify_owner_ask(text: &str) -> OwnerAsk {
             .iter()
             .any(|s| sign_in_at_re().is_match(s))
             .then_some(Boundary::OwnerOnly)
+            .or(reserved_in_para.then_some(Boundary::OwnerOnly))
     });
     match boundary {
         Some(kind) => OwnerAsk::Boundary { sentence, kind },
@@ -1945,5 +1974,21 @@ mod tests {
     #[test]
     fn steer_text_carries_no_em_dash() {
         assert!(!steer_text("Say go and I'll do it.").contains('\u{2014}'));
+    }
+
+    #[test]
+    fn a_decision_the_lane_reserves_for_the_owner_is_never_steered_to_proceed() {
+        for text in [
+            "If plan items are under 1.5/h, I'll tell you. That's when to decide between cutting scope and moving the date, which is your call, not the orchestrator's.",
+            "How it happened: I had told you that narrowing scope versus moving the date was your call.",
+            "Keep full scope or keep Sunday? That one is up to you.",
+        ] {
+            if let OwnerAsk::InBoundary { sentence } = classify_owner_ask(text) {
+                panic!("steered to proceed: {sentence}")
+            }
+        }
+        assert!(boundary_of("which is your call, not the orchestrator's.").is_some(), "direct boundary_of");
+        assert!(boundary_of("want me to rerun the flaky test?").is_none(),
+            "an ordinary in-lane ask stays in boundary");
     }
 }

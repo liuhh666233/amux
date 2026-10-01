@@ -6471,7 +6471,7 @@ USAGE
 
 # _land_status: the queue as land will serve it, the holder, and an estimate.
 _land_status() {
-  local remote=origin branch=main url key lock q me holder since n=0 t who mine="" med
+  local remote=origin branch=main url key lock q me since n=0 t who mine="" med
   url="$(git remote get-url "$remote" 2>/dev/null)" || die "amux land --status: run it inside the repository's checkout"
   key="$(printf '%s %s' "$url" "$branch" | shasum | cut -c1-16)"
   lock="$HOME/.amux/locks/land-$key"; q="$lock.q"
@@ -6546,7 +6546,7 @@ _land_cancel() {
   # stop their process groups (gs12-tiering, 2026-10-01: a 16:31Z land was
   # invisible to --cancel and needed SIGKILL by hand).
   if [ -z "$want" ]; then
-    local line ppid_ pgid cmd pcwd ptop
+    local pgid cmd pcwd ptop
     while read -r pid pgid cmd; do
       [ "$pid" != "$$" ] && [ "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] || continue
       case "$cmd" in *"amux land"*) ;; *) continue ;; esac
@@ -6869,10 +6869,12 @@ p.communicate(msg.encode())
     # priority tickets that arrived after it. Only a ticket's own waiter
     # renames it.
     if [ "${tname:0:3}" != "000" ] && [ $(( $(date +%s) - 10#${tname%%-*} )) -gt "${AMUX_LAND_PRIORITY_AGING_S:-7200}" ]; then
-      local aged="000$(printf '%09d' $(( 10#${tname%%-*} % 1000000000 )))-$$"
+      local aged
+      aged="000$(printf '%09d' $(( 10#${tname%%-*} % 1000000000 )))-$$"
       if mv -- "${q:?}/${tname:?}" "${q:?}/${aged:?}" 2>/dev/null; then
         _land_log "waited past ${AMUX_LAND_PRIORITY_AGING_S:-7200}s; ticket aged into the priority order at its arrival time"
         tname="$aged"
+        # shellcheck disable=SC2064  # expanded now on purpose: locals are gone when the trap runs
         trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
         head="$(ls "$q" | sort | head -1)"
       fi

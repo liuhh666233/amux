@@ -1086,8 +1086,9 @@ async fn deliver_rules_live(
         if crate::api::session_verbs::session_is_isolated(w) {
             continue;
         }
+        let st = crate::backend::tmux::session_target(&format!("amux-{w}"));
         let running = std::process::Command::new("tmux")
-            .args(["has-session", "-t", &format!("=amux-{w}")])
+            .args(["has-session", "-t", &st])
             .status()
             .is_ok_and(|s| s.success());
         if !running {
