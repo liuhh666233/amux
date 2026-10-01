@@ -159,6 +159,12 @@ async fn a_chat_delegate_reads_the_live_worker_without_ever_touching_it() {
     let (_, h) = call(&app, "GET", "/api/sessions/social@chat/chat", "", None).await;
     assert_eq!(delegate_messages(&h), 1, "and never twice");
 
+    // 1b. Attribution: a LANE posting to a Chat tab is that lane, not the owner.
+    // An owner send would start the stopped Chat; a lane's is refused instead.
+    let (code, r) = call(&app, "POST", "/api/sessions/social@chat/send", "some-helper",
+        Some(json!({"text": "probe from a helper"}))).await;
+    assert_eq!(code, 409, "a lane's send is not the owner's and cannot start a stopped Chat: {r}");
+
     // 2. The API guard: a delegate identity may read, never change anything.
     let (code, _) = call(&app, "POST", "/api/board", "social@delegate", Some(json!({"title": "x"}))).await;
     assert_eq!(code, 403, "a delegate cannot write the board");

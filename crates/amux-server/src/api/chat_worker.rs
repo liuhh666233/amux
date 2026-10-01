@@ -163,6 +163,7 @@ pub(crate) async fn companion_route(
     action: &str,
     receipt_msg_id: Option<&str>,
     body: &Value,
+    caller: &str,
 ) -> Response {
     let key = companion_key(worker);
     if !env_path(worker).exists() {
@@ -194,7 +195,18 @@ pub(crate) async fn companion_route(
     if text.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "empty message"}))).into_response();
     }
-    let Dispatch::Handled((ok, message)) = ChatAdapter.deliver(state, &key, &text, SendOrigin::Owner).await else {
+    // WHO IS ASKING (AMUX-5432, found 2026-10-01): a send carrying a lane's
+    // session header is that lane, not the owner. Every Chat-tab send used to
+    // be recorded as the owner's, so a helper's test message drew an
+    // "[amux accountability] ... no board card" nudge as if Ethan had asked.
+    // The dashboard sends with no session header and stays the owner's.
+    let from_owner = caller.trim().is_empty();
+    let origin = if from_owner { SendOrigin::Owner } else { SendOrigin::Automation };
+    if !from_owner {
+        tracing::info!(session = %key, caller, verdict = "chat_companion_send_from_lane",
+            "a lane sent to a Chat tab; recorded as that lane, not the owner");
+    }
+    let Dispatch::Handled((ok, message)) = ChatAdapter.deliver(state, &key, &text, origin).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": "chat adapter did not handle the send"}))).into_response();
     };
     if !ok {
@@ -212,7 +224,7 @@ pub(crate) async fn companion_route(
         worker,
         &text,
         "chat",
-        "chat-companion",
+        if from_owner { "chat-companion" } else { caller },
         true,
         super::session_verbs::DeliveryMeta::default(),
     )

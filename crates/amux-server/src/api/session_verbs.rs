@@ -22810,8 +22810,14 @@ async fn dispatch(
     if let Some(worker) = super::chat_worker::companion_parent(&name) {
         let worker = worker.to_string();
         let receipt = qs_get(&qs, "msg_id");
+        let caller = headers
+            .get("x-amux-session")
+            .or_else(|| headers.get("x-amux-worker"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         return super::chat_worker::companion_route(
-            &state, &worker, method == Method::POST, &action, receipt, &body,
+            &state, &worker, method == Method::POST, &action, receipt, &body, &caller,
         )
         .await;
     }
