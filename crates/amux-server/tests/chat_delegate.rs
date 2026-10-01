@@ -232,6 +232,20 @@ async fn a_chat_delegate_reads_the_live_worker_without_ever_touching_it() {
     assert!(logged.contains("--resume conv-live --fork-session") && logged.contains("--no-session-persistence"), "{logged}");
     assert_eq!(std::fs::read(&session_file).unwrap(), before, "the worker's conversation file is byte-identical");
     assert!(j4["record"].as_str().unwrap().contains("not the live agent"), "a forked answer is labelled: {j4}");
+    assert!(j4["cost_usd"].is_null() && j4["cost_note"].as_str().is_some(), "a fork's cost is not reported as the forked total: {j4}");
+
+    // 5b. A conversation over the fork cap is answered fresh, and says why.
+    std::fs::write(
+        home.join("sessions/social.env"),
+        format!("CC_DIR=\"{}\"\nCC_PROVIDER=\"claude\"\nAMUX_CHAT_DELEGATE_FORK_MAX_MB=\"0.00001\"\n", repo.display()),
+    )
+    .unwrap();
+    let (_, r) = call(&app, "POST", "/api/chat-delegate", "social@chat", Some(json!({"prompt": "big", "wait_s": 0}))).await;
+    assert_eq!(r["job"]["mode"], "fresh", "{r}");
+    assert!(r["job"]["fork_skipped"].as_str().unwrap_or("").contains("fork cap"), "{r}");
+    let (code, r) = call(&app, "POST", "/api/chat-delegate", "social@chat", Some(json!({"prompt": "big", "mode": "fork"}))).await;
+    assert_eq!(code, 400, "an explicit fork of an over-cap conversation is refused with the reason: {r}");
+    assert!(r["error"].as_str().unwrap_or("").contains("fork cap"), "{r}");
 
     // 6. Restart: a job the previous server started is followed and delivered once.
     let id5 = "dg-RESTARTED";

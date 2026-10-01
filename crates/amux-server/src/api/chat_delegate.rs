@@ -130,8 +130,6 @@ pub(crate) fn provider_command(
                 tools.join(","),
                 "--disallowedTools".into(),
                 CLAUDE_WRITE_TOOLS.join(","),
-                "--max-budget-usd".into(),
-                format!("{max_usd:.2}"),
                 // Nothing this job does is saved as a conversation.
                 "--no-session-persistence".into(),
                 // The harness hooks in ~/.claude/settings.json report a
@@ -144,6 +142,14 @@ pub(crate) fn provider_command(
             if mode == Mode::Fork {
                 let id = fork_from.filter(|s| !s.is_empty()).ok_or("fork mode needs the worker's conversation id")?;
                 a.extend(["--resume".into(), id.to_string(), "--fork-session".into()]);
+                // NO --max-budget-usd on a fork: the CLI counts the forked
+                // conversation's past spend against it, so a fork of a long
+                // conversation was refused at once (live 2026-10-01: a 15 MB
+                // social-activities conversation reported $101.62 and ended
+                // `budget` with no answer). A fork is bounded by the size cap
+                // in start_job and by the timeout instead.
+            } else {
+                a.extend(["--max-budget-usd".into(), format!("{max_usd:.2}")]);
             }
             if let Some(m) = model.filter(|m| !m.is_empty()) {
                 a.extend(["--model".into(), m.to_string()]);
@@ -351,10 +357,31 @@ pub(crate) async fn start_job(
     let _ = std::fs::create_dir_all(&cwd);
     let meta = super::session_verbs::load_meta(worker);
     let conv = meta_str(&meta, "cc_conversation_id");
-    let can_fork = provider == "claude" && claude_session_file(&conv).is_some();
+    // A fork re-reads the worker's whole conversation, so its cost grows with
+    // that conversation. Fork only a conversation under the size cap; a larger
+    // one is answered fresh, seeded with the worker's recent context, and the
+    // record says why.
+    let fork_max_mb = env_num("AMUX_CHAT_DELEGATE_FORK_MAX_MB", worker, 2.0);
+    let session_mb = if provider == "claude" {
+        claude_session_file(&conv).and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len() as f64 / 1_048_576.0)
+    } else {
+        None
+    };
+    let too_large = session_mb.is_some_and(|mb| mb > fork_max_mb);
+    let can_fork = session_mb.is_some() && !too_large;
+    let fork_skipped = too_large.then(|| {
+        format!("the worker's conversation is {:.1} MB, over the {fork_max_mb} MB fork cap", session_mb.unwrap_or(0.0))
+    });
     let mode = match mode_req {
         "fork" if can_fork => Mode::Fork,
-        "fork" => return Err(("no_fork".into(), format!("{worker} has no {provider} conversation amux can fork; ask again with mode fresh"))),
+        "fork" => {
+            return Err((
+                "no_fork".into(),
+                fork_skipped.clone().map(|why| format!("{why}; ask again with mode fresh")).unwrap_or_else(|| {
+                    format!("{worker} has no {provider} conversation amux can fork; ask again with mode fresh")
+                }),
+            ))
+        }
         "fresh" => Mode::Fresh,
         _ => if can_fork { Mode::Fork } else { Mode::Fresh },
     };
@@ -452,6 +479,7 @@ pub(crate) async fn start_job(
         "timeout_s": timeout_s, "max_usd": max_usd,
         "started": started, "wait_until": started + wait_s,
         "pgid": pgid, "status": "running",
+        "fork_skipped": fork_skipped,
     });
     save_job(&id, &job);
     tracing::info!(worker, job = %id, provider = %provider, mode = job["mode"].as_str().unwrap_or(""),
@@ -524,13 +552,19 @@ async fn follow(state: &AppState, id: &str) {
         parsed.text.clone()
     };
     let duration_s = now() - started;
+    // A fork's reported total includes the forked conversation's past spend,
+    // so it is not this job's cost: say so rather than print the wrong number.
+    let is_fork = job["mode"] == "fork";
+    let cost = if is_fork { None } else { parsed.cost_usd };
+    let cost_note = if is_fork { json!("not separable: the CLI reports the forked conversation's total") } else { Value::Null };
     let job = patch_job(
         id,
         &[
             ("status", json!("done")),
             ("outcome", json!(outcome)),
             ("result", json!(text)),
-            ("cost_usd", parsed.cost_usd.map(|c| json!(c)).unwrap_or(Value::Null)),
+            ("cost_usd", cost.map(|c| json!(c)).unwrap_or(Value::Null)),
+            ("cost_note", cost_note),
             ("exit_code", code.map(|c| json!(c)).unwrap_or(Value::Null)),
             ("duration_s", json!((duration_s * 10.0).round() / 10.0)),
             ("finished", json!(now())),
@@ -538,7 +572,7 @@ async fn follow(state: &AppState, id: &str) {
     )
     .unwrap_or(job);
     tracing::info!(job = id, worker = job["worker"].as_str().unwrap_or(""), outcome, provider = %provider,
-        cost_usd = parsed.cost_usd.unwrap_or(0.0), duration_s, verdict = if outcome == "ok" { "chat_delegate_finished" } else { "chat_delegate_killed" },
+        cost_usd = cost.unwrap_or(0.0), cost_measured = cost.is_some(), duration_s, verdict = if outcome == "ok" { "chat_delegate_finished" } else { "chat_delegate_killed" },
         "a chat delegate ended");
     // Inputs and outputs can hold the worker's data: keep only the record.
     for f in ["in", "out", "err", "exit", "exit.tmp"] {
@@ -549,7 +583,13 @@ async fn follow(state: &AppState, id: &str) {
 
 /// The one-line record a Chat shows for a job.
 pub(crate) fn record_line(job: &Value) -> String {
-    let mode = if job["mode"] == "fork" { "fork of the worker's conversation, not the live agent" } else { "fresh read-only job" };
+    let mode = if job["mode"] == "fork" {
+        "fork of the worker's conversation, not the live agent".to_string()
+    } else if let Some(why) = job["fork_skipped"].as_str() {
+        format!("fresh read-only job (no fork: {why})")
+    } else {
+        "fresh read-only job".to_string()
+    };
     let cost = job["cost_usd"].as_f64().map(|c| format!(" · ${c:.3}")).unwrap_or_default();
     format!(
         "[background job {} · {} · {} · {} · {:.0}s{cost}]",
@@ -770,6 +810,8 @@ mod tests {
         let a = provider_command("claude", None, Mode::Fork, Some("conv-1"), 1.0, &[]).unwrap();
         let s = a.join(" ");
         assert!(s.contains("--resume conv-1 --fork-session") && s.contains("--no-session-persistence"), "{s}");
+        // The CLI counts a forked conversation's past spend against the cap.
+        assert!(!s.contains("--max-budget-usd"), "a fork must not carry the budget flag: {s}");
         assert!(provider_command("claude", None, Mode::Fork, Some(""), 1.0, &[]).is_err());
     }
 

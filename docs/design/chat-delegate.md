@@ -147,8 +147,17 @@ idea; it answered from stale code, so the live read-only view replaced it.
 - Timeout `AMUX_CHAT_DELEGATE_TIMEOUT_S` (default 300) kills the job's whole
   process group.
 - Budget `AMUX_CHAT_DELEGATE_MAX_USD` (default 1.00), enforced by
-  `--max-budget-usd` on claude; measured cost is reported for every provider
-  that reports it.
+  `--max-budget-usd` on claude for FRESH jobs; measured cost is reported for
+  every provider that reports it.
+- A fork is bounded differently. Claude counts the forked conversation's past
+  spend against `--max-budget-usd`, so a fork of a long conversation was
+  refused at once (live, 2026-10-01: a 15 MB social-activities conversation
+  reported $101.62 and ended with no answer; notional, since that worker runs
+  on the subscription). So a fork gets no budget flag, runs only when the
+  conversation is under `AMUX_CHAT_DELEGATE_FORK_MAX_MB` (default 2), and
+  reports its cost as not separable instead of the forked total. A larger
+  conversation is answered fresh, seeded with the worker's recent context, and
+  the record says why.
 - Record: the job's own directory (spec, output, result), a line in the Chat
   with job id, provider, mode, duration, cost and outcome, and log verdicts
   `chat_delegate_started / finished / refused / timeout / killed /
