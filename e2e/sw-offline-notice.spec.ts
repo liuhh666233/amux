@@ -37,6 +37,16 @@ for (const [label,open,button] of [
 ] as const) test(`${label} is fully tappable at 375px with offline mode off`,async({page})=>{
   await failOfflineMode(page);
   await page.evaluate(open);
+  // Wait for the dialog's open transition (scale + translate + fade, 0.25s)
+  // to finish, as a person does before tapping. Probing mid-animation failed
+  // on CI ios-safari: the screenshot showed the box still semi-transparent,
+  // and WebKit hit-tests an animating transform against a different box than
+  // getBoundingClientRect reports.
+  await page.evaluate(async sel=>{
+    const b=document.querySelector(sel)!;
+    const root=b.closest('.board-edit-overlay, .modal-overlay, [role=dialog]')||document.body;
+    await Promise.all(root.getAnimations({subtree:true}).map(a=>a.finished.catch(()=>{})));
+  },button);
   const hits=await page.evaluate(sel=>{
     const b=document.querySelector(sel)!;b.scrollIntoView({block:'nearest'});const a=b.getBoundingClientRect();
     const pts=[[a.left+4,a.top+4],[a.right-4,a.top+4],[a.left+4,a.bottom-4],[a.right-4,a.bottom-4],[a.left+a.width/2,a.top+a.height/2]];

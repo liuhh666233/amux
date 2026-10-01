@@ -84,7 +84,11 @@ test('schedule Save failure: red outline and the server sentence, never silence'
 
 test('a server error keeps the change for retry and the press says so (queued, not silent)', async ({page}) => {
   await boot(page);
+  // Delayed like every other press test. An instant 503 settled before the
+  // first busy poll on CI's faster runners (aria-busy already "false" while
+  // data-command-observed="true" showed the layer had bound the press).
   await routeWrites(page, '**/api/schedules', async route => {
+    await new Promise(r => setTimeout(r, 1200));
     await route.fulfill({status: 503, json: {error: 'restarting'}});
   });
   await fillShellSchedule(page, 'press queued');
