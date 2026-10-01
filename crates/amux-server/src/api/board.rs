@@ -596,6 +596,45 @@ pub(crate) fn frontier_exclusion(row: &bs::IssueRow, gate_on: bool) -> Option<Fr
     None
 }
 
+/// How long one fold receipt covers later folds into the same card for the
+/// same lane (see `callbacks_coalesced_fold`).
+const FOLD_RECEIPT_COALESCE_MS: i64 = 15 * 60_000;
+
+/// Did `session` get a fold receipt for `fold_target` within the window?
+fn recent_fold_receipt(state: &AppState, session: &str, fold_target: &str) -> bool {
+    let Ok(conn) = state.store.read() else { return false };
+    let since = chrono::Utc::now().timestamp_millis() - FOLD_RECEIPT_COALESCE_MS;
+    conn.query_row(
+        "SELECT 1 FROM cmd_history WHERE session=?1 AND ts>=?2 AND text LIKE ?3 LIMIT 1",
+        rusqlite::params![session, since, format!("[task callback %folded this capture into {fold_target}%")],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Mark a task callback closed without a send, so it is not retried.
+async fn close_callback_unsent(state: &AppState, id: &str, stable_id: &str) {
+    let (id_w, stable_w) = (id.to_string(), stable_id.to_string());
+    let _ = state
+        .store
+        .write_async(move |conn| {
+            let Some(mut latest) = bs::get_issue(conn, &id_w)? else {
+                return Ok(no_write());
+            };
+            if latest.callback_message_id.as_deref() != Some(stable_w.as_str()) {
+                return Ok(no_write());
+            }
+            latest.callback_state = Some("suppressed".into());
+            latest.callback_error = None;
+            latest.updated = now_secs();
+            latest.rev += 1;
+            latest.version += 1;
+            bs::save_patched(conn, &mut latest)?;
+            Ok(WriteOutcome { applied: true, events: vec![ev_snap(&latest, MutationKind::Updated)] })
+        })
+        .await;
+}
+
 #[cfg(test)]
 mod frontier_exclusion_tests {
     use super::*;
@@ -2797,6 +2836,29 @@ pub(crate) async fn dispatch_pending_callbacks(
             );
             continue;
         }
+        // ONE FOLD RECEIPT PER BURST. Measured 2026-10-01: an orchestrator
+        // folded 40 capture cards into its state card MO-3964 in a few
+        // minutes, and 33 identical receipts went to 10 lanes (gs12-obs got
+        // 7), each one a turn for a lane on a deadline. The receipt's value is
+        // where the content moved; the first already says it. Later folds into
+        // the same card for the same lane within FOLD_RECEIPT_COALESCE_MS are
+        // closed without a send, and the first receipt says so.
+        if let Some((fold_target, _)) = folded.as_ref() {
+            if recent_fold_receipt(state, &target, fold_target) {
+                report.suppressed += 1;
+                close_callback_unsent(state, &row.id, &stable_id).await;
+                tracing::info!(
+                    verdict = "callbacks_coalesced_fold",
+                    task_id = %row.id,
+                    target_session = %target,
+                    fold_target = %fold_target,
+                    measured = true,
+                    n_considered = 1,
+                    "a fold receipt for this lane and card went out within the window; not sending another"
+                );
+                continue;
+            }
+        }
         let folded_note;
         let resolution = if let Some((target, inferred)) = folded.as_ref() {
             // AF-616: an INFERRED target was chosen by adjacency and nothing
@@ -2826,6 +2888,12 @@ pub(crate) async fn dispatch_pending_callbacks(
              source message, and produced assets.",
             row.id, row.title, sender, resolution, row.status, outcome, row.id
         );
+        if let Some((fold_target, _)) = folded.as_ref() {
+            prompt.push_str(&format!(
+                "\nFurther captures of yours folded into {fold_target} in the next {} minutes are not announced separately.",
+                FOLD_RECEIPT_COALESCE_MS / 60_000
+            ));
+        }
         if let Ok(conn) = state.store.read() {
             for parent in &parents {
                 let blocking = crate::runtime_jobs::board_drive::deps_blocking(&conn, parent);
@@ -19101,5 +19169,36 @@ mod standing_approval_door_tests {
             .query_row("SELECT COUNT(*) FROM standing_approval_uses WHERE verdict='applied'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2);
+    }
+}
+
+#[cfg(test)]
+mod fold_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn one_fold_receipt_covers_later_folds_into_the_same_card_for_the_same_lane() {
+        let state = crate::api::standing_approvals::tests::test_state();
+        let now = chrono::Utc::now().timestamp_millis();
+        state
+            .store
+            .write(move |conn| {
+                crate::api::session_verbs::ensure_fleet_tables(conn)?;
+                for (session, text, ts) in [
+                    ("gs12-obs", "[task callback MO-1: x] mixpeek-override folded this capture into MO-3964. State: discarded.", now - 60_000),
+                    ("gs12-data", "[task callback MO-2: y] mixpeek-override folded this capture into MO-3964. State: discarded.", now - 20 * 60_000),
+                ] {
+                    conn.execute(
+                        "INSERT INTO cmd_history(text, type, session, ts) VALUES(?1, 'session', ?2, ?3)",
+                        rusqlite::params![text, session, ts],
+                    )?;
+                }
+                Ok(no_write())
+            })
+            .unwrap();
+        assert!(recent_fold_receipt(&state, "gs12-obs", "MO-3964"), "a receipt a minute ago covers the next fold");
+        assert!(!recent_fold_receipt(&state, "gs12-obs", "MO-4000"), "a different fold target is announced");
+        assert!(!recent_fold_receipt(&state, "gs12-data", "MO-3964"), "a receipt 20 minutes ago is outside the window");
+        assert!(!recent_fold_receipt(&state, "gs12-mvs", "MO-3964"), "another lane gets its own first receipt");
     }
 }
