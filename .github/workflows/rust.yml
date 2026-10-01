@@ -43,9 +43,16 @@ on:
 # GitHub Actions minutes, $222/mo of that in e2e alone). Group by PR number
 # when this is a pull_request run, by ref otherwise (push to main) — a new
 # push cancels its own stale run rather than racing it to completion.
+#
+# MAIN IS NEVER CANCELLED (2026-10-01). With lanes pushing every few minutes,
+# cancel-in-progress on main meant 39 of the last 60 main runs were cancelled
+# and none succeeded, so main could not produce a verdict at all and "CI red"
+# could never clear. For pushes to main GitHub now lets the running run finish
+# and keeps ONE pending run, which a newer push replaces, so every completed
+# run judges a recent head. Pull requests still cancel their own stale runs.
 concurrency:
   group: rust-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # check/clippy, doctests and the CLI smokes. The workspace test suite used
