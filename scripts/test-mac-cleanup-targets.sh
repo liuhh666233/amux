@@ -20,8 +20,8 @@ fails=0
 check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1: expected '$2', got '$3'"; fails=$((fails+1)); fi; }
 yn() { if "$@"; then echo yes; else echo no; fi; }
 AMUX_CLEANUP_LIB_ONLY=1 . "$TICK"
-export AMUX_CLEANUP_STATE_DIR="$FIX/assess-state" AMUX_CLEANUP_ESCALATE_CMD="true" AMUX_CLEANUP_HISTORY_CMD="true" AMUX_CLEANUP_CARD_CMD="true"   # never page a real lane from a test (DESKT-57)
-DEFAULT_KEEP=$TARGET_KEEP; DEFAULT_ROOTS=$TARGET_ROOTS      # what the scheduler actually runs with, before this file overrides the knobs
+export AMUX_CLEANUP_STATE_DIR="$FIX/assess-state" AMUX_CLEANUP_ESCALATE_CMD="true" AMUX_CLEANUP_HISTORY_CMD="true" AMUX_CLEANUP_CARD_CMD="true" AMUX_CLEANUP_VM_LIST_CMD="true"   # never page a real lane from a test (DESKT-57)
+DEFAULT_KEEP=$TARGET_KEEP; DEFAULT_ROOTS=$TARGET_ROOTS; DEFAULT_VM_PRUNE=$VM_PRUNE_CMD      # what the scheduler actually runs with, before this file overrides the knobs
 
 # Knobs the arm reads. Small budgets: nothing here should ever wait on them.
 TARGET_DEPTH=8; TARGET_SCAN_S=30; TARGET_WALK_S=30; TARGET_BUDGET_S=120
@@ -246,6 +246,27 @@ reap_idle_cargo_targets "$R" 24 0 > "$FIX/out.txt"
 check "a target last written 10h ago survives the normal 24h floor" "yes" "$(yn test -d "$R/proj/target")"
 reap_idle_cargo_targets "$R" "$(effective_target_idle_h 155 24 250 6)" 0 > "$FIX/out.txt"
 check "and is reaped at the tight 6h floor"            "no"  "$(yn test -e "$R/proj/target")"
+
+echo "12c. under disk pressure, build cache in running VMs is pruned and nothing else (DESKT-69)"
+VMREC="$FIX/vm-calls"; : > "$VMREC"
+printf '%s\n' '{"name":"gs12-a","status":"Running"}' '{"name":"gs12-b","status":"Stopped"}' '{"name":"gs12-c","status":"Running"}' > "$FIX/vms.json"
+printf '#!/bin/bash\necho "$@" >> %s\necho "Total:\t13.17GB"\n' "$VMREC" > "$FIX/vmrec.sh"; chmod +x "$FIX/vmrec.sh"
+VM_LIST_CMD="cat $FIX/vms.json"; VM_PRUNE_CMD="$FIX/vmrec.sh prune PROFILE"; VM_TRIM_CMD="$FIX/vmrec.sh trim PROFILE"; VM_STEP_S=20
+check "only RUNNING profiles are listed" "gs12-a gs12-c" "$(running_vm_profiles | tr '\n' ' ' | sed 's/ $//')"
+prune_vm_build_caches 0 > "$FIX/out.txt"
+check "each running VM is pruned and trimmed once" "4" "$(grep -c . "$VMREC" | tr -d ' ')"
+check "the stopped VM is never touched" "0" "$(grep -c gs12-b "$VMREC" | tr -d ' ')"
+check "the prune command is build-cache only" "yes" "$(grep -q '^prune gs12-a' "$VMREC" && ! grep -q -E 'image|volume|system' "$VMREC" && echo yes || echo no)"
+check "the summary counts two pruned" "yes" "$(grep -q 'pruned 2 running VM' "$FIX/out.txt" && echo yes || echo no)"
+: > "$VMREC"; prune_vm_build_caches 1 > "$FIX/out.txt"
+check "dry run runs nothing" "0" "$(grep -c . "$VMREC" | tr -d ' ')"
+check "and says what it would do" "2" "$(grep -c 'would prune build cache' "$FIX/out.txt" | tr -d ' ')"
+VM_PRUNE_CMD="false"; : > "$VMREC"; prune_vm_build_caches 0 > "$FIX/out.txt"
+check "a failed prune is reported and does not trim" "yes" "$(grep -q 'build-cache prune FAILED' "$FIX/out.txt" && ! grep -q trim "$VMREC" && echo yes || echo no)"
+check "and is counted failed" "yes" "$(grep -q 'failed 2' "$FIX/out.txt" && echo yes || echo no)"
+VM_LIST_CMD="true"; prune_vm_build_caches 0 > "$FIX/out.txt"
+check "no running VM says so" "yes" "$(grep -q 'no running colima VM' "$FIX/out.txt" && echo yes || echo no)"
+check "the default prune is build cache only" "yes" "$(printf '%s' "$DEFAULT_VM_PRUNE" | grep -q 'builder prune -f' && ! printf '%s' "$DEFAULT_VM_PRUNE" | grep -q -E 'system|image|volume' && echo yes || echo no)"
 
 echo "13. the defaults the scheduler runs with"
 check "the amux shared target is protected by default"  "yes" "$(printf '%s' "$DEFAULT_KEEP" | grep -Eq "\.amux/rust-build-target(:|\$)" && echo yes || echo no)"

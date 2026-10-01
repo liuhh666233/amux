@@ -139,6 +139,17 @@ TARGET_IDLE_H=${AMUX_CLEANUP_TARGET_IDLE_H:-24}
 # dry run, the shared targets), and being wrong costs one rebuild.
 TARGET_TIGHT_FREE_GB=${AMUX_CLEANUP_TARGET_TIGHT_FREE_GB:-250}
 TARGET_TIGHT_IDLE_H=${AMUX_CLEANUP_TARGET_TIGHT_IDLE_H:-6}
+# Docker build cache inside running colima VMs (DESKT-69). On 2026-10-01 the disk
+# reached 10G free with five gs12 VMs running; four held 4-13G of build cache
+# each, and pruning it plus an fstrim gave back 66G in minutes. Build cache is
+# regenerable by definition. Images, containers and volumes are never touched:
+# an image may be the only copy of a local build, a volume may be data.
+# Runs only under the same disk threshold as the tight build-output floor.
+# Seams: the test points these at recorders. PROFILE is the colima profile.
+VM_LIST_CMD=${AMUX_CLEANUP_VM_LIST_CMD:-colima list --json}
+VM_PRUNE_CMD=${AMUX_CLEANUP_VM_PRUNE_CMD:-docker --context colima-PROFILE builder prune -f}
+VM_TRIM_CMD=${AMUX_CLEANUP_VM_TRIM_CMD:-colima ssh -p PROFILE -- sudo fstrim -a}
+VM_STEP_S=${AMUX_CLEANUP_VM_STEP_S:-120}
 TARGET_KEEP=${AMUX_CLEANUP_TARGET_KEEP:-$HOME/.amux/rust-build-target:$HOME/.ao/data/cargo-target-shared:${CARGO_TARGET_DIR:-}}
 TARGET_DEPTH=${AMUX_CLEANUP_TARGET_DEPTH:-8}
 TARGET_SCAN_S=${AMUX_CLEANUP_TARGET_SCAN_S:-90}
@@ -857,6 +868,44 @@ file_card() { # <state_file> <key> <title> <desc>
 
 # The idle floor for this tick: the normal one, or the tight one when free disk is
 # under the threshold. An unmeasured disk (-1) keeps the normal floor.
+# Running colima profiles, one per line, from `colima list --json` (one JSON
+# object per line: {"name":"gs12-mvs","status":"Running",...}).
+running_vm_profiles() {
+  $VM_LIST_CMD 2>/dev/null | python3 -c '
+import json,sys
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: o=json.loads(line)
+    except Exception: continue
+    if str(o.get("status","")).lower()=="running" and o.get("name"): print(o["name"])' 2>/dev/null
+}
+
+# Prune build cache in every running VM and trim its disk so the host gets the
+# blocks back. Sets VMS_PRUNED / VMS_FAILED. Each step is time-boxed.
+prune_vm_build_caches() { # <dry:0|1>
+  local dry=$1 p cmd out rc
+  VMS_PRUNED=0; VMS_FAILED=0
+  local profiles; profiles=$(running_vm_profiles)
+  if [ -z "$profiles" ]; then echo "mac-cleanup: vm build cache: no running colima VM"; return 0; fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ "$dry" = 1 ]; then echo "mac-cleanup:   would prune build cache and trim colima VM $p (dry run)"; continue; fi
+    cmd=${VM_PRUNE_CMD//PROFILE/$p}; rc=0
+    out=$(perl -e 'alarm shift; exec @ARGV' "$VM_STEP_S" $cmd 2>&1) || rc=$?
+    if [ "$rc" != 0 ]; then
+      VMS_FAILED=$((VMS_FAILED+1)); echo "mac-cleanup:   vm $p build-cache prune FAILED (rc $rc): $(printf '%s' "$out" | tail -1 | cut -c1-120)"; continue
+    fi
+    cmd=${VM_TRIM_CMD//PROFILE/$p}
+    perl -e 'alarm shift; exec @ARGV' "$VM_STEP_S" $cmd >/dev/null 2>&1 || echo "mac-cleanup:   vm $p fstrim did not complete (build cache was still pruned)"
+    VMS_PRUNED=$((VMS_PRUNED+1))
+    echo "mac-cleanup:   vm $p build cache: $(printf '%s' "$out" | grep -i 'total' | tail -1 | tr -s ' \t' ' ' | cut -c1-60)"
+  done <<EOF
+$profiles
+EOF
+  echo "mac-cleanup: vm build cache: pruned ${VMS_PRUNED} running VM(s), failed ${VMS_FAILED} (images, containers and volumes untouched)"
+}
+
 effective_target_idle_h() { # <disk_free_gb> <normal_h> <tight_free_gb> <tight_h>
   awk -v f="$1" -v n="$2" -v t="$3" -v h="$4" 'BEGIN{ if (f >= 0 && f < t && h < n) print h; else print n }'
 }
@@ -1052,6 +1101,8 @@ if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then
   echo "mac-cleanup: disk tight (${tgt_free}G free, under ${TARGET_TIGHT_FREE_GB}G): build output idle ${tgt_idle}h is reclaimable this tick, not ${TARGET_IDLE_H}h"
 fi
 reap_idle_cargo_targets "$TARGET_ROOTS" "$tgt_idle" "$DRY"
+VMS_PRUNED=0
+if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then prune_vm_build_caches "$DRY"; fi
 reap_idle_worktrees "$WORKTREE_ROOTS" "$WORKTREE_IDLE_H" "$DRY"
 
 # ── act: thin APFS local snapshots when the disk is tight ────────────────────
