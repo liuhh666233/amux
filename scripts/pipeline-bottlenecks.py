@@ -33,6 +33,17 @@ On a bottleneck it:
      aging); this names what is left for a lane to act on.
 With no queue anywhere it prints verdict=no_queues, measured=true, so a quiet
 run is distinguishable from a probe that never ran.
+
+HOST (AH-294): the same run measures the machine every lane shares. On
+2026-10-01 load reached ~80 on 28 cores with 22.7 of 23.5 GB swap used and the
+data disk at 98 percent, and the land holder starved inside a git archive
+export; the orchestrator found it, not the harness. Measured: 1-minute load per
+core, swap used, data-volume use, and the top processes by CPU and by memory,
+each attributed to a lane by its cwd (a .worktrees/<lane> path, or a session
+scratch dir mapped to the amux session that records it). Thresholds: load per
+core >= 2.0, swap >= 90 percent, disk >= 95 percent. A trip logs
+verdict=host_bottleneck and routes one message to --host-route (default
+mac-ops, the Mac resource lane) under the same cooldown.
 """
 import argparse, glob, json, os, re, statistics, subprocess, sys, time
 
@@ -55,6 +66,94 @@ def ps_start(pid):
         return time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y")) if out else None
     except Exception:
         return None
+
+
+def sessions_by_conversation():
+    """{conversation id: amux session name} from session metas."""
+    out = {}
+    for f in glob.glob(os.path.join(HOME, ".amux", "sessions", "*.meta.json")):
+        try:
+            cid = json.load(open(f)).get("cc_conversation_id") or ""
+        except Exception:
+            continue
+        if cid:
+            out[cid] = os.path.basename(f)[: -len(".meta.json")]
+    return out
+
+
+def lane_of(cwd, conv):
+    """Best-effort lane for a cwd: a worktree name, or a scratch dir's session."""
+    m = re.search(r"/\.worktrees/([^/]+)", cwd)
+    if m:
+        return m.group(1)
+    m = re.search(r"/claude-\d+/[^/]+/([0-9a-f-]{36})", cwd)
+    if m:
+        return conv.get(m.group(1), "session " + m.group(1)[:8])
+    return cwd.replace(HOME, "~")[:60]
+
+
+def host_measure():
+    ncpu = os.cpu_count() or 1
+    load1 = os.getloadavg()[0]
+    swap_pct = None
+    try:
+        sw = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=5).stdout
+        tot = float(re.search(r"total = ([\d.]+)M", sw).group(1)); used = float(re.search(r"used = ([\d.]+)M", sw).group(1))
+        swap_pct = round(100 * used / tot, 1) if tot else 0.0
+    except Exception:
+        pass
+    disk_pct = None
+    try:
+        st = os.statvfs("/System/Volumes/Data" if os.path.isdir("/System/Volumes/Data") else "/")
+        disk_pct = round(100 * (1 - st.f_bavail / st.f_blocks), 1)
+    except Exception:
+        pass
+    procs = []
+    try:
+        out = subprocess.run(["ps", "-Ao", "pid=,%cpu=,rss=,comm="], capture_output=True, text=True, timeout=10).stdout
+        for line in out.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) == 4:
+                procs.append((int(parts[0]), float(parts[1]), int(parts[2]) // 1024, os.path.basename(parts[3])))
+    except Exception:
+        pass
+    conv = sessions_by_conversation()
+    # Apple Virtualization VMs are launchd children with cwd "/": attribute
+    # each to the VM manager that started nearest it, within 60 s (a colima/lima
+    # hostagent names its profile, e.g. colima-gs12-compute; Docker Desktop has
+    # com.docker.virtualization). On 2026-10-01 six gs12 VMs held about 41 GB
+    # while the orchestrator believed it ran one.
+    def start(pid):
+        try:
+            out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout.strip()
+            return time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y"))
+        except Exception:
+            return None
+    managers = []
+    for line in subprocess.run(["ps", "-Ao", "pid=,command="], capture_output=True, text=True).stdout.splitlines():
+        pid, _, cmd = line.strip().partition(" ")
+        m = re.search(r"_lima/([^/\s]+)/", cmd) if "hostagent" in cmd else None
+        name = m.group(1) if m else ("docker-desktop" if "com.docker.virtualization" in cmd else None)
+        if name:
+            t = start(pid)
+            if t:
+                managers.append((t, name))
+    def vm_owner(pid):
+        t = start(pid)
+        best = min(managers, key=lambda m: abs(m[0] - t), default=None) if t else None
+        return best[1] if best and abs(best[0] - t) <= 60 else "unattributed VM"
+    def attribute(rows):
+        res = []
+        for pid, cpu, mb, comm in rows:
+            cwd = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
+            cwd = next((l[1:] for l in cwd.splitlines() if l.startswith("n")), "")
+            lane = vm_owner(pid) if "Virtualization.VirtualMachine" in comm else (lane_of(cwd, conv) if cwd else "?")
+            res.append({"pid": pid, "cpu": cpu, "mb": mb, "comm": comm, "lane": lane})
+        return res
+    top_cpu = attribute(sorted(procs, key=lambda r: -r[1])[:6])
+    top_mem = attribute(sorted(procs, key=lambda r: -r[2])[:6])
+    return {"ncpu": ncpu, "load1": round(load1, 1), "load_per_core": round(load1 / ncpu, 2),
+            "swap_pct": swap_pct, "disk_pct": disk_pct, "top_cpu": top_cpu, "top_mem": top_mem}
 
 
 def holds_by_repo(since):
@@ -92,6 +191,10 @@ def main():
     ap.add_argument("--median-hold", type=int, default=20)
     ap.add_argument("--cooldown-min", type=int, default=120)
     ap.add_argument("--dry-run", action="store_true", help="never send")
+    ap.add_argument("--host-route", default="mac-ops", help="lane to message on a host bottleneck (empty: log only)")
+    ap.add_argument("--load-per-core", type=float, default=2.0)
+    ap.add_argument("--swap-pct", type=float, default=90)
+    ap.add_argument("--disk-pct", type=float, default=95)
     a = ap.parse_args()
 
     now = time.time()
@@ -200,6 +303,31 @@ def main():
                                 "detail": (r.stdout or r.stderr).strip()[:200]}) + "\n")
         if sent:
             state[key] = {"sent": now, "drain_h": rec["drain_h"]}
+    # Host (AH-294).
+    h = host_measure()
+    hwhy = []
+    if h["load_per_core"] >= a.load_per_core: hwhy.append(f"load {h['load1']} on {h['ncpu']} cores ({h['load_per_core']}/core >= {a.load_per_core})")
+    if h["swap_pct"] is not None and h["swap_pct"] >= a.swap_pct: hwhy.append(f"swap {h['swap_pct']}% >= {a.swap_pct}")
+    if h["disk_pct"] is not None and h["disk_pct"] >= a.disk_pct: hwhy.append(f"disk {h['disk_pct']}% >= {a.disk_pct}")
+    hrec = {"ts": int(now), "verdict": "host_bottleneck" if hwhy else "host_ok", "why": hwhy,
+            **h, "measured": True, "n_considered": len(h["top_cpu"]) + len(h["top_mem"])}
+    with open(OUT, "a") as f:
+        f.write(json.dumps(hrec) + "\n")
+    print(json.dumps({k: hrec[k] for k in ("verdict", "why", "load1", "swap_pct", "disk_pct")}))
+    last = state.get("_host", {})
+    if hwhy and a.host_route and not a.dry_run and now - last.get("sent", 0) >= a.cooldown_min * 60:
+        fmt = lambda rows, key, unit: ", ".join(f"{r['comm']} {r[key]}{unit} ({r['lane']}, pid {r['pid']})" for r in rows[:5])
+        msg = (f"Host bottleneck (amux pipeline-bottlenecks, AH-294): {'; '.join(hwhy)}. "
+               f"Top CPU: {fmt(h['top_cpu'], 'cpu', '%')}. Top memory: {fmt(h['top_mem'], 'mb', ' MB')}. "
+               "Every lane's builds, tests and pushes share this machine; ask the named lanes to defer heavy work, "
+               "or free disk (session scratch: scripts/scratch-reaper.py).")
+        r = subprocess.run(["amux", "send", a.host_route, "--stdin"], input=msg, capture_output=True, text=True)
+        with open(OUT, "a") as f:
+            f.write(json.dumps({"ts": int(now), "verdict": "host_bottleneck_routed" if r.returncode == 0 else "host_bottleneck_route_failed",
+                                "route": a.host_route, "measured": True, "n_considered": 1,
+                                "detail": (r.stdout or r.stderr).strip()[:200]}) + "\n")
+        if r.returncode == 0:
+            state["_host"] = {"sent": now}
     json.dump(state, open(STATE, "w"))
     return 0
 
