@@ -467,6 +467,24 @@ const OWNER_PRESENCE_TERMS: &[&str] = &[
     "face id", "touch id", "in person",
 ];
 
+/// Phrases that mean the ask reports a live INCIDENT. An incident page is the
+/// fire alarm `amux alert` exists for, never a "may I?" an approval can
+/// answer. Found 2026-10-01 (AH-280): mixpeek-override paged the owner about
+/// MO-4009, the TubeScience MVS recovery shard OOMKilled on every boot, and
+/// SA-6 (a ChatGPT-directory decision) answered it twice, so the owner was
+/// not paged on a customer-plane outage. Lowercase substrings.
+const INCIDENT_TERMS: &[&str] = &[
+    "outage", "incident", "oomkill", "crashloop", "crash loop", "is down", "went down",
+    "data loss", "data corruption", "security breach", "breach", "leaked", "sev1", "sev-1",
+    "production down", "prod down", "customer-facing", "customer plane", "customer-plane",
+];
+
+/// The first incident phrase in `text`, if any.
+pub fn incident_term(text: &str) -> Option<&'static str> {
+    let t = text.to_ascii_lowercase();
+    INCIDENT_TERMS.iter().copied().find(|p| t.contains(p))
+}
+
 /// The first owner-presence phrase in `text`, if any.
 pub fn owner_presence_term(text: &str) -> Option<&'static str> {
     let t = text.to_ascii_lowercase();
@@ -486,6 +504,13 @@ pub fn match_ask(
         return MatchVerdict::NoMatch {
             reason: format!(
                 "owner_presence_required: the ask needs the owner to act in person (\"{term}\"); a standing approval answers a decision, not that"
+            ),
+        };
+    }
+    if let Some(term) = incident_term(text) {
+        return MatchVerdict::NoMatch {
+            reason: format!(
+                "incident: the ask reports a live incident (\"{term}\"); an approval answers a decision, and an incident always pages the owner"
             ),
         };
     }
@@ -512,9 +537,12 @@ pub fn match_ask(
             continue;
         }
         if !a.require_terms.is_empty() {
+            // Whole words only (AH-280): the prefix rule made the bare "chat"
+            // in a sender name `<lane>@chat` satisfy SA-6's "chatgpt". A
+            // precondition is a specific claim; a prefix of it is not one.
             let req_ok = a.require_terms.iter().any(|r| {
                 let r = stem(r.trim());
-                ask_toks.iter().any(|t| tok_eq(t, &r))
+                ask_toks.contains(&r)
             });
             if !req_ok {
                 near.push(format!("{}: precondition not stated", a.label()));
@@ -1687,6 +1715,37 @@ pub fn memory_section_from(
 #[cfg(test)]
 mod learn_tests {
     use super::*;
+
+    /// SA-6 as stored on 2026-10-01.
+    fn sa6() -> StandingApproval {
+        let allowed = "Should amux get a public ChatGPT directory listing (build cloud.amux.io/mcp as a shared front door, a cloud production change) or stay a developer-mode app where each user pastes their own tunnel URL?";
+        StandingApproval {
+            id: 6, title: format!("Approved AMUX-5397: {allowed}"), allowed: allowed.into(), category: "decision".into(),
+            limits: String::new(), max_per_day: None, max_amount_usd: None,
+            require_terms: vec!["developer".into(), "directory".into(), "chatgpt".into()],
+            scope: "global".into(), granted_by: "owner".into(), granted_at: 1_790_000_000, source: "card:AMUX-5397".into(),
+            expires_at: None, revoked: false, revoked_at: None, revoked_by: None,
+        }
+    }
+
+    #[test]
+    fn an_incident_page_is_never_answered_by_an_approval() {
+        // Carries SA-6's own words (ChatGPT, directory) so that ONLY the
+        // incident guard can stop it; the whole-word rule has its own test.
+        let ask = "Decide now: the ChatGPT directory front door shard OOMKills every boot in production, a customer-plane outage.";
+        let v = match_ask(&[sa6()], ask, Some("decision"), "mixpeek-override", &[], 1_790_000_100, &|_| 0);
+        assert!(matches!(v, MatchVerdict::NoMatch { .. }), "the owner must be paged: {}", v.verdict());
+    }
+
+    #[test]
+    fn a_required_term_needs_the_whole_word() {
+        let ask = "Decide the production shard change for the cloud front door, reported from lane@chat";
+        let v = match_ask(&[sa6()], ask, Some("decision"), "x", &[], 1_790_000_100, &|_| 0);
+        assert!(matches!(v, MatchVerdict::NoMatch { .. }), "\"chat\" is not \"chatgpt\": {}", v.verdict());
+        let ask2 = "Decide: should the ChatGPT directory listing go ahead for the cloud front door?";
+        let v2 = match_ask(&[sa6()], ask2, Some("decision"), "x", &[], 1_790_000_100, &|_| 0);
+        assert!(matches!(v2, MatchVerdict::Applied { .. }), "the real ask still matches: {}", v2.verdict());
+    }
 
     #[test]
     fn what_an_owner_approval_teaches() {
