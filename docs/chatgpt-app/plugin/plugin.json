@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "amux",
+  "version": "1.0.0",
+  "description": "Check on and message your amux coding agents and manage their task board from ChatGPT.",
+  "homepage": "https://amux.io/",
+  "repository": "https://github.com/mixpeek/amux",
+  "license": "MIT",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "amux",
+        "shortDescription": "Check on and message your amux workers and board",
+        "category": "Productivity",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png",
+        "longDescription": "amux runs many AI coding agents (workers) in parallel on your machine or in amux cloud. Connect it to ChatGPT to see which workers are running, read what a worker is doing, send a worker a message, and add or move cards on the task board. You approve every connection in amux and can disconnect at any time.",
+        "developerName": "Mixpeek, Inc.",
+        "websiteURL": "https://amux.io/",
+        "privacyPolicyURL": "https://amux.io/privacy/",
+        "termsOfServiceURL": "https://amux.io/terms/",
+        "defaultPrompt": "Which of my amux workers are running right now?",
+        "brandColor": "#ffa538"
+      }
+    }
+  },
+  "author": {
+    "name": "Mixpeek, Inc.",
+    "email": "support@amux.io",
+    "url": "https://amux.io/"
+  }
+}
