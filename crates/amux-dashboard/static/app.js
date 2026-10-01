@@ -4517,8 +4517,33 @@ function _notifUpdateBadge() {
   badge.style.display = total > 0 ? 'flex' : 'none';
 }
 
+// ONE GATE for everything the dashboard raises on its own initiative: in-app
+// banners, the press layer's success toast ('toast'), and native notifications.
+// The header switches (speech bubble = in-app pop-ups, speaker = native) are the
+// configuration; every emitter asks here instead of reading the flags itself, so
+// a new emitter cannot forget one (Ethan, 2026-10-01: "these should respect the
+// notifications configuration", after a "…: done" toast appeared with in-app
+// pop-ups switched off). A suppression is reported once a minute per kind as
+// verdict notification_suppressed. Failure feedback is NOT routed here: an
+// error the user caused is an answer, not a notification.
+const _notifSuppressedAt = {};
+function amuxNotifyAllowed(kind) {
+  const on = kind === 'native' ? _notifsNative : _notifBanners;
+  if (!on) {
+    const now = Date.now();
+    if (!_notifSuppressedAt[kind] || now - _notifSuppressedAt[kind] > 60000) {
+      _notifSuppressedAt[kind] = now;
+      try {
+        _interactionDiagnostic({kind:'notification', verdict:'notification_suppressed', notification_kind:kind,
+          reason:kind === 'native' ? 'native_notifications_off' : 'in_app_popups_off', measured:true, n_considered:1});
+      } catch (_) {}
+    }
+  }
+  return on;
+}
+
 function _notifShowBanner(icon, title, body, session) {
-  if (!_notifBanners) return;
+  if (!amuxNotifyAllowed('banner')) return;
   const container = document.getElementById('notif-banners');
   if (!container) return;
   const el = document.createElement('div');
@@ -4544,7 +4569,7 @@ function _notifPush(icon, title, body, session) {
 }
 
 async function _notifFireNative(title, body, session) {
-  if (!_notifsNative) return;
+  if (!amuxNotifyAllowed('native')) return;
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
   const opts = {
     body, icon: '/icon-192.png', badge: '/icon-192.png',
@@ -4713,7 +4738,11 @@ async function _notifToggleNative() {
 
 function _notifUpdateNativeBtn() {
   const btn = document.getElementById('notif-native-btn');
-  if (btn) btn.style.opacity = _notifsNative ? '1' : '0.4';
+  if (!btn) return;
+  btn.style.opacity = _notifsNative ? '1' : '0.4';
+  btn.setAttribute('aria-pressed', String(_notifsNative));
+  btn.title = 'Native (background and lock-screen) notifications: ' + (_notifsNative ? 'on' : 'off');
+  btn.setAttribute('aria-label', btn.title);
 }
 
 function _notifToggleBanners() {
@@ -4730,7 +4759,11 @@ function _notifToggleBanners() {
 
 function _notifUpdateBannerBtn() {
   const btn = document.getElementById('notif-banner-btn');
-  if (btn) btn.style.opacity = _notifBanners ? '1' : '0.4';
+  if (!btn) return;
+  btn.style.opacity = _notifBanners ? '1' : '0.4';
+  btn.setAttribute('aria-pressed', String(_notifBanners));
+  btn.title = 'In-app pop-ups (banners and action toasts): ' + (_notifBanners ? 'on' : 'off');
+  btn.setAttribute('aria-label', btn.title);
 }
 
 function toggleNotifPanel() {
@@ -13558,7 +13591,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1202';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1203';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}

@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2363,
+  "n_considered": 2364,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -3256,6 +3256,12 @@
     },
     "addChipFromPicker": {
       "kind": "command.addChipFromPicker",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "amuxNotifyAllowed": {
+      "kind": "command.amuxNotifyAllowed",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

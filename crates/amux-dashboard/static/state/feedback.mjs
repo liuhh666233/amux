@@ -84,7 +84,17 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
   if (toastEl) new MutationObserver(() => { if (toastEl.classList.contains('visible')) lastToastAt = Date.now(); })
     .observe(toastEl, {attributes:true, attributeFilter:['class'], childList:true, characterData:true, subtree:true});
   const isCommand = element => !!element.dataset.interactionKind && !('repeatable' in element.dataset);
-  const labelOf = element => (element.getAttribute('aria-label') || element.textContent || element.title || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  // The pressed CONTROL's own name, or nothing. A worker card is a div with an
+  // onclick, so its textContent is the whole card ("amux ⬇ ⋯ ✏Task label (none)
+  // ☷Task queue 💻…") and that became the toast (2026-10-01). Text is used only
+  // when the element holds no other control and is short enough to be a name.
+  const labelOf = element => {
+    const named = (element.getAttribute('aria-label') || element.title || '').replace(/\s+/g, ' ').trim();
+    if (named) return named.slice(0, 40);
+    const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+    const container = element.querySelector(selectors) !== null;
+    return !container && text.length <= 40 ? text : '';
+  };
   document.addEventListener('click', event => {
     const element = event.target.closest(selectors);
     if (!element || element.closest('#interaction-feedback') || !element.isConnected) return;
@@ -285,7 +295,16 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
         toast((state.label ? state.label + ': ' : '') + (state.message || 'Not done'));
         diagnostic({verdict:'press_failure_toast', measured:true, n_considered:1, action:element.dataset.action, phase:state.worst});
       } else if (cls === 'press-done' && !seen(element)) {
-        toast(state.label ? state.label + ': done' : 'Done');
+        // A success toast is a notification: it needs a name for what was done
+        // (a container press has none, and whatever it opened is the outcome)
+        // and it obeys the in-app pop-up switch through the shared gate.
+        if (!state.label) {
+          diagnostic({verdict:'press_success_toast_skipped', measured:true, n_considered:1, action:element.dataset.action, reason:'no_control_label'});
+        } else if (globalThis.amuxNotifyAllowed?.('toast') === false) {
+          diagnostic({verdict:'press_success_toast_skipped', measured:true, n_considered:1, action:element.dataset.action, reason:'notifications_off'});
+        } else {
+          toast(state.label + ': done');
+        }
       }
     }, SPEAK_MS);
   }

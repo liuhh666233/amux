@@ -188,3 +188,51 @@ test('navigation that never makes a request is not slowed down: quick repeat pre
   for (let i = 0; i < 4; i++) await page.locator('#press-nav').click();
   expect(await page.evaluate(() => (window as any).__pressNav)).toBe(4);
 });
+
+// NOTIFICATIONS CONFIGURATION (Ethan, 2026-10-01: "this shouldn't appear if
+// notifications are disabled"). A success toast is a notification and obeys the
+// in-app pop-up switch; a failure answers the user's own press and still speaks.
+test('with in-app pop-ups off, a success says nothing but a failure still speaks', async ({page}) => {
+  await page.addInitScript(() => localStorage.setItem('amux_notif_banners', '0'));
+  await boot(page);
+  let fail = false;
+  await routeWrites(page, '**/api/schedules', async route => {
+    await new Promise(r => setTimeout(r, 1200));
+    if (fail) await route.fulfill({status: 409, json: {error: 'Refused while pop-ups are off'}});
+    else await route.fulfill({json: {ok: true, id: 'SCHED-press-quiet', title: 'quiet'}});
+  });
+  await fillShellSchedule(page, 'quiet success');
+  const save = page.locator('#sched-save-btn');
+  await save.click();
+  await expect(save).toHaveAttribute('aria-busy', 'true', {timeout: 1000});
+  // The dialog closes on success; with pop-ups off the layer stays silent.
+  await expect(save).not.toHaveAttribute('aria-busy', 'true', {timeout: 5000});
+  await page.waitForTimeout(1500);
+  await expect(page.locator('#toast')).not.toContainText(/done/i);
+  fail = true;
+  await fillShellSchedule(page, 'loud failure');
+  await page.locator('#sched-save-btn').click();
+  await expect(page.locator('#toast')).toContainText('Refused while pop-ups are off', {timeout: 6000});
+});
+
+test('a press on a container never speaks its whole text as the action name', async ({page}) => {
+  await boot(page);
+  await routeWrites(page, '**/api/press-test-card', async route => {
+    await new Promise(r => setTimeout(r, 400));
+    await route.fulfill({json: {ok: true}});
+  });
+  await page.evaluate(() => {
+    // The worker-card shape: a div with an onclick around other controls. The
+    // press writes, then the card is covered or removed (a peek opening over it).
+    const card = document.createElement('div');
+    card.id = 'press-card';
+    card.style.cssText = 'position:fixed;top:120px;left:20px;width:240px;height:80px;background:#ccc;z-index:99999';
+    card.innerHTML = '<span id="press-card-name">card-name ⬇ ⋯</span> <button type="button">Task label (none)</button> <button type="button">Task queue</button>';
+    card.setAttribute('onclick', "if (event.target.tagName !== 'BUTTON') fetch('/api/press-test-card', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}).then(() => document.getElementById('press-card').remove())");
+    document.body.appendChild(card);
+  });
+  await page.locator('#press-card-name').click();
+  await page.waitForTimeout(2500);
+  const text = await page.locator('#toast').textContent();
+  expect(text || '').not.toMatch(/Task label|Task queue|card-name/);
+});

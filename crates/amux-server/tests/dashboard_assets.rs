@@ -2318,3 +2318,42 @@ fn every_cdn_asset_is_cors_and_precached_for_offline() {
     assert!(seen >= 10, "found only {seen} CDN tags in index.html; the scan is broken, not the page");
     assert!(problems.is_empty(), "offline would lose these libraries:\n{}", problems.join("\n"));
 }
+
+/// NOTIFICATIONS OBEY ONE GATE. The header switches (in-app pop-ups, native) are
+/// read only by the gate `amuxNotifyAllowed`, the switches' own toggle/render
+/// functions, and the test-send. Any other reader is an emitter deciding for
+/// itself, which is how a press-layer "...: done" toast appeared with in-app
+/// pop-ups off (2026-10-01). The press layer's success toast must ask the gate.
+#[test]
+fn every_notification_emitter_goes_through_the_shared_gate() {
+    let app = asset("app.js");
+    let allowed = [
+        "amuxNotifyAllowed", "_notifToggleNative", "_notifUpdateNativeBtn",
+        "_notifToggleBanners", "_notifUpdateBannerBtn", "_notifSendTest",
+    ];
+    let mut current = String::from("<top level>");
+    let mut offenders = Vec::new();
+    let mut reads = 0;
+    for (i, line) in app.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if line.starts_with("function ") || line.starts_with("async function ") {
+            let rest = trimmed.trim_start_matches("async ").trim_start_matches("function ");
+            current = rest.split('(').next().unwrap_or("").trim().to_string();
+        }
+        if (line.contains("_notifBanners") || line.contains("_notifsNative"))
+            && !trimmed.starts_with("let _notif")
+            && !trimmed.starts_with("//")
+        {
+            reads += 1;
+            if !allowed.contains(&current.as_str()) {
+                offenders.push(format!("app.js:{} in {}", i + 1, current));
+            }
+        }
+    }
+    assert!(reads >= 5, "found only {reads} reads of the notification switches; the scan is broken");
+    assert!(offenders.is_empty(), "notification switch read outside the gate; call amuxNotifyAllowed(kind):\n{}", offenders.join("\n"));
+    assert!(app.contains("if (!amuxNotifyAllowed('banner')) return;"), "_notifShowBanner must ask the gate");
+    assert!(app.contains("if (!amuxNotifyAllowed('native')) return;"), "_notifFireNative must ask the gate");
+    let feedback = asset("state/feedback.mjs");
+    assert!(feedback.contains("amuxNotifyAllowed?.('toast')"), "the press layer's success toast must ask the gate");
+}
