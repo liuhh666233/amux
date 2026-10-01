@@ -6338,7 +6338,7 @@ USAGE
 }
 
 cmd_land() {
-  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600]
+  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch]
   #
   # Rebase this checkout onto the remote branch and push HEAD there, holding a
   # per-repo, per-branch lock for the whole fetch -> rebase -> push loop, so
@@ -6353,45 +6353,90 @@ cmd_land() {
   # flock). A lock whose holder pid is gone, or that has been held longer than
   # --max-hold seconds, is taken over with a warning, so a hung push cannot
   # block the queue forever. Waiters are served in arrival order (tickets in
-  # <lock>.q). Every wait, takeover and outcome is a line in
-  # ~/.amux/logs/land.log.
-  local remote=origin branch=main tries=8 max_hold=3600
+  # <lock>.q).
+  #
+  # Batching: the holder also lands up to AMUX_LAND_BATCH_MAX (default 3)
+  # waiters queued behind it that share its repository, so N queued pushes cost
+  # one pre-push gate run instead of N. Measured 2026-10-01 on Mixpeek main: a
+  # median 17-minute hold, waits of 18 to 100 minutes, the queue 7 deep. Each
+  # waiter's commits are replayed in order onto the holder's rebased HEAD with
+  # `git merge-tree`, keeping their author, message and trailers; the stack is
+  # pushed without being checked out, so the hook gates the pushed tree. A
+  # waiter whose commits conflict, or contain a merge, stays queued and lands on
+  # its own turn. If the hook refuses a batch, the holder pushes its own commit
+  # alone and every batched waiter stays queued, so nobody inherits another
+  # lane's refusal. --no-batch keeps a lane out of batches in both roles.
+  #
+  # Every wait, takeover, batch and outcome is a line in ~/.amux/logs/land.log;
+  # a refused push keeps its full output under ~/.amux/logs/land/.
+  local remote=origin branch=main tries=8 max_hold=3600 batch=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --remote) remote="${2:?}"; shift 2 ;;
       --branch) branch="${2:?}"; shift 2 ;;
       --tries) tries="${2:?}"; shift 2 ;;
       --max-hold) max_hold="${2:?}"; shift 2 ;;
+      --no-batch) batch=0; shift ;;
       -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
-      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600]" ;;
+      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch]" ;;
     esac
   done
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "amux land: not inside a git checkout"
-  local url key lock log me
+  local url key lock log me common
   url="$(git remote get-url "$remote" 2>/dev/null)" || die "amux land: no remote '$remote'"
   key="$(printf '%s %s' "$url" "$branch" | shasum | cut -c1-16)"
   lock="$HOME/.amux/locks/land-$key"
   log="$HOME/.amux/logs/land.log"
   me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}"
+  common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
   mkdir -p "$HOME/.amux/locks" "$HOME/.amux/logs"
   _land_log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "$*" >> "$log"; echo "amux land: $*" >&2; }
+
   # FIFO (gs12-compute, 2026-10-01): with only the mkdir lock, whichever waiter
   # polled first after a release won, and one waited 6030s behind later
-  # arrivals. Each waiter now drops a ticket named by its arrival time and pid
-  # into "$lock.q"; only the oldest live ticket may take the lock. A ticket
-  # whose pid is gone is removed by whoever sees it.
-  local q="$lock.q" ticket waited=0 announced=0 head pos t
-  mkdir -p "$q"
-  ticket="$q/$(printf '%012d' "$(date +%s)")-$$"
-  echo "$me" > "$ticket"
-  trap 'rm -f -- "'"$ticket"'"' EXIT INT TERM
+  # arrivals. Each waiter drops a ticket named by its arrival time and pid into
+  # "$lock.q"; only the oldest live ticket may take the lock. A ticket whose pid
+  # is gone is removed by whoever sees it. A holder that takes a waiter into its
+  # batch writes the outcome to "$lock.r/<ticket>".
+  local q="$lock.q" rdir="$lock.r" tname waited=0 announced=0 head pos t res batchable="$batch"
+  mkdir -p "$q" "$rdir"
+  tname="$(printf '%012d' "$(date +%s)")-$$"
+  _land_ticket() { printf '%s\n%s\n%s\n%s\n' "$me" "$(git rev-parse HEAD)" "$common" "$batchable" > "${q:?}/${tname:?}"; }
+  _land_ticket
+  # Expanded NOW: these are locals, gone by the time an EXIT trap runs, and a
+  # `${x:?}` guard on an unset name fails the exit status (rc 1 on success).
+  trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
   while :; do
+    if [ -f "${rdir:?}/${tname:?}" ]; then
+      res="$(cat "${rdir:?}/${tname:?}")"; rm -f -- "${rdir:?}/${tname:?}"
+      case "$res" in
+        landed\ *)
+          if git fetch -q "$remote" "$branch" && ! git rebase -q "$remote/$branch" 2>/dev/null; then
+            git rebase --abort 2>/dev/null || true
+          fi
+          if [ -z "$(git rev-list "$remote/$branch..HEAD" 2>/dev/null)" ]; then
+            rm -f -- "${q:?}/${tname:?}"
+            _land_log "landed in a batch: ${res#landed }; this checkout is now at $remote/$branch"
+            return 0
+          fi
+          # Committed more while queued: the rest keeps this ticket's place.
+          _land_ticket
+          _land_log "a batch landed part of this checkout (${res#landed }); the rest keeps its place in the queue"
+          ;;
+        *)
+          # After a refused batch nobody knows whose commit was refused, so
+          # this lane lands alone rather than poisoning the next batch too.
+          case "$res" in *refused*) batchable=0; _land_ticket ;; esac
+          _land_log "left out of a batch ($res); keeping its place in the queue"
+          ;;
+      esac
+    fi
     for t in "$q"/*; do
       [ -e "$t" ] || continue
-      kill -0 "${t##*-}" 2>/dev/null || { _land_log "dropped the ticket of a waiter that exited ($(cat "$t" 2>/dev/null || echo ?), pid ${t##*-})"; rm -f -- "$t"; }
+      kill -0 "${t##*-}" 2>/dev/null || { _land_log "dropped the ticket of a waiter that exited ($(head -1 "$t" 2>/dev/null || echo ?), pid ${t##*-})"; rm -f -- "${t:?}"; }
     done
     head="$(ls "$q" | sort | head -1)"
-    if [ "$head" = "${ticket##*/}" ] && mkdir "$lock" 2>/dev/null; then break; fi
+    if [ "$head" = "$tname" ] && mkdir "$lock" 2>/dev/null; then break; fi
     local hpid hsince hwho
     hpid="$(cat "$lock/pid" 2>/dev/null || true)"; hsince="$(cat "$lock/since" 2>/dev/null || echo 0)"; hwho="$(cat "$lock/who" 2>/dev/null || true)"
     if [ -d "$lock" ] && { { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ $(( $(date +%s) - ${hsince:-0} )) -gt "$max_hold" ]; }; then
@@ -6399,21 +6444,72 @@ cmd_land() {
       rm -rf -- "${lock:?}"; continue
     fi
     if [ "$announced" = 0 ]; then
-      pos="$(ls "$q" | sort | grep -n -x -F "${ticket##*/}" | cut -d: -f1)"
+      pos="$(ls "$q" | sort | grep -n -x -F "$tname" | cut -d: -f1)"
       if [ -n "$hwho" ]; then
         _land_log "waiting: $branch is being landed by $hwho (pid ${hpid:-?}); queue position ${pos:-?}"
       else
-        _land_log "waiting: queue position ${pos:-?} on $branch, behind $(cat "$q/$head" 2>/dev/null || echo ?)"
+        _land_log "waiting: queue position ${pos:-?} on $branch, behind $(head -1 "$q/$head" 2>/dev/null || echo ?)"
       fi
       announced=1
     fi
     sleep 5; waited=$((waited + 5))
   done
-  rm -f -- "$ticket"
+  rm -f -- "${q:?}/${tname:?}"
   echo $$ > "$lock/pid"; date +%s > "$lock/since"; echo "$me" > "$lock/who"
-  trap 'rm -rf -- "'"$lock"'"' EXIT INT TERM
+  trap "rm -rf -- '${lock:?}'" EXIT INT TERM
   [ "$waited" -gt 0 ] && _land_log "acquired $branch after waiting ${waited}s"
-  local i out rc
+
+  # _land_stack <tip>: replay queued waiters' commits onto <tip>. Sets
+  # stack_tip and stack_in ("<ticket> <lane>" lines) in this shell. A waiter it
+  # cannot take is told why and keeps its place.
+  local stack_tip stack_in
+  _land_stack() {
+    local max="${AMUX_LAND_BATCH_MAX:-3}" n=0 tk who wsha wcommon wbatch base c tree msg new t0 ok
+    stack_tip="$1"; stack_in=""
+    [ "$batch" = 1 ] && [ "$max" -gt 0 ] || return 0
+    for tk in $(ls "$q" 2>/dev/null | sort); do
+      [ "$n" -lt "$max" ] || break
+      kill -0 "${tk##*-}" 2>/dev/null || continue
+      who=""; wsha=""; wcommon=""; wbatch=""
+      { read -r who; read -r wsha; read -r wcommon; read -r wbatch; } < "$q/$tk" 2>/dev/null || true
+      [ "$wbatch" = 1 ] && [ "$wcommon" = "$common" ] || continue
+      git cat-file -e "$wsha^{commit}" 2>/dev/null || continue
+      base="$(git merge-base "$stack_tip" "$wsha" 2>/dev/null)" || continue
+      [ "$base" != "$wsha" ] || continue
+      if [ -n "$(git rev-list --merges "$base..$wsha")" ]; then
+        echo "excluded: its range contains a merge commit" > "$rdir/$tk"; continue
+      fi
+      t0="$stack_tip"; ok=1
+      for c in $(git rev-list --reverse "$base..$wsha"); do
+        tree="$(git merge-tree --write-tree "$stack_tip" "$c" 2>/dev/null | head -1)" || { ok=0; break; }
+        [ -n "$tree" ] || { ok=0; break; }
+        msg="$(git log -1 --format=%B "$c")"
+        new="$(GIT_AUTHOR_NAME="$(git log -1 --format=%an "$c")" GIT_AUTHOR_EMAIL="$(git log -1 --format=%ae "$c")" \
+               GIT_AUTHOR_DATE="$(git log -1 --format=%aD "$c")" git commit-tree "$tree" -p "$stack_tip" -m "$msg")" || { ok=0; break; }
+        stack_tip="$new"
+      done
+      if [ "$ok" = 0 ]; then
+        stack_tip="$t0"
+        echo "excluded: its commits conflict with the batch ahead of it" > "$rdir/$tk"; continue
+      fi
+      [ "$stack_tip" != "$t0" ] || continue
+      stack_in="${stack_in}${tk} ${who}
+"
+      n=$((n + 1))
+    done
+  }
+  # _land_tell <message>: write the outcome to every batched waiter; a landed
+  # waiter's ticket is removed so the next holder does not batch it again.
+  _land_tell() {
+    local tk rest
+    while read -r tk rest; do
+      [ -n "$tk" ] || continue
+      echo "$1" > "$rdir/$tk"
+      case "$1" in landed\ *) rm -f -- "${q:?}/${tk:?}" ;; esac
+    done <<< "$stack_in"
+  }
+
+  local i out rc full verdicts lanes solo=0
   for i in $(seq 1 "$tries"); do
     git fetch -q "$remote" "$branch" || { _land_log "fetch failed (attempt $i)"; sleep 5; continue; }
     if ! git rebase -q "$remote/$branch"; then
@@ -6421,11 +6517,20 @@ cmd_land() {
       _land_log "rebase onto $remote/$branch conflicted; nothing pushed"
       return 2
     fi
+    stack_tip="$(git rev-parse HEAD)"; stack_in=""
+    [ "$solo" = 1 ] || _land_stack "$stack_tip"
+    lanes="$(printf '%s' "$stack_in" | awk 'NF {printf "%s%s", sep, $2; sep=", "}')"
+    [ -z "$lanes" ] || _land_log "batching ${lanes} behind this push (one gate run)"
     # `|| rc=$?`, not `; rc=$?`: this CLI runs under set -e, and a rejected
     # push in a bare assignment would exit the script before the retry.
-    rc=0; out="$(git push "$remote" "HEAD:$branch" 2>&1)" || rc=$?
+    rc=0; out="$(git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
     if [ $rc -eq 0 ]; then
-      _land_log "landed $(git rev-parse --short HEAD) on $branch (attempt $i)"
+      if [ -n "$lanes" ]; then
+        _land_tell "landed $(git rev-parse --short "$stack_tip") on $branch, batched by $me"
+        _land_log "landed $(git rev-parse --short "$stack_tip") on $branch (attempt $i), with ${lanes}"
+      else
+        _land_log "landed $(git rev-parse --short "$stack_tip") on $branch (attempt $i)"
+      fi
       printf '%s\n' "$out" | tail -3
       return 0
     fi
@@ -6436,12 +6541,19 @@ cmd_land() {
     # Keep the whole hook output (gs12-spend, 2026-10-01): the deciding line
     # ("✗ FAILED — 2 selected test(s) ...") sits above the ERROR list, so a
     # tail lost it and two lanes re-ran the full hook by hand to find it.
-    local full verdicts
     full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$.log"
     mkdir -p "${full%/*}"
     find "${full%/*}" -name '*.log' -mtime +14 -delete 2>/dev/null || true
     printf '%s\n' "$out" > "$full"
     verdicts="$(printf '%s\n' "$out" | grep -E '✗|FAILED|BLOCKED|REFUSED|refus|^error:|^fatal:' | head -15)"
+    if [ -n "$lanes" ]; then
+      # A refused batch blames nobody: push this lane alone, and the batched
+      # waiters keep their places and land on their own turns.
+      _land_tell "excluded: the batch was refused by the push hook (full output $full); landing on your own turn"
+      _land_log "batch with ${lanes} refused (attempt $i, rc $rc); pushing this lane alone. Full output: $full"
+      solo=1
+      continue
+    fi
     printf '%s\n' "$out" | tail -20
     if [ -n "$verdicts" ]; then
       printf '\namux land: verdict lines from the push:\n%s\n' "$verdicts" >&2
