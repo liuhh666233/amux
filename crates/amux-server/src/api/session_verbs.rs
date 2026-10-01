@@ -3809,6 +3809,18 @@ pub(crate) fn transcript_evidence(name: &str) -> (Option<String>, Option<u64>) {
 
 /// Newest JSONL for a session (py:5590 _session_jsonl_path_uncached): meta
 /// conv-id first, then title match, then the single unclaimed candidate.
+/// `<projects>/<any project>/<conv_id>.jsonl`, if one exists.
+pub(crate) fn find_conversation_jsonl(projects: &Path, conv_id: &str) -> Option<PathBuf> {
+    if conv_id.is_empty() || conv_id.contains('/') || conv_id.contains("..") {
+        return None;
+    }
+    std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join(format!("{conv_id}.jsonl")))
+        .find(|p| p.is_file())
+}
+
 pub(crate) fn session_jsonl_path(name: &str) -> Option<PathBuf> {
     let cfg = parse_env(name);
     let mut wd = cfg.get_or("CC_DIR", "").trim().to_string();
@@ -3842,6 +3854,20 @@ pub(crate) fn session_jsonl_path(name: &str) -> Option<PathBuf> {
                 return Some(cand);
             }
         }
+        // A lane that changed directory records cc_cwd as the SUBdirectory,
+        // while its transcript lives under the project it started in.
+        // Measured 2026-10-01: gs12-restore's cc_cwd was
+        // .../.worktrees/gs12-restore/server and its transcript sat under
+        // -...-worktrees-gs12-restore, so no reader found it, and a restart
+        // mid-delivery could not tell whether a signal wake had landed: it was
+        // filed "interrupted" and never shown. The id is a UUID, so any
+        // project holding <id>.jsonl is this conversation.
+        if let Some(p) = find_conversation_jsonl(&claude_home().join("projects"), &conv_id) {
+            return Some(p);
+        }
+        tracing::warn!(session = %name, conv_id = %conv_id, measured = true, n_considered = 1,
+            verdict = "transcript_conversation_not_found",
+            "the lane's recorded conversation id has no transcript in any project; falling back to the project-dir guess");
     }
     let project_dir = claude_home().join("projects").join(project_name(&wd));
     let Ok(rd) = std::fs::read_dir(&project_dir) else {
@@ -46147,6 +46173,21 @@ mod steer_freeze_tests {
         assert_eq!(c(SteerDelivery::Hold, 86_400.0, false, "claude", 1800.0), SteerDelivery::Hold,
             "a hold with no background work is not this hold");
         assert_eq!(c(SteerDelivery::AtBoundary, 0.0, true, "claude", 1800.0), SteerDelivery::AtBoundary);
+    }
+
+    #[test]
+    fn a_conversation_is_found_under_whichever_project_holds_it() {
+        let d = tempfile::tempdir().unwrap();
+        let projects = d.path();
+        std::fs::create_dir_all(projects.join("-Users-x-Dev-mixpeek")).unwrap();
+        std::fs::create_dir_all(projects.join("-Users-x-Dev-mixpeek--worktrees-gs12-restore")).unwrap();
+        std::fs::write(projects.join("-Users-x-Dev-mixpeek").join("other.jsonl"), "{}").unwrap();
+        let want = projects.join("-Users-x-Dev-mixpeek--worktrees-gs12-restore").join("ca79500f.jsonl");
+        std::fs::write(&want, "{}").unwrap();
+        assert_eq!(find_conversation_jsonl(projects, "ca79500f"), Some(want),
+            "a lane whose cc_cwd is a subdirectory still resolves to its own transcript");
+        assert_eq!(find_conversation_jsonl(projects, "missing"), None);
+        assert_eq!(find_conversation_jsonl(projects, "../x"), None);
     }
 
     #[test]
