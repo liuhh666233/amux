@@ -6761,7 +6761,12 @@ p.communicate(msg.encode())
   local _cf
   _cf="$(_land_conflicts)"
   if [ -n "$_cf" ]; then
-    _land_log "conflicts with $remote/$branch on: $_cf; nothing queued. Rebase onto $remote/$branch, resolve, and land again"
+    # Name the commit that was compared and where it came from: a --sha land
+    # reported a stale checkout's conflicts once (mixpeek-override, 18:58Z
+    # 2026-10-01) and nothing in the log could say which commit was checked.
+    local _src="the checkout HEAD"
+    [ -n "$land_sha" ] && _src="--sha"
+    _land_log "conflicts with $remote/$branch on: $_cf; nothing queued (checked $(git rev-parse --short "${land_sha:-HEAD}") from $_src; args: ${orig_args[*]:-none}). Rebase onto $remote/$branch, resolve, and land again"
     return 2
   fi
 
