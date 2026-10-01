@@ -86,7 +86,7 @@ The orchestrator keeps responsibility for decomposition, assignment, dependencie
 
 ## Integration and proof
 
-- Workers land their own work: gates on their worktree, `git fetch origin main && git rebase origin/main`, push, and repeat on a lost race. They never graft.
+- Workers land their own work: gates on their worktree, then `amux land`, which fetches, rebases onto origin/main and pushes while holding a per-branch lock, so pushers queue instead of losing races and re-running gates. A rebase conflict returns 2 with nothing pushed. They never graft.
 - A card is `done` when the change is on origin/main and its acceptance check was run, with the command and its output as evidence. It is `verified` only when the same check passes on the plane the card names. You review it with `--reviewer`; a worker's own claim is not verification.
 - Re-run the acceptance check yourself before you move a card to `verified`. Read committed bytes (`git show origin/main:<path>`), never a worktree.
 - Local proof has a slot limit. Each local stack of the standalone image needs about 16 GB, and they share ports, so hold at most four at once. You hand out the slots and keep the count on a card. A worker that needs one parks its card with `amux signal wait <card> local-proof-<worker>` and tells you. When a slot frees, you run `amux signal raise local-proof-<worker>` for the next one. Use one name per worker: a raise frees every card waiting on that name.
