@@ -530,7 +530,10 @@ import importlib.util, time
 spec = importlib.util.spec_from_file_location("ft", "scripts/friction_themes.py")
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 DAY = 86400_000
-now = int(time.time() * 1000)
+# A FIXED midday, not time.time(): five minutes back from a run at 00:01 UTC
+# crossed midnight and read as two lane-days (CI red 2026-10-01 00:01Z).
+# Case J below is the one that tests the midnight edge on purpose.
+now = 1788611400_000  # 2026-09-05T12:30:00Z: no zone has local midnight within 5 minutes of it
 
 inc = m.concentration([("amux-testing-e2e", now - i * 60_000) for i in range(5)])
 assert inc["distinct_lanes"] == 1, inc
