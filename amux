@@ -6450,7 +6450,9 @@ cmd_land() {
   #
   # --detach queues and returns at once: land runs in its own session (macOS
   # has no setsid(1); python's os.setsid does it), output goes to a log under
-  # ~/.amux/logs/land/, and the lane gets a message when it lands or stops.
+  # ~/.amux/logs/land/, and the lane gets a message when it lands or stops
+  # (AMUX_LAND_NOTIFY=0 skips the message, for a scheduled caller that checks
+  # the result itself on its next run).
   # Claude Code kills a background command after 2 hours, and with the queue
   # 15 deep a lane lost its ticket that way at position 9 (gs12-templates,
   # 2026-10-01). A detached land is not the lane's child, so no limit reaches it.
@@ -6523,6 +6525,8 @@ with open(dlog, "ab") as out:
     rc = subprocess.call(["bash", amux, "land"] + sys.argv[1:], stdout=out, stderr=out, stdin=subprocess.DEVNULL)
 tail = [l for l in open(dlog, errors="replace").read().splitlines() if l.startswith("amux land:")][-3:]
 msg = f"amux land (detached) finished with rc {rc}:\n" + "\n".join(tail) + f"\nFull output: {dlog}"
+if os.environ.get("AMUX_LAND_NOTIFY") == "0":
+    sys.exit(0)
 p = subprocess.Popen(["bash", amux, "send", me, "--stdin"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 p.communicate(msg.encode())
 ' ${fwd_args[@]+"${fwd_args[@]}"} > /dev/null 2>&1 < /dev/null &
