@@ -32,6 +32,11 @@ use std::path::Path;
 /// them is deliberately BROKEN, which is the clearest case of the same rule.
 const ALLOWED: &[(&str, &str)] = &[
     (
+        "id TEXT, session TEXT, owner_type TEXT, archived INTEGER, deleted REAL, status TEXT, type TEXT",
+        "board_intake's fold-candidate predicate fixture (e01c973d): seven columns, exactly the ones \
+         CANDIDATE_PREDICATE reads, no schema claim",
+    ),
+    (
         "id TEXT PRIMARY KEY, status TEXT, session TEXT",
         "the REAL-timestamp regression fixture: it needs a specific 7-column shape to \
          reproduce one bad cell, and adding columns would not make it more faithful",

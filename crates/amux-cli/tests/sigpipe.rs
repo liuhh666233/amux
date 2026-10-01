@@ -20,16 +20,18 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn writing_to_a_closed_pipe_kills_the_process_instead_of_panicking() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_amux-rs"))
+    // Close the read end BEFORE the child exists, so its first write hits EPIPE.
+    // Dropping a piped stdout after spawn raced the child: a fast `--help`
+    // finished writing into the pipe buffer first and exited 0 (CI red on
+    // e01c973d, 2026-10-01, `got None; exit code Some(0)`).
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_amux-rs"))
         .arg("--help")
-        .stdout(Stdio::piped())
+        .stdout(writer)
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn amux-rs");
-
-    // Close the read end before the child writes. Any write then hits EPIPE, so
-    // this does not depend on output volume or on the 64KB pipe buffer.
-    drop(child.stdout.take().expect("piped stdout"));
 
     let out = child.wait_with_output().expect("wait");
 
