@@ -102,9 +102,14 @@ test('LC-OFFLINE-ROUNDTRIP: cold offline reload preserves edits and messages; re
     const worker = page.locator(`.card[data-session="${name}"]`).locator('visible=true').first();
     await worker.locator('.card-menu-btn').click();
     await page.locator('.card-menu.open [data-worker-action="peek-terminal"]').click();
+    // Queue MODE is the split's class; its label reads "Send" for an idle
+    // worker since 6ee037b7, so the label cannot tell the mode.
     const send = page.locator('#peek-overlay .send-split-main');
-    if ((await send.innerText()).trim() !== 'Queue') await page.locator('#peek-overlay .send-split-arrow').click();
-    await expect(send).toHaveText('Queue');
+    const split = page.locator('#peek-overlay .send-split');
+    const inQueue = async () => /\bmode-queue\b/.test((await split.getAttribute('class')) || '');
+    if (!(await inQueue())) await page.locator('#peek-overlay .send-split-arrow').click();
+    await expect.poll(inQueue).toBe(true);
+    await expect(send).toHaveText(/^(Send|Queue)$/);
     for (const message of messages) {
       await page.locator('#peek-cmd-input').fill(message);
       await send.click();

@@ -20,9 +20,16 @@ test('LC-COMPOSER-LAYOUT: compact mobile writing space and Queue controls stay a
     await expect(input).toBeVisible();
     for (const size of [page.viewportSize()!, { width: 320, height: 568 }, { width: 393, height: 330 }, { width: 667, height: 375 }]) {
       await page.setViewportSize(size);
-      for (const mode of ['Send', 'Queue']) {
-        if ((await main.innerText()) !== mode) await press(arrow);
-        await expect(main).toHaveText(mode);
+      // The MODE is the split's class. The label follows the worker since
+      // 6ee037b7: Queue mode reads "Send" for an idle worker (it is delivered
+      // now) and "Queue" only while it is busy.
+      const split = page.locator('#peek-overlay .send-split');
+      for (const mode of ['send', 'queue']) {
+        const inQueue = async () => /\bmode-queue\b/.test((await split.getAttribute('class')) || '');
+        if ((await inQueue()) !== (mode === 'queue')) await press(arrow);
+        await expect.poll(inQueue).toBe(mode === 'queue');
+        const expected = await page.evaluate(n => (window as any)._sendLabelFor(n), name);
+        await expect(main).toHaveText(expected);
         for (const draft of ['Review this change', 'Acceptance criteria and evidence\n'.repeat(10)]) {
           await input.fill(draft);
           await expect(input).toHaveValue(draft);

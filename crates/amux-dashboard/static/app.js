@@ -13657,7 +13657,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1211';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1212';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -47083,6 +47083,10 @@ async function _bwLoadInspect() {
   try {
     const r = await _bwFetch('/api/browser/inspect?session=' + _bwSession + '&limit=300');
     const d = await r.json();
+    // A late inspect reply must not paint over the Trail tab, which renders its
+    // own source: opening the inspector and tapping Trail showed the trail and
+    // then "no amux-launched browser is running" on top of it.
+    if (_bwInspActiveTab === 'trail') return;
     if (d.error) { list.innerHTML = '<div class="il-empty">' + esc(d.error) + '</div>'; return; }
     _bwInspData = { console: d.console || [], network: d.network || [], errors: d.errors || [] };
     const c = d.counts || {};
@@ -47091,6 +47095,7 @@ async function _bwLoadInspect() {
     document.getElementById('bw-ic-errors').textContent = c.errors ? '(' + c.errors + ')' : '';
     _bwRenderInspect();
   } catch(e) {
+    if (_bwInspActiveTab === 'trail') return;
     list.innerHTML = '<div class="il-empty">Error: ' + esc(e.message) + '</div>';
   }
 }
