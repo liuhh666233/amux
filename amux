@@ -6441,7 +6441,11 @@ cmd_land() {
     local hpid hsince hwho
     hpid="$(cat "$lock/pid" 2>/dev/null || true)"; hsince="$(cat "$lock/since" 2>/dev/null || echo 0)"; hwho="$(cat "$lock/who" 2>/dev/null || true)"
     if [ -d "$lock" ] && { { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ $(( $(date +%s) - ${hsince:-0} )) -gt "$max_hold" ]; }; then
-      _land_log "taking over a stale lock on $branch (holder ${hwho:-?} pid ${hpid:-?}, since $hsince)"
+      if [ -n "$hpid" ] && kill -0 "$hpid" 2>/dev/null; then
+        _land_log "taking over a lock on $branch whose current attempt passed --max-hold ${max_hold}s (holder ${hwho:-?} pid $hpid STILL ALIVE, attempt since $hsince); its push may still land"
+      else
+        _land_log "taking over a stale lock on $branch (holder ${hwho:-?} pid ${hpid:-?} is gone, since $hsince)"
+      fi
       rm -rf -- "${lock:?}"; continue
     fi
     if [ "$announced" = 0 ]; then
@@ -6458,7 +6462,10 @@ cmd_land() {
   rm -f -- "${q:?}/${tname:?}"
   echo $$ > "$lock/pid"; date +%s > "$lock/since"; echo "$me" > "$lock/who"
   # shellcheck disable=SC2064  # $lock is a local: it must be expanded when the trap is set
-  trap "rm -rf -- '${lock:?}'" EXIT INT TERM
+  # Remove the lock only while this process still owns it. An unconditional
+  # rm deleted the NEXT holder's lock after a takeover (2026-10-01 11:18Z:
+  # gs12-model's exit freed gs12-spend's hold and gs12-mvs pushed beside it).
+  trap "[ \"\$(cat '${lock:?}/pid' 2>/dev/null)\" = '$$' ] && rm -rf -- '${lock:?}'" EXIT INT TERM
   [ "$waited" -gt 0 ] && _land_log "acquired $branch after waiting ${waited}s"
 
   # _land_stack <tip>: replay queued waiters' commits onto <tip>. Sets
@@ -6466,7 +6473,7 @@ cmd_land() {
   # cannot take is told why and keeps its place.
   local stack_tip stack_in
   _land_stack() {
-    local max="${AMUX_LAND_BATCH_MAX:-3}" n=0 tk who wsha wcommon wbatch base c tree msg new t0 ok
+    local max="${AMUX_LAND_BATCH_MAX:-3}" n=0 tk who wsha wcommon wbatch base c tree msg new t0 ok seen=" "
     stack_tip="$1"; stack_in=""
     [ "$batch" = 1 ] && [ "$max" -gt 0 ] || return 0
     for tk in $(ls "$q" 2>/dev/null | sort); do
@@ -6476,6 +6483,10 @@ cmd_land() {
       { read -r who; read -r wsha; read -r wcommon; read -r wbatch; } < "$q/$tk" 2>/dev/null || true
       [ "$wbatch" = 1 ] && [ "$wcommon" = "$common" ] || continue
       git cat-file -e "$wsha^{commit}" 2>/dev/null || continue
+      # One lane with two land processes queues the same commit twice
+      # (gs12-restore, 2026-10-01); replaying it again adds an empty duplicate.
+      case "$seen" in *" $wsha "*) continue ;; esac
+      seen="$seen$wsha "
       base="$(git merge-base "$stack_tip" "$wsha" 2>/dev/null)" || continue
       [ "$base" != "$wsha" ] || continue
       if [ -n "$(git rev-list --merges "$base..$wsha")" ]; then
@@ -6485,6 +6496,8 @@ cmd_land() {
       for c in $(git rev-list --reverse "$base..$wsha"); do
         tree="$(git merge-tree --write-tree "$stack_tip" "$c" 2>/dev/null | head -1)" || { ok=0; break; }
         [ -n "$tree" ] || { ok=0; break; }
+        # Already in the stack (an equal change landed ahead): nothing to add.
+        [ "$tree" != "$(git rev-parse "$stack_tip^{tree}")" ] || continue
         msg="$(git log -1 --format=%B "$c")"
         new="$(GIT_AUTHOR_NAME="$(git log -1 --format=%an "$c")" GIT_AUTHOR_EMAIL="$(git log -1 --format=%ae "$c")" \
                GIT_AUTHOR_DATE="$(git log -1 --format=%aD "$c")" git commit-tree "$tree" -p "$stack_tip" -m "$msg")" || { ok=0; break; }
@@ -6513,6 +6526,11 @@ cmd_land() {
 
   local i out rc full verdicts lanes solo=0
   for i in $(seq 1 "$tries"); do
+    # --max-hold bounds ONE attempt, not the whole hold. A batch, its refusal
+    # and the solo re-push ran past 3600s on 2026-10-01 and a waiter took over
+    # a live holder mid-push (11:09Z). A takeover also checks the pid is gone
+    # or this stamp is older than --max-hold.
+    date +%s > "$lock/since"
     git fetch -q "$remote" "$branch" || { _land_log "fetch failed (attempt $i)"; sleep 5; continue; }
     if ! git rebase -q "$remote/$branch"; then
       git rebase --abort 2>/dev/null
