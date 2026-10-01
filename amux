@@ -6405,6 +6405,7 @@ cmd_land() {
   _land_ticket
   # Expanded NOW: these are locals, gone by the time an EXIT trap runs, and a
   # `${x:?}` guard on an unset name fails the exit status (rc 1 on success).
+  # shellcheck disable=SC2064  # expanded now on purpose, see the comment above
   trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
   while :; do
     if [ -f "${rdir:?}/${tname:?}" ]; then
@@ -6456,6 +6457,7 @@ cmd_land() {
   done
   rm -f -- "${q:?}/${tname:?}"
   echo $$ > "$lock/pid"; date +%s > "$lock/since"; echo "$me" > "$lock/who"
+  # shellcheck disable=SC2064  # $lock is a local: it must be expanded when the trap is set
   trap "rm -rf -- '${lock:?}'" EXIT INT TERM
   [ "$waited" -gt 0 ] && _land_log "acquired $branch after waiting ${waited}s"
 
