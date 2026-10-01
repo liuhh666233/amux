@@ -224,6 +224,24 @@ if [ "${AMUX_RS_BUILD_PROVENANCE_ONLY:-}" != "1" ] \
     exit 0
   fi
   sync_bash_cli "$built_sha"
+  # ADOPTION COOLDOWN: batch rapid commits from multiple lanes into fewer
+  # rebuilds. Each self-adoption kills all SSE connections (6-12s of
+  # "Worker updates unavailable" on every client). With 28 lanes committing
+  # independently, the builder was firing 50 times/day. This skips a tick
+  # when a successful adoption happened recently, letting the next tick
+  # build the accumulated changes in one pass.
+  COOLDOWN_S="${AMUX_RS_BUILD_COOLDOWN:-120}"
+  COOLDOWN_FILE="${STAMP}.adopted_at"
+  if [ "$head" != "$last" ] && [ -f "$COOLDOWN_FILE" ] && [ "$COOLDOWN_S" -gt 0 ] 2>/dev/null; then
+    adopted_at=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    elapsed=$(( now_epoch - adopted_at ))
+    if [ "$elapsed" -lt "$COOLDOWN_S" ]; then
+      remaining=$(( COOLDOWN_S - elapsed ))
+      echo "== $(date '+%F %T') COOLDOWN $built_sha — last adoption ${elapsed}s ago, waiting ${remaining}s more (cooldown=${COOLDOWN_S}s)" >> "$LOG"
+      exit 0
+    fi
+  fi
   if [ "$head" = "$last" ]; then
     if ! measure_live_identity; then
       echo "== $(date '+%F %T') !! ACTIVATION IDENTITY UNMEASURED expected=$built_sha trigger=$head $identity_reason measured=false action=defer — unavailable health is not evidence of image drift" >> "$LOG"
@@ -747,6 +765,7 @@ PYIDENTITY
     fi
     INSTALL_TMP=""
     echo "$head" > "$STAMP"
+    date +%s > "${STAMP}.adopted_at"
     rm -f "${STAMP}.failed"
     printf '%s\n' "$PROV_JSON" > "$PROV_FILE" 2>/dev/null || true
     echo "== ACTIVATION INSTALLED identity=$PROV_JSON"

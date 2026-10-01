@@ -22797,6 +22797,14 @@ async fn rate_limit_sweep(state: &AppState) -> usize {
                 tracing::warn!(session = %name, preview = %preview, via_agents_grace,
                     possible_codex_footer_chrome = possible_codex_footer_drift,
                     "unsubmitted text is stuck in the composer with no live turn or agents — the lane will read `waiting` until it is submitted or cleared");
+                // AMUX-5412: respawn the idle-submit watcher when stuck text
+                // is detected with no active watcher. The original watcher is
+                // a tokio task that dies on server self-adoption (auto-builder
+                // deploy), leaving the message permanently stuck. The dedup
+                // set in spawn_direct_draft_idle_submit prevents duplicates.
+                if let Some(ref full_text) = typed_pending {
+                    spawn_direct_draft_idle_submit(name, full_text, now_f64(), 5.0);
+                }
                 emit_event(
                     state,
                     name,

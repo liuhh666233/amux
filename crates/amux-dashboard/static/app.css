@@ -6074,8 +6074,8 @@
        below it; still user-draggable taller. */
     #sched-overlay { align-items: flex-start; padding: 8px; }
     #sched-overlay .board-edit-box { height: auto !important; max-height: calc(100dvh - 16px); overflow-y: auto !important; overflow-x: hidden; display: block !important; }
-    #sched-overlay #sched-command-section { min-height: 46dvh !important; }
-    #sched-overlay #sched-command { min-height: 200px !important; max-height: none; resize: vertical; }
+    #sched-overlay #sched-command-section { min-height: 0 !important; }
+    #sched-overlay #sched-command { min-height: 120px !important; max-height: 40dvh; resize: vertical; }
     .sched-modal-footer { max-height: none; }
   }
   @media (max-width: 600px) {
