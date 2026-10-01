@@ -24,34 +24,38 @@ test('LC-BLOCKED-OUTBOX: offline failed changes stay distinct from retryable edi
     await expect.poll(async () => (await queue())[0]?.state).toBe('blocked');
     await context.setOffline(true);
     await page.evaluate(() => window.dispatchEvent(new Event('offline')));
-    const title = page.locator('#offline-banner-title');
+    // Failed changes live in the status badge and its modal; the homepage
+    // banner was retired (07b42586, Ethan 2026-09-24: "the failed ops thing
+    // should just be in the status modal thing").
     const badge = page.locator('#conn-status').first();
-    // Offline is the badge's job; the banner carries only the failed op.
-    await expect(title).toContainText('1 failed op');
-    await expect(title).not.toContainText('Offline');
-    // A late success from a request begun online cannot undo an offline event.
+    const banner = page.locator('#offline-banner');
+    // A late success from a request begun online cannot undo an offline event,
+    // and a failure outranks both offline and pending in the badge.
     await page.evaluate(()=>(window as any).setOnline(true));
-    await expect(badge).toHaveText(/^(Offline|1 pending|Sync error)$/);
+    await expect(badge).toHaveText(/^(1 failed|Sync error)$/);
+    await expect(banner).not.toHaveClass(/active/);
     await checkpoint(page, info, 'offline-conflict-needs-review');
-    await title.getByRole('link', {name:'review', exact:true}).click();
-    await expect(page.locator('#queue-list')).toContainText('409');
-    await page.locator('#queue-overlay [onclick="closeQueueModal()"]').click();
+    const modal = page.locator('#conn-hist-modal');
+    await badge.click();
+    await expect(modal).toContainText('409');
+    await modal.locator('#conn-modal-close').click();
     expect(await enqueue(cards[1].id, 'Resumed offline edit', cards[1].rev)).toBe(true);
-    // A queued op is badge state; the banner still names only the failure.
-    await expect(badge).toHaveText(/^(2 pending|Sync error)$/);
-    await expect(title).toContainText('1 failed op');
-    await expect(page.locator('#offline-ops .offline-op')).toHaveCount(1);
+    // A queued op does not hide the failure: the badge still names it, and the
+    // modal lists both, with only the failed one dismissible.
+    await expect(badge).toHaveText(/^(1 failed|Sync error)$/);
+    await badge.click();
+    const dismiss = modal.getByRole('button', {name:'Dismiss failed change', exact:true});
+    await expect(dismiss).toHaveCount(1);
     await checkpoint(page, info, 'offline-mixed-queue');
-    const dismiss = page.locator('#offline-ops .blocked').getByRole('button', {name:'Dismiss failed change', exact:true});
     await expect.poll(async()=>{const hit=await dismiss.boundingBox();return hit?Math.min(hit.width,hit.height):0;}).toBeGreaterThanOrEqual(44);
     if (info.project.use.hasTouch) await dismiss.tap(); else await dismiss.click();
     await expect.poll(async () => (await queue()).length).toBe(1);
     expect((await queue())[0].url).toBe('/api/board/' + cards[1].id);
-    await expect(page.locator('#offline-banner')).not.toHaveClass(/active/);
+    await page.locator('#conn-hist-modal #conn-modal-close').click();
     await context.setOffline(false);
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
     await expect.poll(async () => (await queue()).length, {timeout:15_000}).toBe(0);
-    await expect(page.locator('#offline-banner')).not.toHaveClass(/active/);
+    await expect(banner).not.toHaveClass(/active/);
     const read = async (id: string) => (await request.get('/api/board/' + id, {headers})).json();
     expect((await read(cards[0].id)).title).toBe('Newer peer edit must survive');
     expect((await read(cards[1].id)).title).toBe('Resumed offline edit');

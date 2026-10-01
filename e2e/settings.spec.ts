@@ -970,9 +970,15 @@ test('settings_team_section', async ({ page, request }, testInfo) => {
   await expect(emailPrompt).toBeVisible();
   await emailPrompt.fill('invitee@example.com');
   await expect(page.locator('#invite-team-id')).toBeVisible();
-  await expect(page.locator('#invite-team-id')).toHaveValue('team_global');
+  // No team is preselected: an invite into the Global team grants host access,
+  // so the scope is a deliberate choice, and choosing Global asks for an
+  // explicit acknowledgement (grant_host_access, gtm-engine security report).
+  await expect(page.locator('#invite-team-id')).toHaveValue('');
   const teams = await (await request.get('/api/org/teams', { headers: authHeaders(token) })).json();
   expect(teams.some((team: any) => team.id === 'team_global')).toBe(true);
+  await page.locator('#invite-team-id').selectOption('team_global');
+  await expect(page.locator('#host-access-ack')).toBeVisible();
+  await page.locator('#host-access-ack').check();
   const [invRes] = await Promise.all([
     page.waitForResponse(
       (r) => r.url().endsWith('/api/org/invites') && r.request().method() === 'POST',

@@ -100,18 +100,6 @@ test('pause refresh keeps shared Resume disabled until lifecycle operation settl
   await expect(page.locator('#peek-more-dropdown [data-worker-action="pause"]')).toHaveAttribute('aria-disabled','false');
 });
 
-for(const width of [390,1280]) test(`service-worker warning leaves terminal Send reachable at ${width}`,async({page})=>{
-  await page.setViewportSize({width,height:800});
-  await page.addInitScript(()=>localStorage.setItem('amux_walkthrough_done','1'));
-  const worker={name:'pause-probe',provider:'codex',running:true,status:'idle',dir:'/tmp'};
-  await page.route(/\/api\/sessions(?:\?.*)?$/,r=>r.fulfill({json:[worker]}));
-  await page.route('**/api/sessions/pause-probe/peek?*',r=>r.fulfill({json:{name:worker.name,live:'Saved conversation',pane_cols:80}}));
-  await page.route('**/api/offline-origin',r=>r.fulfill({json:{why:'self-signed certificate',proxied:false}}));
-  await page.goto('/');await page.waitForFunction(()=>typeof (window as any).openPeek==='function');
-  await page.evaluate(async worker=>{eval('sessions=['+JSON.stringify(worker)+']; render();');(window as any).openPeek(worker.name);(window as any)._stopPeekPoll();await (window as any)._swOfferGoodOrigin();},worker);
-  await expect(page.locator('#sw-fail-bar')).toBeVisible();
-  const send=page.locator('#peek-overlay .send-split-main');
-  await expect(send).toBeVisible();
-  await expect.poll(async()=>{const a=(await send.boundingBox())!,b=(await page.locator('#sw-fail-bar').boundingBox())!;return a.y+a.height<=b.y;}).toBe(true);
-  await send.click({trial:true});
-});
+// The service-worker bar these cases measured was retired (f154d030): offline
+// mode off is now a dot on the badge, and e2e/sw-offline-notice.spec.ts pins
+// that Send and Create stay tappable with it.

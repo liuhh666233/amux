@@ -19,7 +19,8 @@ test('a Codex worker opens on Terminal, not Transcript', async ({ page }) => {
   await expect(page.locator('#peek-terminal-panel')).toBeVisible();
 });
 
-test('terminal identity uses canonical model and active worktree while fan-out eligibility stays authoritative', async ({ page }) => {
+// The fan-out tab was retired with orchestration (c5601217); identity and close state remain.
+test('terminal identity uses canonical model and active worktree, and a closed peek is inert', async ({ page }) => {
   await page.goto('/');
   await page.waitForFunction(() => typeof (window as any).openPeek === 'function');
   await page.evaluate(`
@@ -31,17 +32,9 @@ test('terminal identity uses canonical model and active worktree while fan-out e
   `);
   await expect(page.locator('#peek-model-badge')).toContainText('qwen3-coder:30b-65k');
   await expect(page.locator('#peek-dir-text')).toHaveText('/tmp/exact-worktree');
-  await expect(page.locator('#peek-tab-fanout')).toBeVisible();
-  await page.evaluate(`peekHiddenTabs.delete('fanout');_applyPeekTabVisibility()`);
-  await expect(page.locator('#peek-tab-fanout')).toBeVisible();
 
   await page.evaluate(`closePeek()`);
   await expect(page.locator('#peek-overlay')).toHaveAttribute('aria-hidden','true');
   await expect(page.locator('#peek-overlay')).toHaveAttribute('inert','');
   await expect(page.locator('#peek-overlay')).toBeHidden();
-
-  await page.evaluate(`openPeek('ollama-child')`);
-  await expect(page.locator('#peek-tab-fanout')).toBeHidden();
-  await page.evaluate(`peekHiddenTabs.delete('fanout');_applyPeekTabVisibility()`);
-  await expect(page.locator('#peek-tab-fanout')).toBeHidden();
 });

@@ -20,20 +20,19 @@ for (const vp of [{name:'phone', w:375, h:812}, {name:'tablet', w:834, h:1112}])
       const b = m.getBoundingClientRect();
       const btn = document.getElementById('peek-tab-customize')!.getBoundingClientRect();
       return { mLeft: Math.round(b.left), mRight: Math.round(b.right), w: Math.round(b.width),
-               btnLeft: Math.round(btn.left), vw: innerWidth,
+               btnLeft: Math.round(btn.left), btnRight: Math.round(btn.right), vw: innerWidth,
                gap: Math.round(b.left - btn.left) };
     });
     console.log(`[${vp.name}] ` + JSON.stringify(r));
     expect(r.mRight, 'right edge off screen').toBeLessThanOrEqual(r.vw);
     expect(r.mLeft, 'left edge off screen').toBeGreaterThanOrEqual(0);
-    // The real invariant: LEFT-ANCHORED TO THE BUTTON WHEN THERE IS ROOM, and
-    // otherwise pushed only as far left as needed to stay on screen. Asserting
-    // "left == button.left" unconditionally is wrong — the button sits at the END
-    // of the tab strip, so on a phone a 359px menu under a button at x=321 would
-    // end at 680 on a 375px viewport. Clamping is the feature, not a miss.
-    const ideal = Math.min(r.btnLeft, r.vw - r.w - 8);
+    // The real invariant: HANGS FROM THE BUTTON WHEN THERE IS ROOM, and is
+    // otherwise pushed only as far as needed to stay on screen. Since d2ae1058
+    // (zoom fix) it is RIGHT-aligned under the button, the way the worker-list
+    // customizer hangs from its ⊞; clamping is the feature, not a miss.
+    const ideal = Math.min(r.btnRight - r.w, r.vw - r.w - 8);
     const expected = Math.max(8, ideal);
-    expect(r.mLeft, `menu left ${r.mLeft} != expected ${expected} (btn ${r.btnLeft}, w ${r.w}, vw ${r.vw})`).toBe(expected);
+    expect(Math.abs(r.mLeft - expected), `menu left ${r.mLeft} != expected ${expected} (btn ${r.btnLeft}-${r.btnRight}, w ${r.w}, vw ${r.vw})`).toBeLessThanOrEqual(1);
     await page.screenshot({ path: test.info().outputPath(`tab-menu-${vp.name}.png`) });
     await ctx.close();
   });

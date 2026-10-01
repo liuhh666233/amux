@@ -37,10 +37,16 @@ test('a stub declared with allowUnusedRoute does not fail', async ({ page }) => 
 // fixture fails EVERY test that registers a route", which would be a wrapper
 // that breaks all four real stubs while looking like it works.
 test('a stub that DOES match does not fail', async ({ page }) => {
+  // The page's own boot traffic is not a fixed contract: waiting for a boot
+  // /api/sessions response timed out on some loads (CI mobile, local ios and
+  // desktop repeats, 2026-09-30). Make the matching request explicitly so the
+  // control measures the fixture, not the boot path.
   let hits = 0;
-  await page.route('**/api/sessions*', async (r) => { hits += 1; await r.continue(); });
+  await page.route('**/api/route-guard-probe', async (r) => { hits += 1;
+    await r.fulfill({ contentType: 'application/json', body: '{"ok":true}' }); });
   await page.goto('/');
-  await page.waitForResponse((r) => r.url().includes('/api/sessions'), { timeout: 20000 });
+  const status = await page.evaluate(async () => (await fetch('/api/route-guard-probe')).status);
+  expect(status).toBe(200);
   expect(hits).toBeGreaterThan(0);
 });
 

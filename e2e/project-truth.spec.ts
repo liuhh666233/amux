@@ -33,7 +33,10 @@ test('closed tasks are counted separately and never as verified',async ({page})=
   world.cards=[{id:'T-1',title:'done',phase:'verified',stage:'verified'},{id:'T-2',title:'dropped',phase:'closed',stage:'closed'},{id:'T-3',title:'live',phase:'working'}];
   await open(page);
   const text=await page.locator('#project-progress').innerText();
-  expect(text).toContain('1 of 3 tasks verified');expect(text).toContain('1 closed (not verified)');
+  // Copy is plainer now; the property is unchanged: a closed task is counted
+  // apart and never as verified.
+  expect(text).toContain('1 of 3 tasks checked');expect(text).toContain('1 closed without verification');
+  expect(text).not.toMatch(/2 of 3/);
 });
 
 test('whole-project acceptance is reviewable and human approval is bound to its fingerprint',async ({page})=>{
@@ -45,17 +48,28 @@ test('whole-project acceptance is reviewable and human approval is bound to its 
     {id:'owner',requirement:'Owner can inspect the demo',verifier:{type:'human',id:'owner-review'},result:{state:'pending_human',evidence:[]}},
   ]};
   await open(page);
+  // 8fbd2c36 ("Simplify project views") moved proof and the decision out of
+  // the summary into the Evidence tab and replaced the state copy. Same
+  // properties: the summary says a human decision is pending, the produced
+  // artifact and the fresh execution receipt are inspectable, and Approve is
+  // bound to the acceptance fingerprint.
   const acceptance=page.locator('#project-acceptance');
-  await expect(acceptance).toContainText('awaiting_human');
-  await expect(page.locator('#project-state')).toContainText('executors retained without running');
-  await expect(acceptance).toContainText('Produced artifacts to review');
-  await expect(acceptance.getByRole('button',{name:'T-1 · demo.webm'})).toBeVisible();
-  await expect(acceptance).toContainText('14 scenarios passed');
-  await expect(page.locator('.project-outcome')).toContainText('Fresh execution verified · 2 stages');
-  await expect(page.locator('.project-outcome')).toContainText('sha256:current');
-  await expect(acceptance).toContainText('Fresh execution proof');
-  await expect(acceptance).toContainText('current-run');
-  await acceptance.getByRole('button',{name:'Approve'}).click();
+  await expect(acceptance).toContainText('Ready for your evidence review');
+  await expect(page.locator('#project-state')).toContainText('Ready for your review');
+  await expect(page.locator('.project-outcome')).toContainText('1 of 1 automated checks passed');
+  await page.locator('[data-project-tab="evidence"]').click();
+  const evidence=page.locator('#project-evidence-panel');
+  await expect(evidence).toContainText('Retained files · 1');
+  await evidence.locator('summary',{hasText:'T-1 · 1 artifact'}).click();
+  await expect(evidence.getByRole('button',{name:'demo.webm'})).toBeVisible();
+  await evidence.locator('summary',{hasText:'Review 2 outcome checks'}).click();
+  await expect(evidence).toContainText('Fresh execution proof');
+  await expect(evidence).toContainText('sha256:current');
+  await expect(evidence).toContainText('2 passed stage(s)');
+  await expect(evidence).toContainText('current-run');
+  await evidence.locator('summary',{hasText:'Verifier output'}).click();
+  await expect(evidence).toContainText('14 scenarios passed');
+  await evidence.getByRole('button',{name:'Approve'}).click();
   await expect.poll(()=>world.approval).toEqual({criterion:'owner',fingerprint:'f'.repeat(64),decision:'approve',note:''});
 });
 
@@ -129,7 +143,9 @@ test('a transient outage recovers by itself without navigation or reload',async 
   expect(await page.evaluate('_projectsFailures') as number).toBeGreaterThanOrEqual(3);
   await expect(page.locator('#project-progress')).toContainText('Stale: last refresh failed');
   world.failAll=false; // the same loop resumes on its own
-  await expect(page.locator('#project-error')).toHaveText('');await expect(page.locator('#project-error-retry')).toBeHidden();
+  // It backs off after repeated failures, so recovery can take one backed-off
+  // interval; "by itself" is the property, not five seconds.
+  await expect(page.locator('#project-error')).toHaveText('',{timeout:30_000});await expect(page.locator('#project-error-retry')).toBeHidden();
   await expect(page.locator('#project-progress')).not.toContainText('Stale');
   expect(await page.evaluate('_projectsFailures')).toBe(0);
 });

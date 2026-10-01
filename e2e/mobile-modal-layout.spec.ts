@@ -32,10 +32,10 @@ test('long dialogs keep their actions visible and content scrollable at phone an
  }
 });
 
-test('orchestrator and connection history have visible close controls; proxy opens interactively',async({page})=>{
+// The orchestrator overlay was retired with the orchestration view (c5601217).
+test('connection history has a visible close control; proxy opens interactively',async({page})=>{
  await page.setViewportSize({width:375,height:667});
  for(const [open,root,close] of [
-  ['_orchOpen()','#orch-overlay','button[aria-label="Close orchestrator"]'],
   ['showConnHistory()','#conn-hist-modal','#conn-modal-close'],
   ["switchView('proxies');_proxyOpenForm()",'#proxy-form-overlay','button[onclick="_proxyCloseForm()"]'],
  ]){

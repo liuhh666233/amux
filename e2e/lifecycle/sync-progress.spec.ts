@@ -48,7 +48,10 @@ test('LC-SYNC-PROGRESS: reconnect checks off only acknowledged changes and keeps
       expect(read.title).toBe(i===1?c.title:'Reconnected '+c.id);
     }
     allowConflict=true;
-    await page.locator('[onclick="forceRetry()"]').locator('visible=true').first().click();
+    // Failed changes are retried from the status modal (07b42586): tap the
+    // "N failed" pill, then Retry now.
+    await page.locator('#conn-status').click();
+    await page.locator('#conn-retry-now').click();
     await expect.poll(()=>Boolean(releases[1])).toBe(true);
     await expect(page.locator('#sync-items .done')).toHaveCount(2); // earlier acknowledgements remain visible
     releases[1](); await expect.poll(async()=>(await queue()).length).toBe(0);

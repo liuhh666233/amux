@@ -43,9 +43,23 @@ test('worker Configurations edits the full board lifecycle and every scoped capa
 
     await page.getByRole('button', { name: /Configurations$/ }).click();
     const panel = page.locator('#peek-scope-body');
+    // A select or Save fires the config PATCH without awaiting it, and the
+    // sessions list can take seconds to rebuild on a loaded runner, so a poll
+    // started before the write landed could spend its whole budget on one
+    // stale read. Wait for the write itself, then read the list, and give the
+    // read the list's real latency (a single build can wait on the fleet
+    // builder) rather than expect.poll's 5s default.
+    const settled = { timeout: 20_000 };
+    const configWrite = () => page.waitForResponse((r) =>
+      r.url().includes(`/api/sessions/${name}/config`) && r.request().method() === 'PATCH');
     await expect(panel).toContainText('Every durable worker setting');
-    await expect(panel).toContainText('Task lifecycle');
-    await expect(panel.getByRole('switch')).toHaveCount(8);
+    // Board automation moved to the worker's Board tab (7f9c835f, Ethan
+    // 2026-09-24: "all board configurations should be toggles on the worker
+    // details board tab contents"); it is asserted there below.
+    await expect(panel).not.toContainText('Task lifecycle');
+    // Count measured after 7f9c835f (lifecycle switches gone) and the worker
+    // type, automatic approval and external email controls arriving.
+    await expect(panel.getByRole('switch')).toHaveCount(10);
     for (const key of [
       'name', 'description', 'task_label', 'groups', 'directory', 'branch',
       'provider', 'model', 'effort', 'mcp', 'yolo', 'isolated', 'cross_group',
@@ -62,40 +76,32 @@ test('worker Configurations edits the full board lifecycle and every scoped capa
     await expect.poll(async () => {
       const rows = await getSessionsResilient(request, auth);
       return (await rows.json()).find((s: any) => s.name === name)?.desc;
-    }).toBe('configured entirely from the worker UI');
+    }, settled).toBe('configured entirely from the worker UI');
 
     // Structured select wiring: MCP/browser tooling must be configurable here,
     // not by knowing CC_MCP and editing a file. Return it to disabled so the
     // throwaway worker has no hidden capability after the assertion.
     await panel.locator('[data-worker-config="mcp"]').getByRole('button', { name: 'Edit' }).click();
-    await page.locator('#edit-select').selectOption('chrome');
+    await Promise.all([configWrite(), page.locator('#edit-select').selectOption('chrome')]);
     await expect.poll(async () => {
       const rows = await getSessionsResilient(request, auth);
       return (await rows.json()).find((s: any) => s.name === name)?.mcp;
-    }).toBe('chrome');
+    }, settled).toBe('chrome');
     await panel.locator('[data-worker-config="mcp"]').getByRole('button', { name: 'Edit' }).click();
-    await page.locator('#edit-select').selectOption('');
+    await Promise.all([configWrite(), page.locator('#edit-select').selectOption('')]);
 
     // Permission value path: unlike the old all-or-nothing toggle, the UI can
     // express an exact allow-list and clear it again.
     await panel.locator('[data-worker-config="cross_group"]').getByRole('button', { name: 'Edit' }).click();
     await page.locator('#edit-input').fill('e2e-destination');
-    await page.locator('#edit-overlay').getByRole('button', { name: 'Save' }).click();
+    await Promise.all([configWrite(), page.locator('#edit-overlay').getByRole('button', { name: 'Save' }).click()]);
     await expect.poll(async () => {
       const rows = await getSessionsResilient(request, auth);
       return (await rows.json()).find((s: any) => s.name === name)?.spans_groups_value;
-    }).toBe('e2e-destination');
+    }, settled).toBe('e2e-destination');
     await panel.locator('[data-worker-config="cross_group"]').getByRole('button', { name: 'Edit' }).click();
     await page.locator('#edit-input').fill('');
-    await page.locator('#edit-overlay').getByRole('button', { name: 'Save' }).click();
-    for (const label of [
-      'Backlog → To Do',
-      'To Do → In Progress',
-      'Continue non-terminal work',
-      'Pickup / continue master',
-    ]) {
-      await expect(panel).toContainText(label);
-    }
+    await Promise.all([configWrite(), page.locator('#edit-overlay').getByRole('button', { name: 'Save' }).click()]);
 
     // The server advertises seven worker-level capabilities. Every one must
     // open the shared editor; the old UI offered a button only for text and
@@ -109,34 +115,38 @@ test('worker Configurations edits the full board lifecycle and every scoped capa
       await expect(panel.getByRole('button', { name: /^Edit .+ at this level$/ })).toHaveCount(0);
     }
 
-    // Default path: both queue transitions are on for every worker without a
-    // redundant per-worker key.
+    // Default path: every board toggle is OFF except decompose (0d2a0757),
+    // with no redundant per-worker key.
     await expect.poll(async () => {
       const rows = await getSessionsResilient(request, auth);
       const worker = (await rows.json()).find((s: any) => s.name === name);
       return [worker?.auto_drain_backlog, worker?.auto_drain_backlog_own,
         worker?.auto_pickup, worker?.auto_pickup_own];
-    }).toEqual([true, false, true, false]);
+    }, settled).toEqual([false, false, false, false]);
 
-    // Explicit opt-out path: turn backlog drain off without changing To Do
-    // pickup or the master switch.
-    let backlogRow = panel.locator('[data-config-section="task-lifecycle"] .worker-config-row', { hasText: 'Backlog → To Do' }).first();
-    await backlogRow.getByRole('switch').click();
+    // Explicit opt-in path, from the Board tab (7f9c835f): turn backlog drain
+    // on without changing To Do pickup or the master switch, then off again.
+    await page.locator('#peek-tab-issues').click();
+    const boardConfig = page.locator('#peek-board-config');
+    for (const label of ['Auto-drain backlog', 'Auto-pickup', 'Continue non-terminal', 'Pickup / continue master']) {
+      await expect(boardConfig).toContainText(label);
+    }
+    const backlog = boardConfig.locator('.pbc-row', { hasText: 'Auto-drain backlog' }).locator('input[type=checkbox]');
+    await expect(backlog).not.toBeChecked();
+    await Promise.all([configWrite(), backlog.check()]);
     await expect.poll(async () => {
       const rows = await getSessionsResilient(request, auth);
       const worker = (await rows.json()).find((s: any) => s.name === name);
-      return [worker?.auto_drain_backlog, worker?.auto_drain_backlog_own];
-    }).toEqual([false, true]);
-
-    // Inheritance path: remove the worker override and prove the runtime falls
-    // back to the fleet default (backlog and To Do are both auto-driven).
-    backlogRow = panel.locator('[data-config-section="task-lifecycle"] .worker-config-row', { hasText: 'Backlog → To Do' }).first();
-    await backlogRow.getByRole('button', { name: 'Inherit' }).click();
+      return [worker?.auto_drain_backlog, worker?.auto_drain_backlog_own, worker?.auto_pickup];
+    }, settled).toEqual([true, true, false]);
+    await Promise.all([configWrite(), backlog.uncheck()]);
     await expect.poll(async () => {
       const rows = await getSessionsResilient(request, auth);
-      const worker = (await rows.json()).find((s: any) => s.name === name);
-      return [worker?.auto_drain_backlog, worker?.auto_drain_backlog_own];
-    }).toEqual([true, false]);
+      return (await rows.json()).find((s: any) => s.name === name)?.auto_drain_backlog;
+    }, settled).toBe(false);
+    // The Board tab toggles write the worker layer only; it has no Inherit
+    // control (7f9c835f), so returning to the fleet default is not a UI path
+    // this spec can drive any more.
 
     // Mobile guard: the longer tab name and configuration controls must not widen the
     // page beyond the viewport on any browser project.

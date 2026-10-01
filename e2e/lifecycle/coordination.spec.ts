@@ -45,12 +45,19 @@ test('LC-COORD-POLICY: peer task awareness spans groups; stopped targets and iso
         headers: workerHeaders, data: { text: `lc-denied-${suffix}` } });
       const body = await refused.json();
       if (body.grant_id) grants.push(body.grant_id);
-      // These fixtures have no running process. Lifecycle refusal must precede
-      // the group approval path: a grant cannot make a stopped worker reachable.
-      expect(refused.status(), JSON.stringify(body)).toBe(target === raw ? 403 : 409);
-      expect(body.error).toMatch(target === raw ? /isolated/i : /not running/i);
-      if (target === outside) expect(body.code).toBe('target_not_running');
-      expect(body.grant_id).toBeUndefined();
+      // Both refuse. A send to a stopped worker is now QUEUED until it resumes,
+      // so the group policy decides first and the cross-group send waits on an
+      // owner approval (a grant it would use on resume). The isolated worker
+      // refuses outright, with no grant: nothing an owner approves reaches it.
+      expect(refused.status(), JSON.stringify(body)).toBe(403);
+      if (target === raw) {
+        expect(body.error).toMatch(/isolated/i);
+        expect(body.grant_id).toBeUndefined();
+      } else {
+        expect(body.blocked).toBe('cross_group');
+        expect(body.code).toBe('approval_required');
+        expect(body.grant_id).toMatch(/^grn_/);
+      }
       await info.attach(`refused-${target}`, { body: JSON.stringify(body), contentType: 'application/json' });
     }
     await page.locator('#board-detail-overlay.active > .overlay-header').getByRole('button', { name: /Back/ }).click();

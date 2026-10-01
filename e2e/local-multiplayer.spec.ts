@@ -49,6 +49,10 @@ test('local invitee joins, shares work, uses worker APIs, appears in logs, and c
   await owner.locator('#settings-team-section button', { hasText: '+ Invite' }).click();
   await expect(owner.locator('#team-invite-email')).toBeVisible();
   await owner.locator('#team-invite-email').fill('guest@example.com');
+  // Global access is an explicit host-access grant, never a default
+  // (d071f794): choose the team and acknowledge it, as an owner would.
+  await owner.locator('#invite-team-id').selectOption('team_global');
+  await owner.locator('#host-access-ack').check();
   const [inviteResponse] = await Promise.all([
     owner.waitForResponse(
       (response) =>
@@ -143,9 +147,9 @@ test('local invitee joins, shares work, uses worker APIs, appears in logs, and c
       const fleetRow = rows.find((row: any) => row.name === workerName);
       const info = await fetch(`/api/sessions/${encodeURIComponent(workerName)}/info`);
       const infoBody = await info.json();
-      // A send to an ordinary stopped worker now requests auto-start. Keep this
-      // fixture paused so the real handler proves member attribution and the
-      // lifecycle refusal without trying to launch a paid provider on the host.
+      // A send to an ordinary stopped worker requests auto-start. Keep this
+      // fixture paused so the real handler proves member attribution without
+      // launching a paid provider on the host.
       const pause = await (window as any).eval('_origFetch')(`/api/workers/${encodeURIComponent(workerName)}/pause`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       });
@@ -183,10 +187,13 @@ test('local invitee joins, shares work, uses worker APIs, appears in logs, and c
       infoStatus: 200,
       infoBody: { name: memberWorker },
       pauseStatus: 200,
-      sendStatus: 409,
-      sendBody: { ok: false, authored_by: 'member:guest@example.com' },
+      // Since 1b9c71ac a send to a stopped worker is durable input: it is
+      // queued for the worker's next boot and the failed wake (paused) is
+      // logged, not returned. The member attribution is the property here.
+      sendStatus: 200,
+      sendBody: { ok: true, submission: 'deferred', authored_by: 'member:guest@example.com' },
     });
-    expect(workerAccess.sendBody.message).toMatch(/paused/i);
+    expect(workerAccess.sendBody.message).toMatch(/queued/i);
     for (const [name, tags] of [
       [groupPeer, ['e2e-multiplayer']],
       [outsider, ['e2e-outsider']],

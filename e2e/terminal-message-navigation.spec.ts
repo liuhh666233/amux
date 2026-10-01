@@ -383,13 +383,18 @@ test('the Workers filter searches earlier pages until it finds a peer message', 
 });
 
 // A Chat-tab relay of the owner's own words is the owner, not a worker.
-test('an owner relay is Human and a peer envelope is Workers', async ({ page }) => {
+test('an owner relay is Human, a wrapped peer envelope is Workers, and harness placeholders classify', async ({ page }) => {
   const kinds = await page.evaluate(() => {
     const w = window as any;
     return [w._classifyPromptKind('[amux-origin: the owner, relayed by amux-chat] hi'),
-      w._classifyPromptKind('[amux-origin: mixpeek-cicd — server-verified] fixed')];
+      w._classifyPromptKind('[amux-origin: mixpeek-cicd — server-verified] fixed'),
+      w._classifyPromptKind('<pasted_content id="16b1"> [amux-origin: peer-a — server-verified] note </pasted_content>'),
+      w._classifyPromptKind('<pasted_content id="x"> [board note on AMUX-1: title] body'),
+      w._classifyPromptKind('[Image #8] test it and verify'),
+      w._classifyPromptKind('[Image: original 4100x2062, displayed at 2000x1006.]'),
+      w._classifyPromptKind('This session is being continued from a previous conversation that ran out of context.')];
   });
-  expect(kinds).toEqual(['human', 'session']);
+  expect(kinds).toEqual(['human', 'session', 'session', 'amux', 'human', 'amux', 'amux']);
 });
 
 test('rapid worker switch and reconnect cannot cross output, draft, status, card, or earlier-log identity', async ({ page }) => {

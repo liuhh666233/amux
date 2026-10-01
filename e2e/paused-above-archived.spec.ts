@@ -61,7 +61,13 @@ test('the Paused accordion renders immediately above the Archived accordion, bel
       samples.push({
         frame,
         order: {
-          afterCards: p.previousElementSibling?.id,
+          // Grouped worker sections (review, project workers, ...) sit between
+          // the cards and Paused; Paused still follows the cards' block.
+          afterCards: (() => {
+            let n = p.previousElementSibling;
+            while (n && n.id !== 'cards' && /-section$/.test(n.id)) n = n.previousElementSibling;
+            return n?.id;
+          })(),
           archivedFollows: !!p.parentElement?.querySelector('#archived-section'),
           visibleBetween: between,
         },
@@ -76,7 +82,7 @@ test('the Paused accordion renders immediately above the Archived accordion, bel
   console.log('paused-archived-layout', JSON.stringify({measured: true, n_considered: snapshots.length, snapshots}));
   for (const snapshot of snapshots) {
     const {order, paused: pb, archived: ab, card, viewport} = snapshot;
-    expect(order).toEqual({afterCards: 'cards', archivedFollows: true, visibleBetween: []});
+    expect(order).toEqual({afterCards: 'cards', archivedFollows: true, visibleBetween: []});  // cards [review] paused archived
     for (const [name, rect] of Object.entries({paused: pb, archived: ab, card})) {
       expect(rect, name + ' visible in frame ' + snapshot.frame).not.toBeNull();
       expect(rect!.height, name + ' has height').toBeGreaterThan(0);

@@ -136,7 +136,7 @@ test('multi-network: isolated guests share workspace, scoped by group, with conc
     for (const member of [alphaMember, betaMember]) {
       const resp = await request.patch(
         `/api/org/members/${encodeURIComponent(member.id)}`,
-        { headers: ownerHeaders, data: { scope_level: 'global' } },
+        { headers: ownerHeaders, data: { scope_level: 'global', grant_host_access: true } }, // d071f794: global needs an explicit host-access grant
       );
       expect(resp.status()).toBe(200);
     }
@@ -287,24 +287,36 @@ test('multi-network: isolated guests share workspace, scoped by group, with conc
     // Scope isolation: alpha can't see beta's workers, beta can't see alpha's
     const alphaIsolation = await alphaPage.evaluate(async (betaW) => {
       const info = await fetch(`/api/sessions/${encodeURIComponent(betaW)}/info`);
-      const fleet = await (await fetch('/api/sessions')).json();
+      // The listing can answer a transient 503 while the single fleet builder
+      // is busy; retry like getSessionsResilient, and say what came back.
+      let res = await fetch('/api/sessions');
+      for (let i = 1; i < 5 && !res.ok; i++) { await new Promise(r => setTimeout(r, 250 * i)); res = await fetch('/api/sessions'); }
+      const fleet = await res.json();
       return {
         infoStatus: info.status,
-        fleetNames: fleet.map((r: any) => r.name),
+        fleetStatus: res.status,
+        fleetNames: Array.isArray(fleet) ? fleet.map((r: any) => r.name) : fleet,
       };
     }, betaWorker);
     expect(alphaIsolation.infoStatus).toBe(403);
+    expect(alphaIsolation.fleetStatus, JSON.stringify(alphaIsolation.fleetNames)).toBe(200);
     expect(alphaIsolation.fleetNames).not.toContain(betaWorker);
 
     const betaIsolation = await betaPage.evaluate(async (alphaW) => {
       const info = await fetch(`/api/sessions/${encodeURIComponent(alphaW)}/info`);
-      const fleet = await (await fetch('/api/sessions')).json();
+      // The listing can answer a transient 503 while the single fleet builder
+      // is busy; retry like getSessionsResilient, and say what came back.
+      let res = await fetch('/api/sessions');
+      for (let i = 1; i < 5 && !res.ok; i++) { await new Promise(r => setTimeout(r, 250 * i)); res = await fetch('/api/sessions'); }
+      const fleet = await res.json();
       return {
         infoStatus: info.status,
-        fleetNames: fleet.map((r: any) => r.name),
+        fleetStatus: res.status,
+        fleetNames: Array.isArray(fleet) ? fleet.map((r: any) => r.name) : fleet,
       };
     }, alphaWorker);
     expect(betaIsolation.infoStatus).toBe(403);
+    expect(betaIsolation.fleetStatus, JSON.stringify(betaIsolation.fleetNames)).toBe(200);
     expect(betaIsolation.fleetNames).not.toContain(alphaWorker);
 
     // 7. Concurrent desc_append: a shared worker visible to both groups lets

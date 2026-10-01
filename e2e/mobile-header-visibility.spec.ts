@@ -54,8 +54,11 @@ test('header badge, controls and text tabs fit both themes from phone through de
   await expect.poll(()=>page.evaluate(()=>(window as any)._headerLayoutCheck())).toEqual([]);
   await expect.poll(()=>page.evaluate(()=>{const r=document.querySelector('#notif-btn')!.getBoundingClientRect(),b=document.querySelector('#notif-badge')!.getBoundingClientRect();return b.left>=r.left-0.1&&b.right<=r.right+0.1;})).toBe(true);
   if(width===375){
-   const tab=await page.locator('#tab-calendar').boundingBox(),strip=await page.locator('.tab-bar').boundingBox();
-   expect(tab!.x+tab!.width).toBeLessThanOrEqual(strip!.x+strip!.width);
+   // The FOURTH visible tab, not #tab-calendar: the Projects tab now leads
+   // the strip (cbf4d384), so Calendar is no longer the fourth and scrolls.
+   const fit=await page.evaluate(()=>{const strip=document.querySelector('.tab-bar')!.getBoundingClientRect();const tabs=[...document.querySelectorAll<HTMLElement>('.tab-bar [id^="tab-"]')].filter(t=>t.offsetParent!==null&&getComputedStyle(t).display!=='none');const t=tabs[3];return t?{id:t.id,right:t.getBoundingClientRect().right,limit:strip.right}:null;});
+   expect(fit,'at least four tabs are visible').not.toBeNull();
+   expect(fit!.right,`${fit!.id} must fit inside the strip`).toBeLessThanOrEqual(fit!.limit);
   }
   if(width===375||width===1440)await page.screenshot({path:info.outputPath('header-'+width+'-'+(light?'light':'dark')+'.png'),clip:{x:0,y:0,width,height:200}});
  }
