@@ -260,7 +260,12 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
   const RANK = {applied:0, reconciled:0, noop:0, queued:1, unknown:2, refused:3, failed:3};
   // Outcome, once every request the press started has settled.
   function settle(element, receipt) {
-    const state = outcome.get(element) || {worst:null, since:Date.now(), label:labelOf(element)};
+    const state = outcome.get(element) || {worst:null, since:Date.now(), label:labelOf(element), wrote:false};
+    // Did this press CHANGE anything? A press whose every request was a read
+    // only opened a view, and that view is its outcome (2026-10-01: the peek
+    // needs-input chip opened the card and then toasted "<chip>: done" over the
+    // answer box it had just opened).
+    if (!['GET','HEAD'].includes(receipt.request?.method)) state.wrote = true;
     // A 2xx whose body does not use the ok/applied vocabulary (the board's
     // create answers with the card itself) settles the RECEIPT as 'unknown'.
     // For the PRESS it is accepted: the server took the request. The receipt
@@ -294,6 +299,8 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
       if (failed) {
         toast((state.label ? state.label + ': ' : '') + (state.message || 'Not done'));
         diagnostic({verdict:'press_failure_toast', measured:true, n_considered:1, action:element.dataset.action, phase:state.worst});
+      } else if (cls === 'press-done' && !seen(element) && !state.wrote) {
+        diagnostic({verdict:'press_success_toast_skipped', measured:true, n_considered:1, action:element.dataset.action, reason:'read_only_press'});
       } else if (cls === 'press-done' && !seen(element)) {
         // A success toast is a notification: it needs a name for what was done
         // (a container press has none, and whatever it opened is the outcome)

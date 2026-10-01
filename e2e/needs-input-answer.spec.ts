@@ -64,6 +64,9 @@ test('needs-input chip has its own row, is not clipped, and opens the card with 
   await expect(page.locator('#bd-answer')).toBeVisible();
   await expect(page.locator('#bd-answer-ask')).toContainText('shard move');
   await expect(page.locator('#bd-answer-text')).toBeFocused();
+  // Opening the card only READ it: no "<chip>: done" toast over the answer box.
+  await page.waitForTimeout(1200);
+  await expect(page.locator('#toast')).not.toContainText(': done');
   // Answer: through the triage path, to the worker and onto the card.
   await page.fill('#bd-answer-text', 'Go ahead tonight.');
   await page.click('#bd-answer-send');
