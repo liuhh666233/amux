@@ -207,19 +207,13 @@ impl ProviderAdapter for OllamaAdapter {
     }
 
     async fn models(&self) -> Vec<String> {
-        // The one place a live listing exists: the local `ollama list`
-        // subprocess. Binary missing / daemon down / timeout -> empty vec,
-        // the honest answer on a host without ollama.
-        let out = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::process::Command::new("ollama").arg("list").output(),
-        )
-        .await;
-        match out {
-            Ok(Ok(o)) if o.status.success() => {
-                parse_ollama_list(&String::from_utf8_lossy(&o.stdout))
-            }
-            _ => Vec::new(),
+        // The daemon's own HTTP API, never the `ollama` CLI (DESKT-68). On macOS
+        // that CLI launches Ollama.app whenever its daemon is not running, so
+        // `ollama list` here started the app every time the dashboard filled a
+        // model picker. Daemon down -> empty vec, the honest answer.
+        match ollama_http(&ollama_base_url(), "/api/tags", None).await {
+            Some(body) => parse_ollama_tags(&body),
+            None => Vec::new(),
         }
     }
 
@@ -355,12 +349,73 @@ impl ProviderAdapter for MuseAdapter {
 /// Parse `ollama list` output: a header line, then one model per line with
 /// the name as the first whitespace-separated column, e.g.
 /// `llama3:latest    365c0bd3c000    4.7 GB    2 weeks ago`.
-fn parse_ollama_list(stdout: &str) -> Vec<String> {
-    stdout
-        .lines()
-        .skip(1) // "NAME  ID  SIZE  MODIFIED"
-        .filter_map(|line| line.split_whitespace().next())
-        .map(|name| name.to_string())
+/// The local Ollama daemon's base URL: `OLLAMA_HOST` if set (with or without a
+/// scheme, as ollama itself accepts it), else its default.
+pub(crate) fn ollama_base_url() -> String {
+    normalize_ollama_host(std::env::var("OLLAMA_HOST").ok().as_deref())
+}
+
+fn normalize_ollama_host(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => {
+            let h = h.trim_end_matches('/');
+            if h.starts_with("http://") || h.starts_with("https://") {
+                h.to_string()
+            } else {
+                format!("http://{h}")
+            }
+        }
+        None => "http://127.0.0.1:11434".to_string(),
+    }
+}
+
+/// Ask the running Ollama daemon over HTTP. `None` when nothing answers.
+///
+/// THIS IS THE ONLY WAY AMUX TALKS TO OLLAMA (DESKT-68). The `ollama` CLI on
+/// macOS starts Ollama.app when its daemon is down (it runs `open -j -a Ollama
+/// --args --fast-startup`), so every probe that shelled out to it relaunched an
+/// app the owner had quit: measured 2026-10-01, a dashboard model picker did it
+/// at 10:54:19. An HTTP request to a closed port cannot start anything.
+/// `tests/no_ollama_cli.rs` fails the build if a CLI call comes back.
+pub(crate) async fn ollama_http(
+    base: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let url = format!("{base}{path}");
+    let req = match body {
+        Some(b) => client.post(&url).json(&b),
+        None => client.get(&url),
+    };
+    match req.send().await {
+        Ok(r) if r.status().is_success() => r.text().await.ok(),
+        Ok(r) => {
+            tracing::info!(target: "amux::ollama", url, status = r.status().as_u16(),
+                measured = true, n_considered = 1, verdict = "ollama_http_error",
+                "ollama daemon answered with an error");
+            None
+        }
+        Err(e) => {
+            tracing::info!(target: "amux::ollama", url, error = %e, measured = true,
+                n_considered = 1, verdict = "ollama_daemon_not_running",
+                "ollama daemon not reachable; not starting it (DESKT-68)");
+            None
+        }
+    }
+}
+
+/// Model names from `GET /api/tags` (`{"models":[{"name":"llama3:latest",...}]}`).
+fn parse_ollama_tags(body: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("models").and_then(|m| m.as_array()).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
         .collect()
 }
 
@@ -485,16 +540,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_ollama_list_output() {
-        let fixture = "NAME               ID              SIZE      MODIFIED\n\
-                       llama3:latest      365c0bd3c000    4.7 GB    2 weeks ago\n\
-                       qwen3.8:27b           500a1f067a9f    5.2 GB    3 days ago\n";
-        assert_eq!(
-            parse_ollama_list(fixture),
-            vec!["llama3:latest", "qwen3.8:27b"]
-        );
-        assert!(parse_ollama_list("").is_empty());
-        assert!(parse_ollama_list("NAME  ID  SIZE  MODIFIED\n").is_empty());
+    fn parses_ollama_tags_response() {
+        let fixture = r#"{"models":[{"name":"llama3:latest","size":4700000000},{"name":"qwen3.8:27b"}]}"#;
+        assert_eq!(parse_ollama_tags(fixture), vec!["llama3:latest", "qwen3.8:27b"]);
+        assert!(parse_ollama_tags(r#"{"models":[]}"#).is_empty());
+        assert!(parse_ollama_tags("").is_empty(), "garbage is no models, not a panic");
+        assert!(parse_ollama_tags(r#"{"models":[{"model":"x"}]}"#).is_empty(), "an entry without a name is skipped");
+    }
+
+    /// DESKT-68: with no daemon the probe returns quickly with nothing, and
+    /// starts nothing. Port 1 is never an ollama daemon.
+    #[tokio::test]
+    async fn a_stopped_daemon_is_no_models_not_a_launch() {
+        let t0 = std::time::Instant::now();
+        assert!(ollama_http("http://127.0.0.1:1", "/api/tags", None).await.is_none());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ollama_host_is_honoured_with_or_without_a_scheme() {
+        assert_eq!(normalize_ollama_host(None), "http://127.0.0.1:11434");
+        assert_eq!(normalize_ollama_host(Some("  ")), "http://127.0.0.1:11434");
+        assert_eq!(normalize_ollama_host(Some("127.0.0.1:11500")), "http://127.0.0.1:11500");
+        assert_eq!(normalize_ollama_host(Some("http://box:1234/")), "http://box:1234");
     }
 }
 #[cfg(test)]

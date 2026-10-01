@@ -18789,20 +18789,29 @@ pub(crate) fn reasoning_effort_from_show(show_output: &str) -> (&'static str, &'
     }
 }
 
+/// The capability list from `POST /api/show`, joined one per line so
+/// [`reasoning_effort_from_show`] reads it exactly as it read the CLI's
+/// Capabilities block. Only the `capabilities` array is used: the response
+/// also carries the model's template and license text, where the word
+/// "thinking" can appear for a model that has no such capability.
+pub(crate) fn capabilities_from_show_json(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let caps = v.get("capabilities")?.as_array()?;
+    Some(caps.iter().filter_map(|c| c.as_str()).collect::<Vec<_>>().join("\n"))
+}
+
 async fn ollama_reasoning_effort(model: &str) -> &'static str {
-    let probe = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::process::Command::new("ollama")
-            .arg("show")
-            .arg(model)
-            .output(),
+    // HTTP, never the `ollama` CLI, which launches Ollama.app when its daemon is
+    // down (DESKT-68; see provider::static_providers::ollama_http).
+    let probe = crate::provider::static_providers::ollama_http(
+        &crate::provider::static_providers::ollama_base_url(),
+        "/api/show",
+        Some(serde_json::json!({ "model": model })),
     )
     .await;
-    let (effort, verdict) = match probe {
-        Ok(Ok(o)) if o.status.success() => {
-            reasoning_effort_from_show(&String::from_utf8_lossy(&o.stdout))
-        }
-        _ => ("none", "capability_unknown"),
+    let (effort, verdict) = match probe.as_deref().and_then(capabilities_from_show_json) {
+        Some(caps) => reasoning_effort_from_show(&caps),
+        None => ("none", "capability_unknown"),
     };
     tracing::info!(
         target: "amux::sessions",
@@ -35921,6 +35930,19 @@ mod tests {
     /// symmetric there: `none` costs a thinking model some depth, `low` costs a
     /// non-thinking model every turn. Unknown takes the value that cannot
     /// hard-fail.
+    /// DESKT-68: the HTTP probe reads the capabilities array, not the whole
+    /// body, because the template text can say "thinking" for a model that
+    /// cannot.
+    #[test]
+    fn show_json_capabilities_decide_the_effort() {
+        let thinking = r#"{"template":"...","capabilities":["completion","tools","thinking"]}"#;
+        let plain = r#"{"template":"think step by step, thinking out loud","capabilities":["completion","tools"]}"#;
+        assert_eq!(reasoning_effort_from_show(&capabilities_from_show_json(thinking).unwrap()), ("low", "thinking_capable"));
+        assert_eq!(reasoning_effort_from_show(&capabilities_from_show_json(plain).unwrap()), ("none", "no_thinking_capability"));
+        assert!(capabilities_from_show_json("not json").is_none());
+        assert!(capabilities_from_show_json(r#"{"template":"x"}"#).is_none(), "no array is unknown, not no-thinking");
+    }
+
     #[test]
     fn reasoning_effort_follows_the_models_thinking_capability() {
         let thinking = "  Capabilities\n    completion\n    tools\n    thinking\n";
