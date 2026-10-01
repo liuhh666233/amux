@@ -3054,8 +3054,15 @@ function updateConnectionStatus() {
   // Log the state transition (for the click-to-view disconnection history).
   // _writeError is a failed offline-queue op, not a connectivity issue.
   // The offline-banner already surfaces it; don't also flip the conn badge red.
-  const readState = _sessionLoadError ? (_sessionLoadError.status === 401 ? 'auth' : 'error')
-    : (_boardReadError || _syncReadError ? 'error' : null);
+  // THE DEVICE BEING OFFLINE IS "OFFLINE", NOT "SYNC ERROR". With no network
+  // every read fails, so the pill read "Sync error" on an offline cold start
+  // that loaded everything from cache (2026-10-01). Only the browser's own
+  // offline flag decides it: a read with no answer can also be a hung or
+  // overloaded server, which must stay a visible read failure
+  // (session-load-failure.spec.ts). "Access required" always shows.
+  const noNetwork = navigator.onLine === false;
+  const readState = _sessionLoadError ? (_sessionLoadError.status === 401 ? 'auth' : (noNetwork ? null : 'error'))
+    : (!noNetwork && (_boardReadError || _syncReadError) ? 'error' : null);
   _recordConnState(readState || (!online ? 'offline' : (_liveSSE ? 'live' : 'polling')));
   // Update all connection status indicators (main + peek)
   document.querySelectorAll('#conn-status, #conn-modal-status').forEach(el => {
@@ -13546,7 +13553,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1200';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1201';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
