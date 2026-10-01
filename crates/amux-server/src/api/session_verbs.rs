@@ -19770,11 +19770,13 @@ pub(crate) async fn steer_delivery_for(state: &AppState, name: &str, age_s: f64)
         steer_max_age_s(),
         background_working,
     );
+    let turn_ended = lane_report(state, name).is_some_and(|r| r.applies && r.state == "idle");
     steer_background_ceiling(
         name,
         held,
         age_s,
         background_working,
+        turn_ended,
         &provider_of(&parse_env(name)),
         steer_background_max_age_s(),
     )
@@ -19800,16 +19802,32 @@ pub(crate) fn steer_background_max_age_s() -> f64 {
 /// Claude Code takes a mid-turn paste into its own queue and folds it in at
 /// the turn's end without interrupting it (AMUX-2909), so for a Claude lane
 /// the hold is released at the ceiling. Other providers keep the hard hold.
+///
+/// A Claude lane whose own hook says its turn ENDED (`idle`) is at a boundary
+/// whatever runs behind it: a background shell or agent keeps going while a
+/// new message starts a turn. Delivered at once (2026-10-01): lanes wait for
+/// `amux land` in a background shell, often an hour, and nine messages in one
+/// hour sat 30 minutes each behind that wait, orchestrator assignments among
+/// them. Logged as verdict=steer_background_turn_ended.
 pub(crate) fn steer_background_ceiling(
     name: &str,
     held: SteerDelivery,
     age_s: f64,
     background_working: bool,
+    turn_ended: bool,
     provider: &str,
     ceiling_s: f64,
 ) -> SteerDelivery {
     if held != SteerDelivery::Hold || !background_working || provider != "claude" {
         return held;
+    }
+    if turn_ended {
+        tracing::info!(
+            session = %name, age_s = age_s as i64, measured = true, n_considered = 1,
+            verdict = "steer_background_turn_ended",
+            "Claude lane's turn has ended with background work still running; delivering at the boundary"
+        );
+        return SteerDelivery::AtBoundary;
     }
     if ceiling_s <= 0.0 || age_s < ceiling_s {
         return held;
@@ -46105,7 +46123,7 @@ mod steer_freeze_tests {
     /// steering predicate must hold until the row reaches its terminal form.
     #[test]
     fn the_background_hold_on_a_claude_lane_ends_at_its_ceiling() {
-        let c = |held, age, bg, prov, ceil| steer_background_ceiling("x", held, age, bg, prov, ceil);
+        let c = |held, age, bg, prov, ceil| steer_background_ceiling("x", held, age, bg, false, prov, ceil);
         assert_eq!(c(SteerDelivery::Hold, 1799.0, true, "claude", 1800.0), SteerDelivery::Hold, "young: still held");
         assert_eq!(
             c(SteerDelivery::Hold, 1800.0, true, "claude", 1800.0),
@@ -46116,6 +46134,20 @@ mod steer_freeze_tests {
         assert_eq!(c(SteerDelivery::Hold, 86_400.0, false, "claude", 1800.0), SteerDelivery::Hold,
             "a hold with no background work is not this hold");
         assert_eq!(c(SteerDelivery::AtBoundary, 0.0, true, "claude", 1800.0), SteerDelivery::AtBoundary);
+    }
+
+    #[test]
+    fn a_claude_lane_whose_turn_ended_is_at_a_boundary_despite_background_work() {
+        assert_eq!(
+            steer_background_ceiling("x", SteerDelivery::Hold, 5.0, true, true, "claude", 1800.0),
+            SteerDelivery::AtBoundary,
+            "a lane waiting on `amux land` in a background shell must not hold its messages for 30 min"
+        );
+        assert_eq!(
+            steer_background_ceiling("x", SteerDelivery::Hold, 5.0, true, false, "claude", 1800.0),
+            SteerDelivery::Hold,
+            "mid-turn with background work: still held until the ceiling"
+        );
     }
 
     #[test]
@@ -46138,7 +46170,7 @@ mod steer_freeze_tests {
             "a weaker background hint cannot contradict the shared idle verdict and starve steering"
         );
         assert_eq!(
-            steer_background_ceiling("x", SteerDelivery::Hold, 86_400.0, true, "codex", 1800.0),
+            steer_background_ceiling("x", SteerDelivery::Hold, 86_400.0, true, true, "codex", 1800.0),
             SteerDelivery::Hold,
             "a Codex lane keeps the hard hold at any age"
         );
