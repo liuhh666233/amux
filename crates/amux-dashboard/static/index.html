@@ -2103,6 +2103,17 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <div class="board-detail-body">
     <div class="board-detail-status-row" id="bd-status-row"></div>
     <textarea id="bd-title" class="board-detail-title-input" placeholder="Untitled" autocomplete="off" autocorrect="on" spellcheck="true" rows="1" oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
+    <section id="bd-answer" class="bd-answer" hidden aria-label="Answer this card">
+      <div class="bd-answer-head">Waiting on you</div>
+      <div id="bd-answer-ask" class="bd-answer-ask"></div>
+      <textarea id="bd-answer-text" class="input bd-answer-text" rows="3" placeholder="Your answer…" aria-label="Your answer"></textarea>
+      <div class="bd-answer-actions">
+        <button type="button" class="btn primary" id="bd-answer-send" onclick="_bdAnswer('reply')">Send answer</button>
+        <button type="button" class="btn" id="bd-answer-approve" onclick="_bdAnswer('approve')">Approve</button>
+        <button type="button" class="btn" id="bd-answer-decline" onclick="_bdAnswer('decline')">Decline</button>
+      </div>
+      <div id="bd-answer-to" class="bd-answer-to"></div>
+    </section>
     <div id="bd-record-summary"></div>
     <div class="board-detail-tabs">
       <button class="board-detail-tab active" id="bd-tab-preview" onclick="boardDetailTab('preview')">Details</button>
@@ -2330,6 +2341,8 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <span id="peek-session-status" style="flex-shrink:0;display:flex;align-items:center;gap:4px;"></span>
       <span id="peek-model-badge" style="font-size:0.75rem;padding:2px 8px;border-radius:9999px;background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);white-space:nowrap;flex-shrink:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;"></span>
     </div>
+    <!-- Needs-input ask, full width under the title (Ethan, 2026-10-01). Filled by updatePeekStatus. -->
+    <div id="peek-needs-input-row" class="peek-needs-input-row" hidden></div>
     <div id="peek-task-row" style="display:none;align-items:center;justify-content:center;gap:6px;min-width:0;max-width:100%;">
       <span style="font-size:0.72rem;color:var(--dim);flex-shrink:0;">Task:</span>
       <span id="peek-task-label" style="font-size:0.82rem;font-weight:600;color:var(--text);white-space:nowrap;overflow-x:auto;overflow-y:hidden;flex:0 1 auto;min-width:0;-webkit-overflow-scrolling:touch;scrollbar-width:none;touch-action:pan-x;overscroll-behavior-x:contain;cursor:pointer;"></span>

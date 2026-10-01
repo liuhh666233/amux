@@ -7781,3 +7781,18 @@ body.light .header-row .btn-needs-input { color:#bc4c00; border-color:rgba(188,7
 #peek-overlay:has(#peek-body.peek-chat) #peek-chips { display: none; }
 /* Says when the worker-list filters narrow a section ("3 paused (group amux · 22 total)"). */
 .worker-group-scope { color: var(--dim); font-weight: 400; font-size: 0.85em; }
+/* Needs-input ask: its own full-width row under the peek title (2026-10-01). */
+.peek-needs-input-row { display: flex; justify-content: center; width: 100%; min-width: 0; }
+.peek-needs-input-row[hidden] { display: none; }
+.peek-needs-input-row .status-badge.needs-input { max-width: 100%; width: min(100%, 560px); }
+.peek-needs-input-row .status-badge.needs-input .ni-ask { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* Answer box at the top of a card waiting on the owner (2026-10-01). */
+.bd-answer { margin: 8px 0 12px; padding: 12px; border: 1px solid rgba(240,136,62,0.6); background: rgba(240,136,62,0.10); border-radius: 10px; display: flex; flex-direction: column; gap: 8px; }
+.bd-answer[hidden] { display: none; }
+.bd-answer-head { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #f0883e; }
+body.light .bd-answer-head { color: #bc4c00; }
+.bd-answer-ask { font-size: 0.9rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bd-answer-text { width: 100%; box-sizing: border-box; min-height: 72px; resize: vertical; font: inherit; }
+.bd-answer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.bd-answer-actions .btn { min-height: 44px; }
+.bd-answer-to { font-size: 0.75rem; color: var(--dim); }

@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2367,
+  "n_considered": 2372,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -74,6 +74,12 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_bdAnswer": {
+      "kind": "command._bdAnswer",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_bdArtifactHref": {
       "kind": "command._bdArtifactHref",
       "feedback_required": true,
@@ -106,6 +112,12 @@
     },
     "_bdHydrate": {
       "kind": "command._bdHydrate",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_bdOpenAnswer": {
+      "kind": "command._bdOpenAnswer",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
@@ -1630,6 +1642,12 @@
     },
     "_niAct": {
       "kind": "command._niAct",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_niApply": {
+      "kind": "command._niApply",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

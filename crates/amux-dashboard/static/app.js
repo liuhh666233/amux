@@ -5299,12 +5299,15 @@ function _waitingLabel(s) {
 // minutes while every turn ended on "The only thing left is TP-37: sign in
 // once...". Its own colour, the card id, the one-line ask, and tapping it opens
 // the card, because answering the card is the whole remedy.
-function _needsInputBadge(s) {
+function _needsInputBadge(s, opts) {
   const b = s.owner_block || {};
   const card = b.card || '';
   const ask = String(b.ask || '').replace(/\s+/g, ' ').trim();
+  // From the peek header the chip opens the card WITH its answer box focused
+  // (Ethan, 2026-10-01: "when i click that i should be able to answer it in the
+  // card ui modal"); elsewhere it opens the card as before.
   const open = card
-    ? 'openBoardDetail(\'' + escJs(card) + '\')'
+    ? (opts && opts.answer ? '_bdOpenAnswer(\'' + escJs(card) + '\',\'' + escJs(s.name) + '\')' : 'openBoardDetail(\'' + escJs(card) + '\')')
     : '_openStatusDetail(\'' + escJs(s.name) + '\')';
   return '<button type="button" class="status-badge needs-input" title="' + esc((ask || 'Waiting on you') + (card ? ' (tap to open ' + card + ')' : ''))
     + '" aria-label="' + esc(s.name + ' needs input' + (card ? ' on ' + card : '') + (ask ? ': ' + ask : '')) + '"'
@@ -5701,20 +5704,12 @@ function _niDone(it) {
   _niRender();   // same index now shows the next item: auto-advance
 }
 
-async function _niAct(action) {
-  if (_niBusy) return;
-  const { item: it } = _niCurrent();
-  if (!it) return;
-  const replyEl = document.getElementById('ni-reply');
-  const typed = replyEl ? replyEl.value.trim() : '';
-  if (action === 'reply' && !typed) { showToast('Type a reply first'); replyEl && replyEl.focus(); return; }
-  let rule = null;
-  if (action === 'approve_always') {
-    rule = { allowed: ((document.getElementById('ni-always-text') || {}).value || '').trim(),
-      category: (document.getElementById('ni-always-cat') || {}).value || it.standing_category || 'decision' };
-    if (!rule.allowed) { showToast('Write the rule sentence first'); return; }
-  }
-  _niBusy = true; _niRender();
+// THE ONE ANSWER PATH (needs-input triage AND the card modal's answer box,
+// Ethan 2026-10-01: "when i click that i should be able to answer it in the card
+// ui modal"). Owner message to the asking worker (deduped by msg_id) plus a
+// marked note on the card that moves it out of needsyou, read back. Returns what
+// was done and what was refused; the caller owns busy state and the toast.
+async function _niApply(it, action, typed, rule, surface = 'needs-input triage') {
   const q = _niClip(it.question || it.title, 300);
   const ref = it.card ? ' (' + it.card + ')' : '';
   const stamp = new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -5740,7 +5735,7 @@ async function _niAct(action) {
       if (it.card) {
         const verb = action === 'approve' && _niOwnerMustAct(it) ? 'Provided'
           : { approve: 'Approved', approve_always: 'Approved (standing rule)', decline: 'Declined', reply: 'Owner reply' }[action];
-        const note = '[' + stamp + '] ' + verb + ' by owner in needs-input triage' + (action === 'reply' || (action === 'decline' && typed) ? ': ' + typed : '.');
+        const note = '[' + stamp + '] ' + verb + ' by owner in ' + surface + (action === 'reply' || (action === 'decline' && typed) ? ': ' + typed : '.');
         const marker = '#triage-' + _niHash(it.key + '|' + action + '|' + typed);
         const c = await _niCard(it.card, note, marker, true);
         if (c.ok) done.push(c.already ? it.card + ' already recorded' : it.card + ' ' + (c.status === 'todo' ? 'moved to todo' : c.status === 'backlog' ? 'moved to backlog (todo full)' : 'noted'));
@@ -5757,9 +5752,26 @@ async function _niAct(action) {
     }
   } catch (e) {
     errs.push(String(e && e.message || e));
-  } finally {
-    _niBusy = false;
   }
+  return { done, errs };
+}
+async function _niAct(action) {
+  if (_niBusy) return;
+  const { item: it } = _niCurrent();
+  if (!it) return;
+  const replyEl = document.getElementById('ni-reply');
+  const typed = replyEl ? replyEl.value.trim() : '';
+  if (action === 'reply' && !typed) { showToast('Type a reply first'); replyEl && replyEl.focus(); return; }
+  let rule = null;
+  if (action === 'approve_always') {
+    rule = { allowed: ((document.getElementById('ni-always-text') || {}).value || '').trim(),
+      category: (document.getElementById('ni-always-cat') || {}).value || it.standing_category || 'decision' };
+    if (!rule.allowed) { showToast('Write the rule sentence first'); return; }
+  }
+  _niBusy = true; _niRender();
+  let res;
+  try { res = await _niApply(it, action, typed, rule); } finally { _niBusy = false; }
+  const { done, errs } = res;
   const outcome = errs.length ? (done.length ? 'partial' : 'refused') : 'ok';
   _niLog(action, it, outcome, (done.concat(errs)).join('; '));
   if (errs.length) {
@@ -6418,6 +6430,16 @@ function updatePeekStatus() {
   // already on screen. amux is mobile-first — when the phone and a nice-to-have
   // trade off, the phone wins.
   badge = _workerExecutionBadge(s, runtimeBoard, { inspect: false });
+  // NEEDS INPUT GETS ITS OWN ROW (Ethan, 2026-10-01, iPhone: the chip was
+  // squeezed between the name and the model pill and clipped mid-word). The
+  // title row keeps a short status; the full ask sits full-width underneath.
+  const _niRow = document.getElementById('peek-needs-input-row');
+  const _niWaiting = s.status === 'waiting' && s.waiting_reason === 'owner';
+  if (_niRow) {
+    if (_niWaiting) { _niRow.innerHTML = _needsInputBadge(s, { answer: true }); _niRow.hidden = false; }
+    else { _niRow.innerHTML = ''; _niRow.hidden = true; }
+  }
+  if (_niWaiting) badge = badge.replace(_needsInputBadge(s), '<span class="status-badge waiting">needs input</span>');
   if (s.running && s.status === 'idle') badge += _stalledChip(s);
   if (s.running && s.rate_limited_until) {
     const _lbl = s.rate_limit_weekly ? 'Weekly limit until' : 'Rate-limited until';
@@ -7013,7 +7035,13 @@ function render() {
   // the Groups tab already renders it (_renderGroupsTab / _scopeLoad, the same
   // derivation), so this is a removal, not a reimplementation.
   if (allTags.length || sessions.length) {
-    tagEl.innerHTML = allTags.map(t =>
+    // RESET FIRST (Ethan, 2026-10-01: "put the reset on the left most side when
+    // it's available ... as opposed to the right").
+    tagEl.innerHTML = ((activeTag || hiddenTags.size)
+          ? '<button type="button" class="tag-filter tag-reset-btn" onclick="resetGroupView()" '
+            + 'title="Show every group again">\u21ba Reset</button>'
+          : '')
+      + allTags.map(t =>
       `<span class="tag-filter${activeTag === t ? ' active' : ''}${hiddenTags.has(t) ? ' hidden-tag' : ''}" `
       + `title="${activeTag === t ? 'Showing only this group. Tap to hide it' : hiddenTags.has(t) ? 'Hidden. Tap to show it again' : 'Tap to show only this group'}" `
       + `onclick="toggleTagFilter('${escJs(t)}')">${hiddenTags.has(t) ? '\u2298 ' : ''}${esc(t)}</span>`
@@ -7022,12 +7050,8 @@ function render() {
       // "add a button to apply an action to all visible workers ... maybe on
       // the group pills row"). The count is filled in after the cards render.
       // RESET THE GROUP VIEW (Ethan 2026-09-24: "add a reset thing on the group
-      // row so i can reset the view of groups"). Only shown when a group is
-      // selected or hidden, so the row costs nothing in the default view.
-      + ((activeTag || hiddenTags.size)
-          ? '<button type="button" class="tag-filter tag-reset-btn" onclick="resetGroupView()" '
-            + 'title="Show every group again">\u21ba Reset</button>'
-          : '')
+      // row so i can reset the view of groups") is rendered FIRST, above. Only
+      // shown when a group is selected or hidden, so the default row is unchanged.
       + '<button type="button" class="tag-filter bulk-visible-btn" id="bulk-visible-btn" '
       + 'onclick="openVisibleWorkerActions()" title="Apply an action to every worker shown below">All shown</button>';
     // After this render finishes building the cards, whichever return it takes.
@@ -13630,7 +13654,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1205';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1206';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -36116,7 +36140,71 @@ async function openBoardDetail(id) {
   _beTagInputUpdate('bd');
   _bdRenderMeta(item);
   document.getElementById('bd-save-status').textContent = '';
+  _bdShowAnswer(item, false);
   document.getElementById('board-detail-overlay').classList.add('active');
+}
+
+// ANSWER IN THE CARD (Ethan, 2026-10-01). A card waiting on the owner shows an
+// answer box at the top; the peek header's needs-input chip opens the card with
+// it focused. Every action goes through _niApply, the same path as the
+// needs-input triage: message to the asking worker (deduped), marked note on the
+// card, card out of needsyou, read back.
+let _bdAnswerCtx = null;   // {card, worker}
+function _bdAnswerItem(card) {
+  const ctx = _bdAnswerCtx || {};
+  const found = (typeof _niItems === 'function' ? _niItems(true) : []).find(i => i.card === card);
+  const s = ctx.worker ? sessions.find(x => x.name === ctx.worker) : null;
+  const ask = (s && s.owner_block && s.owner_block.card === card && s.owner_block.ask) || '';
+  const item = boardItems.find(i => i.id === card) || {};
+  const it = found ? Object.assign({}, found) : { key: 'card:' + card, kind: 'card', card,
+    question: ask || item.title || card, unblocks: '' };
+  if (!it.worker) it.worker = ctx.worker || item.session || '';
+  return it;
+}
+function _bdShowAnswer(item, force) {
+  const box = document.getElementById('bd-answer');
+  if (!box || !item) return;
+  if (_bdAnswerCtx && _bdAnswerCtx.card !== item.id) _bdAnswerCtx = null;
+  const show = force || item.status === 'needsyou' || !!_bdAnswerCtx;
+  box.hidden = !show;
+  if (!show) return;
+  if (!_bdAnswerCtx) _bdAnswerCtx = { card: item.id, worker: item.session || '' };
+  const it = _bdAnswerItem(item.id);
+  document.getElementById('bd-answer-ask').textContent = _niClip(it.question || item.title || '', 400);
+  document.getElementById('bd-answer-to').textContent = it.worker ? 'Goes to ' + it.worker + ' and is noted on ' + item.id : 'Noted on ' + item.id;
+  const ta = document.getElementById('bd-answer-text');
+  if (force && ta) { ta.value = ''; setTimeout(() => ta.focus({ preventScroll: false }), 50); }
+}
+async function _bdOpenAnswer(card, worker) {
+  _bdAnswerCtx = { card, worker };
+  await openBoardDetail(card);
+  if (boardDetailId !== card) return;
+  const item = boardItems.find(i => i.id === card) || { id: card };
+  _bdShowAnswer(item, true);
+}
+let _bdAnswerBusy = false;
+async function _bdAnswer(action) {
+  if (_bdAnswerBusy || !boardDetailId) return;
+  const card = boardDetailId;
+  const ta = document.getElementById('bd-answer-text');
+  const typed = ta ? ta.value.trim() : '';
+  if (action === 'reply' && !typed) { showToast('Type an answer first'); ta && ta.focus(); return; }
+  const it = _bdAnswerItem(card);
+  const btns = document.querySelectorAll('#bd-answer button');
+  _bdAnswerBusy = true; btns.forEach(b => b.disabled = true);
+  let res;
+  try { res = await _niApply(it, action, typed, null, 'the card'); }
+  finally { _bdAnswerBusy = false; btns.forEach(b => b.disabled = false); }
+  const { done, errs } = res;
+  _niLog(action, it, errs.length ? (done.length ? 'partial' : 'refused') : 'ok', done.concat(errs).join('; '));
+  if (errs.length) { showToast((done.length ? done.join(', ') + '. ' : '') + 'Refused: ' + errs.join(' | ')); return; }
+  const label = { approve: 'Approved', decline: 'Declined', reply: 'Answered' }[action];
+  showToast(label + ': ' + done.join(', '));
+  _niHandled.set(it.key, Date.now() + 5 * 60_000);
+  updateNeedsInputPill();
+  _bdAnswerCtx = null;
+  document.getElementById('bd-answer').hidden = true;
+  try { _bdHydrate(card); } catch (_) {}
 }
 
 // ── Improved detail: status banner, typed History, permalink (AMUX-2178) ───
