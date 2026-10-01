@@ -1036,6 +1036,35 @@ pub(crate) fn meta_str(meta: &Map<String, Value>, key: &str) -> String {
 ///
 /// `since > 0` AND the lane is running, for every returned lane, by
 /// construction.
+/// Whether typed composer text counts as stuck, given background agents.
+///
+/// Returns (stuck text, new "seen" record to store if it changed). Without live
+/// agents, typed text is stuck at once, as before. With live agents, the SAME
+/// text must sit unchanged for `grace_s` seconds; a new or changed text starts
+/// the clock, and no text clears it.
+pub(crate) fn agents_grace_decision(
+    typed: Option<&str>,
+    agents_live: bool,
+    seen_text: &str,
+    seen_since: i64,
+    now: i64,
+    grace_s: i64,
+) -> (Option<String>, Option<(String, i64)>) {
+    match (typed, agents_live) {
+        (None, _) => (None, (seen_since > 0).then(|| (String::new(), 0))),
+        (Some(t), false) => (Some(t.to_string()), None),
+        (Some(t), true) if seen_since > 0 && seen_text == t => {
+            ((now - seen_since >= grace_s).then(|| t.to_string()), None)
+        }
+        (Some(t), true) => (None, Some((t.to_string(), now))),
+    }
+}
+
+/// An integer seconds setting from the process env, or `default`.
+fn env_secs_i64(key: &str, default: i64) -> i64 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
 pub(crate) async fn composer_stuck_lanes() -> Vec<(String, i64)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(sessions_dir()) else {
@@ -22070,14 +22099,37 @@ async fn rate_limit_sweep(state: &AppState) -> usize {
         // "unsubmitted text", and a human may intervene mid-choreography.
         // Skip the stuck check entirely when lane_send_lock is held.
         let send_in_flight = lane_send_lock(name).try_lock().is_err();
-        let typed_pending = (!send_in_flight
+        // AGENTS-LIVE GRACE (2026-10-01). An orchestrator almost always has
+        // background agents, so the agents_live exemption meant a draft in its
+        // composer was NEVER stamped: Ethan's "raise shared-spot to 6 including
+        // the ci slot" sat unsent in mixpeek-override while MO-3992 waited on
+        // him. Text typed while GENERATING is still exempt (the bar check). With
+        // agents live but the parent idle, the same text unchanged for
+        // AMUX_STUCK_COMPOSER_AGENTS_GRACE_S (default 600) counts as stuck.
+        let typed_raw = (!send_in_flight
             && !is_rate_limit_menu(&pane)
             && !selector_now
             && !pane_bar_says_generating(&pane)
-            && detect_claude_status(&pane) != "active"
-            && !agents_live)
+            && detect_claude_status(&pane) != "active")
             .then(|| composer_state(&pane).typed().map(|t| t.to_string()))
             .flatten();
+        let grace_meta = load_meta(name);
+        let grace_s = env_secs_i64("AMUX_STUCK_COMPOSER_AGENTS_GRACE_S", 600);
+        let (typed_pending, seen) = agents_grace_decision(
+            typed_raw.as_deref(),
+            agents_live,
+            &meta_str(&grace_meta, "composer_agents_seen_text"),
+            meta_i64(&grace_meta, "composer_agents_seen_since"),
+            now_i64(),
+            grace_s,
+        );
+        if let Some((text, since)) = seen {
+            update_meta(name, &[
+                ("composer_agents_seen_text", json!(text)),
+                ("composer_agents_seen_since", json!(since)),
+            ]);
+        }
+        let via_agents_grace = typed_pending.is_some() && agents_live;
         let stuck_now = typed_pending.is_some();
         let meta_now = load_meta(name);
         let stuck_was = meta_i64(&meta_now, "composer_stuck_since") > 0;
@@ -22106,7 +22158,7 @@ async fn rate_limit_sweep(state: &AppState) -> usize {
                 ],
             );
             if stuck_now {
-                tracing::warn!(session = %name, preview = %preview,
+                tracing::warn!(session = %name, preview = %preview, via_agents_grace,
                     possible_codex_footer_chrome = possible_codex_footer_drift,
                     "unsubmitted text is stuck in the composer with no live turn or agents — the lane will read `waiting` until it is submitted or cleared");
                 emit_event(
@@ -51211,5 +51263,27 @@ mod owner_relay_tests {
         // A companion of a different worker cannot speak as the owner here.
         assert!(relay_quote_from("mvs-infra", &m, "amux-meta-helper").is_none());
         assert!(relay_quote_from("", &m, "").is_none());
+    }
+}
+
+#[cfg(test)]
+mod agents_grace_tests {
+    use super::agents_grace_decision as d;
+
+    #[test]
+    fn a_draft_beside_live_agents_is_stuck_after_the_grace_and_not_before() {
+        // No agents: stuck at once, nothing to record (the old behaviour).
+        assert_eq!(d(Some("raise to 6"), false, "", 0, 1000, 600), (Some("raise to 6".into()), None));
+        // Agents live, first sight: start the clock, not stuck yet.
+        assert_eq!(d(Some("raise to 6"), true, "", 0, 1000, 600), (None, Some(("raise to 6".into(), 1000))));
+        // Same text, inside the grace: not stuck.
+        assert_eq!(d(Some("raise to 6"), true, "raise to 6", 1000, 1599, 600), (None, None));
+        // Same text past the grace: stuck. This is the MO-3992 case.
+        assert_eq!(d(Some("raise to 6"), true, "raise to 6", 1000, 1600, 600), (Some("raise to 6".into()), None));
+        // The text changed (someone is still typing): restart the clock.
+        assert_eq!(d(Some("raise to 7"), true, "raise to 6", 1000, 1700, 600), (None, Some(("raise to 7".into(), 1700))));
+        // The composer emptied: clear the record.
+        assert_eq!(d(None, true, "raise to 6", 1000, 1700, 600), (None, Some((String::new(), 0))));
+        assert_eq!(d(None, false, "", 0, 1700, 600), (None, None));
     }
 }
