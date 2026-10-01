@@ -3306,17 +3306,31 @@ fn hydrate_light(
             // isolates exactly those two rows out of 8,260. Hydrating them
             // whole is cheaper than shipping a quietly wrong length.
             let full_desc_when = format!("instr(COALESCE(i.\"desc\",''), char(0)) > 0 OR {marker}");
+            // A desc no longer than the prefix IS its own prefix, so it comes back
+            // whole without asking the marker question at all. On a board of
+            // ordinary cards that is most rows, and it took the nightly
+            // corpus's slim query from 107ms to 84ms, against 73ms for the
+            // full one (AMUX-5374). LENGTH stops at a NUL, so a NUL-bearing
+            // desc can land here too, and it is returned whole, which is what
+            // the NUL arm below wants anyway.
             let desc_expr = format!(
-                "CASE WHEN {full_desc_when} THEN i.\"desc\" \
+                "CASE WHEN LENGTH(COALESCE(i.\"desc\",'')) <= {DESC_PREFIX_CHARS} THEN i.\"desc\" \
+                 WHEN {full_desc_when} THEN i.\"desc\" \
                  ELSE substr(COALESCE(i.\"desc\",''), 1, {DESC_PREFIX_CHARS}) END"
             );
             // `desc_len` is only READ when the row was prefixed, and the CASE
             // above guarantees a prefixed row has no NUL, so plain LENGTH() is
             // exact on every row that uses it.
-            let extra = ", LENGTH(COALESCE(i.\"desc\",'')) AS d_len, \
+            // `d_folded` is read only for a row that came back CUT, and a cut
+            // row is longer than the prefix, so the count is skipped (0) for
+            // every row the first arm above returned whole.
+            let extra = format!(
+                ", LENGTH(COALESCE(i.\"desc\",'')) AS d_len, \
+                 CASE WHEN LENGTH(COALESCE(i.\"desc\",'')) <= {DESC_PREFIX_CHARS} THEN 0 ELSE \
                  (LENGTH(COALESCE(i.\"desc\",'')||COALESCE(i.log,'')) \
                   - LENGTH(REPLACE(COALESCE(i.\"desc\",'')||COALESCE(i.log,''),'New task:',''))) / 9 \
-                 AS d_folded";
+                 END AS d_folded"
+            );
             (format!("{}{}", cols_with_desc(&desc_expr), extra), true)
         }
     };
@@ -6673,7 +6687,11 @@ mod tests {
         // The NUL goes in as an argument: `\u{0}` inside a format! literal reads
         // as a format placeholder to anyone skimming, and this cannot be misread.
         let nulled = format!("{plain}{}tail after the nul\n", '\u{0}');
-        for (id, desc) in [("P-1", &plain), ("P-2", &marked), ("P-3", &nulled)] {
+        // A NUL BEFORE the cut in a long desc (AMUX-5374). LENGTH() stops at it,
+        // so the short-desc arm sees a "short" desc and returns it whole, which
+        // must still be the whole column, never a prefix that looks complete.
+        let early_nul = format!("early{}{plain}", '\u{0}');
+        for (id, desc) in [("P-1", &plain), ("P-2", &marked), ("P-3", &nulled), ("P-4", &early_nul)] {
             conn.execute(
                 "INSERT INTO issues (id, title, \"desc\", status, session, created, updated, log, type) \
                  VALUES (?1, 'a card', ?2, 'todo', 's', ?3, ?3, ?4, 'code')",
@@ -6704,8 +6722,8 @@ mod tests {
             "P-1 must actually arrive truncated, or this test proves nothing"
         );
         assert!(p1.desc_prefixed.is_some(), "and must SAY it is truncated");
-        // The two escapes must NOT be truncated, and must say so the same way.
-        for id in ["P-2", "P-3"] {
+        // The escapes must NOT be truncated, and must say so the same way.
+        for id in ["P-2", "P-3", "P-4"] {
             let r = slim.iter().find(|r| r.id == id).unwrap();
             assert!(
                 r.desc_prefixed.is_none(),
@@ -6745,6 +6763,14 @@ mod tests {
             assert_eq!(s["folded_n"], 2, "{id}: both markers are past the cut");
             assert_eq!(s["log_n"], 3, "{id}: blank log lines are not entries");
         }
+        let p4 = |rows: &[IssueRow]| {
+            crate::api::board::list_body(rows.iter().find(|r| r.id == "P-4").unwrap(), true, false)
+        };
+        assert_eq!(
+            p4(&slim)["desc_len"],
+            p4(&full)["desc_len"],
+            "P-4: an early NUL must not shorten desc_len"
+        );
         // And the marker, which is the derivation the prefix cannot serve at all.
         let m =
             crate::api::board::list_body(slim.iter().find(|r| r.id == "P-2").unwrap(), true, false);

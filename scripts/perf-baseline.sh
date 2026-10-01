@@ -109,7 +109,16 @@ fail=0
 avg() { echo "$1" | sed 's/.*_avg_ms": \([0-9]*\).*/\1/'; }
 [ "$(avg "$M1")" -lt 500 ] || { echo "FAIL: dashboard >= 500ms"; fail=1; }
 [ "$(avg "$M2")" -lt 50 ] || { echo "FAIL: health >= 50ms"; fail=1; }
-[ "$(avg "$M3")" -lt 200 ] || { echo "FAIL: board >= 200ms"; fail=1; }
+[ "$(avg "$M3")" -lt 200 ] || {
+  echo "FAIL: board >= 200ms"
+  fail=1
+  # SAY WHERE (AMUX-5374). This gate was red for 30 nights with nothing but a
+  # total, and the time turned out to be in three different places. The server
+  # logs one `board_list_slow` line per slow read, split into
+  # queued/conn/sql/sessions/rows; print it while the log still exists.
+  grep -a "board_list_slow" "$WORK/server.log" | tail -2 | sed 's/^/  server: /' \
+    || echo "  server: no board_list_slow line (the handler itself was under budget; the time is in serialization or transport)"
+}
 [ "$RSS_MB" -lt "$RSS_MAX_MB" ] || { echo "FAIL: RSS ${RSS_MB}MB >= ${RSS_MAX_MB}MB (ceiling: PERF_RSS_MAX_MB, provenance above)"; fail=1; }
 # The LEAK detector (AMUX-3488): dirty is live heap, so on macOS it does not
 # inherit allocator weather — measured 30-45MB there against an RSS of 220+.
