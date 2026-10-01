@@ -133,7 +133,7 @@ const INJECTED_PREFIXES: [&str; 6] = [
     "<user-prompt-submit-hook",
 ];
 
-fn same_text(a: &str, b: &str) -> bool {
+pub(crate) fn same_text(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
@@ -186,6 +186,10 @@ fn recent_history_texts(state: &AppState, session: &str) -> Vec<String> {
 
 /// Record a UserPromptSubmit prompt if a person typed it into the pane.
 pub(crate) async fn record(state: &AppState, session: &str, prompt: &str) {
+    // A delivery receipt first, independent of this module's gate and of
+    // isolation: a message amux recorded as stuck that the provider has now
+    // accepted is delivered, whoever pressed the Enter (AMUX-5463).
+    super::session_verbs::reconcile_stuck_on_submit(state, session, prompt).await;
     if !super::session_verbs::scoped_gate_on(session, GATE_KEY) {
         tracing::debug!(
             session,

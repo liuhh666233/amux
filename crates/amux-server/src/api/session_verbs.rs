@@ -8924,6 +8924,45 @@ async fn send_receipt_resolving(
     text: &str,
 ) -> Response {
     let base = send_receipt(state, name, msg_id);
+    // A FORGOTTEN RESERVATION IS NOT PROOF OF NON-DELIVERY (AMUX-5463). A send
+    // that ended stuck releases its reservation, so the sender's recheck read
+    // "released" and re-sent: for MSG-72522 that would have typed the owner's
+    // message into `random` a second time after a later Enter had already
+    // submitted it. Before answering "released", consult the history row the
+    // stuck send left (reconciled by the provider's UserPromptSubmit).
+    if base.status() == StatusCode::OK && !text.is_empty() && !send_dedup_reserved(state, name, msg_id) {
+        match released_text_fate(state, name, text) {
+            ReleasedFate::Delivered(row) => {
+                let id = format!("reconciled-{msg_id}");
+                let (s, m, rid) = (name.to_string(), msg_id.to_string(), id.clone());
+                let _ = state
+                    .store
+                    .write_async(move |conn| {
+                        conn.execute(
+                            "INSERT INTO send_dedup (session,msg_id,ts,receipt_id) VALUES (?1,?2,?3,?4) \
+                             ON CONFLICT(session,msg_id) DO UPDATE SET receipt_id=excluded.receipt_id",
+                            rusqlite::params![s, m, now_i64(), rid],
+                        )?;
+                        Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+                    })
+                    .await;
+                tracing::warn!(target: "amux::message_acceptance", session = name, history_row = row,
+                    verdict = "released_receipt_reconciled", measured = true, n_considered = 1,
+                    "a released message identity matches a delivered history row; answered accepted so it is never re-sent");
+                return stranded_answer(json!({"ok": true, "accepted": true, "reconciled": true, "id": id, "msg_id": msg_id}));
+            }
+            ReleasedFate::StillStuck(row) => {
+                tracing::warn!(target: "amux::message_acceptance", session = name, history_row = row,
+                    verdict = "released_receipt_still_stuck", measured = true, n_considered = 1,
+                    "a released message identity matches a message still stuck in the composer; not released for a resend");
+                return stranded_answer(json!({
+                    "ok": true, "accepted": false, "stranded": true, "delivered": "unknown", "msg_id": msg_id,
+                    "next": "the text is still in the worker's input box; retry this receipt read, never a new send",
+                }));
+            }
+            ReleasedFate::Unknown => {}
+        }
+    }
     if base.status() != StatusCode::ACCEPTED {
         return base;
     }
@@ -9027,6 +9066,153 @@ async fn send_receipt_resolving(
                 "ok": true, "accepted": false, "stranded": true, "delivered": "unknown", "msg_id": msg_id,
                 "next": "receipt recovery remains pending; retry this receipt read, never a new message identity",
             }))
+        }
+    }
+}
+
+/// Whether a message identity still has a reservation row (any state).
+fn send_dedup_reserved(state: &AppState, name: &str, msg_id: &str) -> bool {
+    state.store.read().ok().is_some_and(|c| {
+        c.query_row(
+            "SELECT 1 FROM send_dedup WHERE session=?1 AND msg_id=?2",
+            rusqlite::params![name, msg_id],
+            |_| Ok(()),
+        )
+        .is_ok()
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReleasedFate {
+    /// A recent owner row with this exact text is confirmed delivered.
+    Delivered(i64),
+    /// A recent owner row with this exact text is still recorded stuck.
+    StillStuck(i64),
+    /// No history evidence either way.
+    Unknown,
+}
+
+/// Pure over recent `(id, text, submit_verdict)` rows, newest first. Only
+/// texts of 16+ characters are judged, so a short repeated "continue" never
+/// borrows another message's receipt.
+pub(crate) fn released_fate_from(text: &str, rows: &[(i64, String, String)]) -> ReleasedFate {
+    let norm = super::pane_prompts::normalize(text);
+    if norm.chars().count() < 16 {
+        return ReleasedFate::Unknown;
+    }
+    for (id, t, verdict) in rows {
+        if super::pane_prompts::normalize(t) != norm {
+            continue;
+        }
+        return match verdict.as_str() {
+            "confirmed" => ReleasedFate::Delivered(*id),
+            "stuck" => ReleasedFate::StillStuck(*id),
+            _ => continue,
+        };
+    }
+    ReleasedFate::Unknown
+}
+
+fn released_text_fate(state: &AppState, name: &str, text: &str) -> ReleasedFate {
+    let since_ms = (now_i64() - 6 * 3600) * 1000;
+    let rows: Vec<(i64, String, String)> = state
+        .store
+        .read()
+        .ok()
+        .and_then(|c| {
+            let mut st = c
+                .prepare(
+                    "SELECT id, text, COALESCE(submit_verdict,'') FROM cmd_history \
+                     WHERE session=?1 AND type='user' AND ts>?2 ORDER BY id DESC LIMIT 32",
+                )
+                .ok()?;
+            let rows = st
+                .query_map(rusqlite::params![name, since_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .ok()?;
+            Some(rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    released_fate_from(text, &rows)
+}
+
+/// Recent `cmd_history` rows recorded as stuck whose text is the prompt the
+/// provider just reported submitted. Pure over the candidate rows.
+pub(crate) fn stuck_rows_matching(prompt: &str, candidates: &[(i64, String)]) -> Vec<i64> {
+    let norm = super::pane_prompts::normalize(prompt);
+    if norm.chars().count() < 8 {
+        return vec![];
+    }
+    candidates
+        .iter()
+        .filter(|(_, text)| super::pane_prompts::same_text(&norm, &super::pane_prompts::normalize(text)))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// A MESSAGE RECORDED STUCK THAT LATER WENT IN IS DELIVERED (AMUX-5463).
+/// MSG-72522 stayed "NOT SENT" after the text in `random`'s composer was
+/// submitted a minute later by one Enter: nothing ever revisited a stuck row.
+/// The provider's UserPromptSubmit (the passive lifecycle hook) carries the
+/// prompt text, so a stuck row whose text matches is now marked confirmed and
+/// given its delivery time. This is a delivery receipt for the owner's own
+/// message, which isolated lanes preserve too. Returns rows reconciled.
+pub(crate) async fn reconcile_stuck_on_submit(state: &AppState, session: &str, prompt: &str) -> usize {
+    let since_ms = (now_i64() - 6 * 3600) * 1000;
+    let candidates: Vec<(i64, String)> = state
+        .store
+        .read()
+        .ok()
+        .and_then(|c| {
+            let mut st = c
+                .prepare(
+                    "SELECT id, text FROM cmd_history WHERE session=?1 AND submit_verdict='stuck' \
+                     AND ts>?2 ORDER BY id DESC LIMIT 16",
+                )
+                .ok()?;
+            let rows = st
+                .query_map(rusqlite::params![session, since_ms], |r| Ok((r.get(0)?, r.get(1)?)))
+                .ok()?;
+            Some(rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    let ids = stuck_rows_matching(prompt, &candidates);
+    if ids.is_empty() {
+        return 0;
+    }
+    let (write_ids, at) = (ids.clone(), now_i64() * 1000);
+    let result = state
+        .store
+        .write_async(move |conn| {
+            let mut events = vec![];
+            for id in &write_ids {
+                let n = conn.execute(
+                    "UPDATE cmd_history SET submit_verdict='confirmed', delivered_at=COALESCE(delivered_at, ?2) \
+                     WHERE id=?1 AND submit_verdict='stuck'",
+                    rusqlite::params![id, at],
+                )?;
+                if n == 1 {
+                    events.push(crate::db::PendingEvent {
+                        entity_type: amux_core::revision::EntityType::Message,
+                        entity_id: format!("MSG-{id}"),
+                        mutation: amux_core::revision::MutationKind::Updated,
+                        payload: None,
+                    });
+                }
+            }
+            Ok(crate::db::WriteOutcome { applied: !events.is_empty(), events })
+        })
+        .await;
+    match result {
+        Ok(_) => {
+            tracing::warn!(session, ids = ?ids, measured = true, n_considered = candidates.len(),
+                verdict = "stuck_message_reconciled",
+                "a message recorded stuck was submitted later; marked delivered (AMUX-5463)");
+            ids.len()
+        }
+        Err(error) => {
+            tracing::warn!(session, %error, ids = ?ids, measured = false, n_considered = candidates.len(),
+                verdict = "stuck_message_reconcile_failed", "could not mark a later-submitted stuck message delivered");
+            0
         }
     }
 }
@@ -12787,10 +12973,21 @@ async fn send_text_inner_bound(
     // Per provider rather than one global raise: 20ms is a real latency budget for Claude,
     // paid on every send by every lane, and there is no reason to make the common case
     // slower for a provider-specific composer.
-    let settle_ms = match provider_of(&parse_env(name)).as_str() {
+    let mut settle_ms = match provider_of(&parse_env(name)).as_str() {
         "muse" => 350,
         _ => 20,
     };
+    // A MULTI-LINE PASTE GETS A LONGER SETTLE (AMUX-5463, hypothesis with a
+    // signal). Of 8 accept-clear-restore incidents on 2026-10-01, 5 read
+    // CollapsedPaste, and `random`'s stuck message carried an embedded
+    // newline: Enter 20ms after a multi-line bracketed paste can land while
+    // Claude Code is still folding the paste. 250ms only for those pastes;
+    // `paste_settle_ms` in the log lets a sweep compare restore rates.
+    if use_paste && staged.contains('\n') && settle_ms < 250 {
+        settle_ms = 250;
+        tracing::debug!(session = %name, paste_settle_ms = settle_ms, verdict = "multiline_paste_settle",
+            "multi-line paste: waiting before Enter so the paste is folded first");
+    }
     sleep_ms(settle_ms).await;
     // Only reachable if picker-shaped text was TYPED, which `use_paste` now
     // prevents. Kept as a belt-and-braces closer rather than deleted: if a
@@ -12878,6 +13075,37 @@ async fn send_text_inner_bound(
             measured = true, n_considered = 1, verdict = "slash_command_single_enter",
             "slash command sent with one Enter; no retry, because a second Enter acts inside its panel or picker");
         return (ok, msg);
+    }
+    if first == Submission::Stuck && !generating {
+        // STUCK AT IDLE IS NOT FINAL (AMUX-5463). The verifier made one
+        // immediate retry; Claude Code's accept-clear-restore round trip
+        // (AMUX-5090) can outlast it. Retry with backoff, pressing Enter only
+        // while the box holds exactly this message and no turn is running,
+        // then hand anything still held to the idle watcher instead of
+        // abandoning it in the box.
+        let (sub, presses, reason) = retry_held_idle_draft(name, &text, sent_at).await;
+        if sub == Submission::Confirmed {
+            tracing::warn!(session = %name, presses, reason, measured = true, n_considered = 1,
+                verdict = "submitted_after_retry",
+                "send: a message stuck in an idle composer was submitted by a backoff retry (AMUX-5463)");
+            return send_outcome(Submission::Confirmed, false, true);
+        }
+        if reason != "human_changed" {
+            spawn_direct_draft_idle_submit(name, &text, sent_at, 10.0);
+            tracing::warn!(session = %name, presses, reason, measured = true, n_considered = 1,
+                verdict = "stuck_held_for_idle_submit",
+                "send: still in the composer after backoff retries; the idle watcher keeps pressing Enter while it is exactly this message");
+            // "queued (held …" so submission_verdict reads it as deferred
+            // (submitted = null), exactly like the mid-turn hold below: the
+            // message is not submitted yet, and the receipt must not say it is.
+            return (
+                true,
+                "queued (held in the input box; submitted automatically while the worker is idle and the text is unchanged)".into(),
+            );
+        }
+        tracing::warn!(session = %name, presses, reason, measured = true, n_considered = 1,
+            verdict = "stuck", "send: the composer now holds different text; not pressing Enter on it");
+        return send_outcome(Submission::Stuck, false, retried);
     }
     if first == Submission::Stuck && generating {
         // One bare-Enter retry, then re-read the evidence. No sleep-tuning: the
@@ -13004,6 +13232,88 @@ pub(crate) fn slash_outcome(first: Submission, after: Option<FrameRead>, generat
         ),
         _ => send_outcome(first, generating, false),
     }
+}
+
+/// What to do next with a message the verifier left STUCK while the lane was
+/// idle, decided from one frame. Pure, so recorded frames pin it in tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldDraftStep {
+    /// Our exact text is in an idle composer: press Enter again.
+    PressEnter,
+    /// The composer no longer holds anything: it went (or a restore is due).
+    Left,
+    /// The composer holds something else: a person edited it. Never press.
+    HumanChanged,
+    /// A turn is running: Enter now would queue or interrupt. Leave it to the
+    /// idle watcher.
+    Generating,
+    /// The composer is not visible (full-screen view, background manager).
+    Wait,
+}
+
+pub(crate) fn held_draft_step(raw: &str, text: &str) -> HeldDraftStep {
+    match composer_state(raw) {
+        ComposerState::Typed(draft) => {
+            if !composer_holds_this_delivery(&draft, text) {
+                HeldDraftStep::HumanChanged
+            } else if detect_claude_status(raw) == "active" || pane_bar_says_generating(raw) {
+                HeldDraftStep::Generating
+            } else {
+                HeldDraftStep::PressEnter
+            }
+        }
+        ComposerState::Empty | ComposerState::Placeholder(_) => HeldDraftStep::Left,
+        ComposerState::NotVisible | ComposerState::BackgroundManager => HeldDraftStep::Wait,
+    }
+}
+
+/// Backoff for re-pressing Enter on a message stuck in an IDLE composer.
+/// Claude Code can accept an Enter, clear the box and put the text back
+/// (AMUX-5090); a second Enter seconds later then submits it. The verifier
+/// used to make ONE immediate retry and report the message stuck: worker
+/// `random`, 2026-10-01 22:21Z, sat with the owner's message in its box until
+/// a single manual Enter a minute later submitted it at once.
+pub(crate) const HELD_DRAFT_BACKOFF_MS: [u64; 3] = [1500, 3000, 6000];
+
+/// Retry a stuck idle message with backoff, re-reading the frame before every
+/// press. Returns the outcome, how many Enters it pressed, and why it stopped.
+/// Runs under the send lock the caller already holds.
+async fn retry_held_idle_draft(name: &str, text: &str, sent_at: f64) -> (Submission, u32, &'static str) {
+    let mut presses = 0u32;
+    for delay in HELD_DRAFT_BACKOFF_MS {
+        sleep_ms(delay).await;
+        if sent_at > 0.0 && (jsonl_submission_since(name, text, sent_at) || muse_user_intent_since(name, text, sent_at)) {
+            return (Submission::Confirmed, presses, "transcript");
+        }
+        let raw = tmux_capture(name, 25).await;
+        let step = held_draft_step(&raw, text);
+        tracing::info!(session = %name, delay_ms = delay, ?step, presses, measured = true, n_considered = 1,
+            verdict = "held_draft_retry_look", "stuck idle message: re-read before retrying Enter");
+        match step {
+            HeldDraftStep::PressEnter => {
+                presses += 1;
+                let at = now_f64();
+                send_key(name, "Enter").await;
+                let (sub, _) = verify_submitted(name, text, at, false).await;
+                if sub == Submission::Confirmed {
+                    return (Submission::Confirmed, presses, "enter_accepted");
+                }
+            }
+            // An empty box after a stuck read is either a submission the frame
+            // reads could not prove or a restore still on its way: let the
+            // verifier's cleared/JSONL logic decide, without pressing anything.
+            HeldDraftStep::Left => {
+                let (sub, _) = verify_submitted(name, text, sent_at, false).await;
+                if sub == Submission::Confirmed {
+                    return (Submission::Confirmed, presses, "composer_cleared");
+                }
+            }
+            HeldDraftStep::HumanChanged => return (Submission::Stuck, presses, "human_changed"),
+            HeldDraftStep::Generating => return (Submission::Stuck, presses, "generating"),
+            HeldDraftStep::Wait => {}
+        }
+    }
+    (Submission::Stuck, presses, "still_held")
 }
 
 fn spawn_direct_draft_idle_submit(name: &str, text: &str, sent_at: f64, grace_s: f64) {
@@ -45851,6 +46161,77 @@ mod composer_state_tests {
         assert_eq!(
             composer_state("just some scrollback\nand more\n"),
             ComposerState::NotVisible
+        );
+    }
+
+    /// AMUX-5463: the recorded shape of `random`'s stuck send, step by step.
+    /// Claude Code clears the box, restores our text, then (after a retry)
+    /// clears it for good. Each frame must map to the right action.
+    #[test]
+    fn a_stuck_idle_message_is_retried_only_while_it_is_exactly_ours_and_idle() {
+        const OURS: &str = "[10:20 PM] look at @/Users/ethan/Dev/amux/README.md please";
+        // Cleared (the first, unwound acceptance): nothing to press.
+        assert_eq!(held_draft_step(LIVE_PLACEHOLDER, OURS), HeldDraftStep::Left);
+        // Restored, intact, idle: press Enter again.
+        assert_eq!(held_draft_step(LIVE_TYPED, OURS), HeldDraftStep::PressEnter);
+        // A person changed the box in between: never press on their text.
+        assert_eq!(
+            held_draft_step(LIVE_TYPED, "[10:20 PM] something the owner typed instead"),
+            HeldDraftStep::HumanChanged
+        );
+        // A turn is running (the footer says so): leave it to the idle watcher.
+        let generating = LIVE_TYPED.replace("\u{b7} \u{2190} 2 agents", "\u{b7} esc to interrupt");
+        assert_eq!(held_draft_step(&generating, OURS), HeldDraftStep::Generating);
+        // No composer drawn: wait, do not press.
+        assert_eq!(held_draft_step("", OURS), HeldDraftStep::Wait);
+        // The backoff is real and bounded: several looks, growing, under ~11s.
+        assert!(HELD_DRAFT_BACKOFF_MS.len() >= 3);
+        assert!(HELD_DRAFT_BACKOFF_MS.windows(2).all(|w| w[1] > w[0]));
+        assert!(HELD_DRAFT_BACKOFF_MS.iter().sum::<u64>() <= 11_000);
+    }
+
+    /// MSG-72522's shape: recorded stuck, later submitted by a manual Enter; the
+    /// provider reports the prompt with a time stamp the row does not carry.
+    #[test]
+    fn a_stuck_row_is_reconciled_by_the_prompt_the_provider_later_submitted() {
+        let row = "all right so we have recordings for our workout growth. I just did 1210 eight of shoulder press\n  dumbbells";
+        let rows = vec![(72522, row.to_string()), (72400, "something unrelated entirely here".to_string())];
+        let submitted = "[06:21 PM] all right so we have recordings for our workout growth. I just did 1210 eight of shoulder press dumbbells";
+        assert_eq!(stuck_rows_matching(submitted, &rows), vec![72522]);
+        assert!(stuck_rows_matching("yes", &rows).is_empty(), "a short prompt never reconciles");
+        assert!(stuck_rows_matching("a different message that is long enough", &rows).is_empty());
+    }
+
+    /// A released message identity is never answered "released" (which makes the
+    /// sender re-send) when history shows the text was delivered or is still
+    /// sitting in the composer.
+    #[test]
+    fn a_released_identity_reads_the_history_before_inviting_a_resend() {
+        let text = "And then the other day, I did three Max dead lift 155";
+        let rows = |v: &str| vec![(9, text.to_string(), v.to_string())];
+        assert_eq!(released_fate_from(text, &rows("confirmed")), ReleasedFate::Delivered(9));
+        assert_eq!(released_fate_from(text, &rows("stuck")), ReleasedFate::StillStuck(9));
+        assert_eq!(released_fate_from(text, &rows("")), ReleasedFate::Unknown);
+        assert_eq!(released_fate_from("continue", &[(9, "continue".into(), "confirmed".into())]), ReleasedFate::Unknown);
+        assert_eq!(released_fate_from(text, &[]), ReleasedFate::Unknown);
+    }
+
+    /// The idle-stuck branch of send_text must retry and then hand a still-held
+    /// message to the idle watcher, not return "stuck" after one retry.
+    #[test]
+    fn send_text_retries_an_idle_stuck_message_and_hands_it_to_the_watcher() {
+        let src = include_str!("session_verbs.rs");
+        let at = src.find("if first == Submission::Stuck && !generating {").expect("idle-stuck branch");
+        let branch = &src[at..at + 2400];
+        assert!(branch.contains("retry_held_idle_draft(name, &text, sent_at).await"), "no backoff retry");
+        assert!(branch.contains("spawn_direct_draft_idle_submit(name, &text, sent_at, 10.0)"), "no idle watcher");
+        assert!(branch.contains("\"submitted_after_retry\""), "no success verdict");
+        assert!(branch.contains("\"stuck_held_for_idle_submit\""), "no held verdict");
+        // A held message is deferred, never "confirmed": the receipt must not
+        // claim a submission that has not happened.
+        assert_eq!(
+            submission_verdict(true, "queued (held in the input box; submitted automatically while the worker is idle and the text is unchanged)"),
+            (None, "deferred")
         );
     }
 

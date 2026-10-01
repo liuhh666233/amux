@@ -13657,7 +13657,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1212';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1213';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -38923,6 +38923,12 @@ function connectSSE() {
               // fetching history in every background tab on every scheduler or
               // worker send would turn correctness into avoidable load.
               if (activeView === 'messages') _messagesLoad(true);
+              // A message change may be the server reconciling one this device
+              // is still checking (AMUX-5463): recheck now rather than at the
+              // capped backoff, so the messages queued behind it go promptly.
+              if (offlineQueue.some(_outboxUncertainMessage) && typeof runSyncBanner === 'function') {
+                runSyncBanner(true);
+              }
               if (typeof peekSession !== 'undefined' && peekSession
                   && typeof _peekTab !== 'undefined' && _peekTab === 'messages') {
                 _peekMessagesLoad();
