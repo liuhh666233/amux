@@ -11,8 +11,14 @@ whose name starts with --lane-prefix; archived cards excluded), appends a
 snapshot to ~/.amux/logs/orch-pace-<orchestrator>.jsonl, and compares the
 rate since the previous snapshots with the rate the deadline needs.
 
-Two finish lines, both from the board:
-  work:  plan cards that are terminal (done, verified, discarded)
+Finish lines, all from the board:
+  plan:  with --plan-regex, the orchestrator's plan-item cards at VERIFIED.
+         This is the real finish line and the verdict is taken from it:
+         worker sub-cards come and go as the orchestrator releases work, and
+         would move the "work" count without moving the plan (mixpeek-override,
+         2026-10-01: "the finish line is the 220 plan items and the 58 proofs").
+  work:  every card on the boards that is terminal (done, verified,
+         discarded), reported for context
   proof: completion cards (titles starting with a --proof-prefix) at verified
 
 Pace is measured, never estimated: `rate_6h` is cards CLOSED done or verified
@@ -52,6 +58,7 @@ def main():
     ap.add_argument("--lane-prefix", required=True)
     ap.add_argument("--deadline", required=True, help="ISO-8601 with offset")
     ap.add_argument("--proof-prefix", action="append", default=[])
+    ap.add_argument("--plan-regex", help="titles of the orchestrator's plan-item cards, e.g. '^GS12 (plan item )?\\d+\\.\\d+'")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
@@ -105,6 +112,20 @@ def main():
         verdict = "ON PACE"
     else:
         verdict = "BEHIND"
+    plan = None
+    if a.plan_regex:
+        import re
+        rx = re.compile(a.plan_regex)
+        items = [c for c in cards if c.get("session") == a.orchestrator and rx.match(c.get("title") or "")]
+        live = [c for c in items if c.get("status") != "discarded"]
+        ver = [c for c in live if c.get("status") == "verified"]
+        ver_6h = sum(1 for c in ver if (closed_ts(c) or c.get("last_verified_at") or 0) and float(closed_ts(c) or c.get("last_verified_at") or 0) >= since)
+        p_rate = ver_6h / 6.0
+        p_needed = (len(live) - len(ver)) / hours_left if hours_left > 0 else float("inf")
+        plan = {"items": len(live), "verified": len(ver), "verified_6h": ver_6h,
+                "rate_6h_per_h": round(p_rate, 2), "needed_per_h": round(p_needed, 2),
+                "discarded": len(items) - len(live)}
+        verdict = "ON PACE" if p_rate >= p_needed else "BEHIND"
     checkpoint = deadline - dt.timedelta(hours=24)
     proof_target_now = len(proof) // 2 if now >= checkpoint else 0
     proof_verdict = "ON PACE" if proof_verified >= proof_target_now else "BEHIND"
@@ -120,13 +141,18 @@ def main():
         "proof_checkpoint": f"{len(proof)//2} verified by {checkpoint.isoformat()}",
         "proof_verdict": proof_verdict,
         "needsyou": needsyou,
+        "plan": plan,
         "population": f"{a.orchestrator} + {a.lane_prefix}* boards, non-archived, epics/watches/tripwires excluded",
     }
     if a.json:
         print(json.dumps(out))
     else:
+        if plan:
+            print(f"{verdict}: {plan['verified']}/{plan['items']} plan items verified, "
+                  f"{hours_left:.1f}h left -> need {plan['needed_per_h']:.2f}/h, measured {plan['rate_6h_per_h']:.2f}/h "
+                  f"({plan['verified_6h']} verified in the last 6h; {plan['discarded']} plan items discarded)")
         r = "unmeasured (no card carries a close time)" if rate is None else f"{rate:.2f}/h done or verified"
-        print(f"{verdict}: {terminal}/{total} plan cards terminal, {open_cards} open, "
+        print(f"{'cards' if plan else verdict}: {terminal}/{total} cards terminal, {open_cards} open, "
               f"{hours_left:.1f}h left -> need {needed:.2f}/h, measured {r} over the last 6h "
               f"(plus {discarded_6h} discarded, not counted as progress)")
         print(f"proof: {proof_verified}/{len(proof)} completion cards verified ({proof_verdict}; "
