@@ -355,6 +355,17 @@ async fn classify_within_deadline(
     }
 }
 
+/// The open cards a new request may be folded into.
+///
+/// NOT watch, tripwire or epic (2026-09-30): a distinct, finished fix filed by
+/// amux-helper was folded twice into its standing watch card AH-251 ("same
+/// harness health verification work"), even with a subsystem-specific title.
+/// A standing card is a monitor or a container, never the unit a new piece of
+/// work lives in: the folded work lost its identity, and `done` on it was
+/// refused because a watch cannot close that way. These are the same three
+/// types board-drive already treats as non-workable.
+pub(crate) const CANDIDATE_PREDICATE: &str = "COALESCE(session,'')=?1 AND owner_type=?2 AND archived=0 AND deleted IS NULL AND status NOT IN ('done','verified','discarded','quarantined','cancelled') AND COALESCE(type,'') NOT IN ('watch','tripwire','epic')";
+
 pub async fn plan(
     store: &Store,
     session: &str,
@@ -364,7 +375,7 @@ pub async fn plan(
 ) -> Plan {
     let loaded = (|| -> anyhow::Result<(Vec<Candidate>, usize)> {
         let conn = store.read()?;
-        let predicate = "COALESCE(session,'')=?1 AND owner_type=?2 AND archived=0 AND deleted IS NULL AND status NOT IN ('done','verified','discarded','quarantined','cancelled')";
+        let predicate = CANDIDATE_PREDICATE;
         let available = conn.query_row(
             &format!("SELECT COUNT(*) FROM issues WHERE {predicate}"),
             rusqlite::params![session, owner],
@@ -1389,5 +1400,21 @@ mod intake_deadline_tests {
              bound it"
         );
         // that nobody is waiting on it.
+    }
+}
+
+#[cfg(test)]
+mod candidate_predicate_tests {
+    #[test]
+    fn standing_cards_are_never_fold_targets() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE issues (id TEXT, session TEXT, owner_type TEXT, archived INTEGER, deleted REAL, status TEXT, type TEXT);").unwrap();
+        for (id, ty, st) in [("W", "watch", "doing"), ("T", "tripwire", "todo"), ("E", "epic", "todo"),
+                             ("C", "code", "doing"), ("N", "", "todo"), ("D", "code", "done")] {
+            conn.execute("INSERT INTO issues VALUES (?1,'lane','agent',0,NULL,?2,?3)", rusqlite::params![id, st, ty]).unwrap();
+        }
+        let mut st = conn.prepare(&format!("SELECT id FROM issues WHERE {} ORDER BY id", super::CANDIDATE_PREDICATE)).unwrap();
+        let ids: Vec<String> = st.query_map(rusqlite::params!["lane", "agent"], |r| r.get(0)).unwrap().flatten().collect();
+        assert_eq!(ids, vec!["C", "N"], "open work only, and never a watch, tripwire or epic");
     }
 }
