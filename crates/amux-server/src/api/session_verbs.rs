@@ -19822,12 +19822,25 @@ pub(crate) fn steer_background_ceiling(
         return held;
     }
     if turn_ended {
-        tracing::info!(
-            session = %name, age_s = age_s as i64, measured = true, n_considered = 1,
-            verdict = "steer_background_turn_ended",
-            "Claude lane's turn has ended with background work still running; delivering at the boundary"
-        );
-        return SteerDelivery::AtBoundary;
+        // By PASTE (OverdueMidTurn), not AtBoundary. Measured 2026-10-01: an
+        // AtBoundary decision for gs12-retrievers was refused by the send path
+        // every tick while its background agents kept it generating, 339 times
+        // in an hour, and the early return also skipped the ceiling below. A
+        // paste is queued by Claude Code whatever the pane is doing.
+        static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> =
+            std::sync::OnceLock::new();
+        let map = LAST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        let mut seen = map.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_f64();
+        if seen.get(name).is_none_or(|t| now - t >= 600.0) {
+            seen.insert(name.to_string(), now);
+            tracing::info!(
+                session = %name, age_s = age_s as i64, measured = true, n_considered = 1,
+                verdict = "steer_background_turn_ended",
+                "Claude lane's turn has ended with background work still running; delivering by paste"
+            );
+        }
+        return SteerDelivery::OverdueMidTurn;
     }
     if ceiling_s <= 0.0 || age_s < ceiling_s {
         return held;
@@ -46140,7 +46153,7 @@ mod steer_freeze_tests {
     fn a_claude_lane_whose_turn_ended_is_at_a_boundary_despite_background_work() {
         assert_eq!(
             steer_background_ceiling("x", SteerDelivery::Hold, 5.0, true, true, "claude", 1800.0),
-            SteerDelivery::AtBoundary,
+            SteerDelivery::OverdueMidTurn,
             "a lane waiting on `amux land` in a background shell must not hold its messages for 30 min"
         );
         assert_eq!(
