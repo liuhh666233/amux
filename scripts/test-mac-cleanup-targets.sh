@@ -233,6 +233,20 @@ check "it is counted open, not reaped"                 "0"   "$TARGETS_REAPED"
 LSOF_CMD="cat $FIX/lsof.base"; run 0
 check "control: with a quiet lsof throughout it is reaped"   "no"  "$(yn test -e "$R/proj/target")"
 
+echo "12b. under disk pressure the idle floor drops (DESKT-62)"
+check "plenty of disk keeps the normal floor"          "24" "$(effective_target_idle_h 600 24 250 6)"
+check "under the threshold the tight floor applies"    "6"  "$(effective_target_idle_h 155 24 250 6)"
+check "exactly at the threshold keeps the normal floor" "24" "$(effective_target_idle_h 250 24 250 6)"
+check "an unmeasured disk keeps the normal floor"      "24" "$(effective_target_idle_h -1 24 250 6)"
+check "a tight floor above the normal one is ignored"  "24" "$(effective_target_idle_h 100 24 250 48)"
+fresh_root tight
+mk_target "$R/proj/target" old
+ago 10 "$R/proj/target/debug/deps/lib.rlib" 2>/dev/null || perl -e 'my $t=time-10*3600; utime($t,$t,$ARGV[0])' "$R/proj/target/debug/deps/lib.rlib"
+reap_idle_cargo_targets "$R" 24 0 > "$FIX/out.txt"
+check "a target last written 10h ago survives the normal 24h floor" "yes" "$(yn test -d "$R/proj/target")"
+reap_idle_cargo_targets "$R" "$(effective_target_idle_h 155 24 250 6)" 0 > "$FIX/out.txt"
+check "and is reaped at the tight 6h floor"            "no"  "$(yn test -e "$R/proj/target")"
+
 echo "13. the defaults the scheduler runs with"
 check "the amux shared target is protected by default"  "yes" "$(printf '%s' "$DEFAULT_KEEP" | grep -Eq "\.amux/rust-build-target(:|\$)" && echo yes || echo no)"
 check "the ao shared target is protected by default"    "yes" "$(printf '%s' "$DEFAULT_KEEP" | grep -Eq "\.ao/data/cargo-target-shared(:|\$)" && echo yes || echo no)"

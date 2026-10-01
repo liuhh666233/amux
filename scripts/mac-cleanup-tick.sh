@@ -132,6 +132,13 @@ FAMILY_AGE_H=${AMUX_CLEANUP_FAMILY_AGE_H:-12}
 USER_TMP=${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)}
 TARGET_ROOTS=${AMUX_CLEANUP_TARGET_ROOTS:-/private/tmp/claude-$(id -u)@6:/private/tmp@3:${USER_TMP%/}@3:$HOME/Documents/Codex@8:$HOME/Dev@8:$HOME/.amux/worktrees@6:$HOME/.ao/data/worktrees@8}
 TARGET_IDLE_H=${AMUX_CLEANUP_TARGET_IDLE_H:-24}
+# Under disk pressure the idle floor drops (DESKT-62). On 2026-10-01 the disk fell
+# from 574G to 155G in five days, and about 60G of build output sat 21-23h idle in
+# one lane's scratchpad, just inside the 24h floor, on every tick that measured it.
+# Build output is regenerable, every other guard still applies (open handles,
+# dry run, the shared targets), and being wrong costs one rebuild.
+TARGET_TIGHT_FREE_GB=${AMUX_CLEANUP_TARGET_TIGHT_FREE_GB:-250}
+TARGET_TIGHT_IDLE_H=${AMUX_CLEANUP_TARGET_TIGHT_IDLE_H:-6}
 TARGET_KEEP=${AMUX_CLEANUP_TARGET_KEEP:-$HOME/.amux/rust-build-target:$HOME/.ao/data/cargo-target-shared:${CARGO_TARGET_DIR:-}}
 TARGET_DEPTH=${AMUX_CLEANUP_TARGET_DEPTH:-8}
 TARGET_SCAN_S=${AMUX_CLEANUP_TARGET_SCAN_S:-90}
@@ -848,6 +855,12 @@ file_card() { # <state_file> <key> <title> <desc>
   case "$code" in 2??|ok) state_put "$st" "card_$key=$now"; echo "filed ($code)" ;; *) echo "card POST failed ($code)" ;; esac
 }
 
+# The idle floor for this tick: the normal one, or the tight one when free disk is
+# under the threshold. An unmeasured disk (-1) keeps the normal floor.
+effective_target_idle_h() { # <disk_free_gb> <normal_h> <tight_free_gb> <tight_h>
+  awk -v f="$1" -v n="$2" -v t="$3" -v h="$4" 'BEGIN{ if (f >= 0 && f < t && h < n) print h; else print n }'
+}
+
 [ "${AMUX_CLEANUP_LIB_ONLY:-0}" = "1" ] && return 0 2>/dev/null
 
 # ── measure ──────────────────────────────────────────────────────────────────
@@ -1033,7 +1046,12 @@ EOF
 # ── act: reap idle cargo target dirs ─────────────────────────────────────────
 # Before the snapshot arm on purpose: freed blocks stay pinned by a local snapshot
 # until it is thinned, so the reap comes first and the thin below sees the result.
-reap_idle_cargo_targets "$TARGET_ROOTS" "$TARGET_IDLE_H" "$DRY"
+tgt_free=$(df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2{ printf "%.1f", $4/1048576 }'); case "$tgt_free" in ''|*[!0-9.]*) tgt_free=-1 ;; esac
+tgt_idle=$(effective_target_idle_h "$tgt_free" "$TARGET_IDLE_H" "$TARGET_TIGHT_FREE_GB" "$TARGET_TIGHT_IDLE_H")
+if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then
+  echo "mac-cleanup: disk tight (${tgt_free}G free, under ${TARGET_TIGHT_FREE_GB}G): build output idle ${tgt_idle}h is reclaimable this tick, not ${TARGET_IDLE_H}h"
+fi
+reap_idle_cargo_targets "$TARGET_ROOTS" "$tgt_idle" "$DRY"
 reap_idle_worktrees "$WORKTREE_ROOTS" "$WORKTREE_IDLE_H" "$DRY"
 
 # ── act: thin APFS local snapshots when the disk is tight ────────────────────
