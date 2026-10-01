@@ -3862,12 +3862,31 @@ pub(crate) fn session_jsonl_path(name: &str) -> Option<PathBuf> {
         // mid-delivery could not tell whether a signal wake had landed: it was
         // filed "interrupted" and never shown. The id is a UUID, so any
         // project holding <id>.jsonl is this conversation.
-        if let Some(p) = find_conversation_jsonl(&claude_home().join("projects"), &conv_id) {
-            return Some(p);
+        // A miss is remembered for 10 minutes and logged once per
+        // conversation. Uncached, every status sweep re-scanned every project
+        // dir for each stopped lane whose transcript is gone and logged it:
+        // 4,061 WARN lines in 45 minutes from 26 lanes (2026-10-01).
+        static MISSES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+            std::sync::OnceLock::new();
+        let misses = MISSES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        let cached_miss = misses
+            .lock()
+            .map(|m| m.get(&conv_id).is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(600)))
+            .unwrap_or(false);
+        if !cached_miss {
+            if let Some(p) = find_conversation_jsonl(&claude_home().join("projects"), &conv_id) {
+                return Some(p);
+            }
+            let first = misses
+                .lock()
+                .map(|mut m| m.insert(conv_id.clone(), std::time::Instant::now()).is_none())
+                .unwrap_or(false);
+            if first {
+                tracing::warn!(session = %name, conv_id = %conv_id, measured = true, n_considered = 1,
+                    verdict = "transcript_conversation_not_found",
+                    "the lane's recorded conversation id has no transcript in any project; falling back to the project-dir guess");
+            }
         }
-        tracing::warn!(session = %name, conv_id = %conv_id, measured = true, n_considered = 1,
-            verdict = "transcript_conversation_not_found",
-            "the lane's recorded conversation id has no transcript in any project; falling back to the project-dir guess");
     }
     let project_dir = claude_home().join("projects").join(project_name(&wd));
     let Ok(rd) = std::fs::read_dir(&project_dir) else {
