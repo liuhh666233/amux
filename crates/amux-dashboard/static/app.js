@@ -4227,7 +4227,7 @@ setInterval(() => _interactions.expire(), 30000);
 const _interactionPoll = AmuxState.createInteractionPoller({interactions:_interactions,
   read:async (id, signal) => {
     const response = await fetch(API + '/api/interactions/' + encodeURIComponent(id), {signal});
-    if (!response.ok) throw new Error('Interaction status unavailable (' + response.status + ')');
+    if (!response.ok) throw Object.assign(new Error('Interaction status unavailable (' + response.status + ')'), {status:response.status});
     return response.json();
   },
   reconcile:_interactionReconcile,
@@ -4443,7 +4443,12 @@ window.fetch = async function(input, init) {
   }
   const url = new URL(String(input), location.origin);
   const method = (init?.method || 'GET').toUpperCase();
-  if (url.origin === location.origin && url.pathname.startsWith('/api/') && method === 'GET' && _stateFeedback.source()) {
+  // The dashboard's own bookkeeping reads (interaction status, effects, sync)
+  // are never part of a press. A status poll that fired during a tap became
+  // that tap's receipt, and its 404 toasted "<button>: Interaction not found"
+  // (Ethan, 2026-10-01: "keep getting error interaction not found").
+  const _internalRead = url.pathname.startsWith('/api/interactions/') || url.pathname === '/api/sync';
+  if (url.origin === location.origin && url.pathname.startsWith('/api/') && method === 'GET' && !_internalRead && _stateFeedback.source()) {
     const receipt = _interactionAccept(url.href, init);
     _interactionSet(receipt.id, {phase:'sending', feedback:{message:'Loading'}});
     try {
@@ -13625,7 +13630,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1204';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1205';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}

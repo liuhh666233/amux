@@ -336,3 +336,17 @@ test('shipped request stamping replaces correlation headers across replay wrappe
   assert.equal(headers.get('X-Amux-Command-Kind'),'board.patch');
   assert.equal(headers.get('Authorization'),'Bearer test');
 });
+test('a status 404 marks the receipt untracked and polling stops asking', async () => {
+  const ledger=createInteractions();
+  const r=ledger.accept({command:command(),request:{method:'PATCH'}});
+  await ledger.acknowledge(r.id,new Response('{}',{status:202,headers:{'content-type':'application/json'}}));
+  let reads=0; const verdicts=[];
+  const poll=createInteractionPoller({interactions:ledger,
+    read:async()=>{ reads++; throw Object.assign(new Error('Interaction status unavailable (404)'),{status:404}); },
+    reconcile:async()=>{}, diagnostic:d=>verdicts.push(d.verdict)});
+  for (let i=0;i<5;i++) await poll();
+  assert.equal(reads,1,'a 404 must not be asked again every tick');
+  assert.equal(ledger.get(r.id).status_untracked,true);
+  assert.ok(verdicts.includes('interaction_status_untracked'));
+  assert.ok(!verdicts.includes('interaction_status_poll_failed'));
+});

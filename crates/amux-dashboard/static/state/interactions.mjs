@@ -131,7 +131,11 @@ export function createInteractionPoller({interactions, read, reconcile, diagnost
     if (flight) return;
     const pending = interactions.recent(Infinity).filter(r => (!settled.has(r.phase) || effectsDue(r, now()))
       && r.command.kind !== 'filesystem.upload' && !['GET','HEAD'].includes(r.request?.method)
-      && !(r.phase === 'queued' && r.acknowledgement?.locally_queued));
+      && !(r.phase === 'queued' && r.acknowledgement?.locally_queued)
+      // The server answered 404 for this id: it keeps no record of the action,
+      // so asking again every 5s can never learn more (an iPhone polled 23 such
+      // receipts forever on 2026-10-01). Its own acknowledgement stays the record.
+      && !r.status_untracked);
     const eligible = new Set(pending.map(r => r.id));
     queue = queue.filter(id => eligible.has(id));
     const scheduled = new Set(queue);
@@ -164,6 +168,12 @@ export function createInteractionPoller({interactions, read, reconcile, diagnost
             why_unmeasured:server.why_unmeasured, feedback:server.feedback, acknowledgement});
           await withDeadline(() => reconcile(id), timeoutMs);
         } catch (error) {
+          if (error?.status === 404) {
+            interactions.update(id, {status_untracked:true,
+              why_unmeasured:'The server keeps no record of this action; its own response is the record'});
+            diagnostic({verdict:'interaction_status_untracked', interaction_id:id, measured:true, n_considered:1});
+            continue;
+          }
           diagnostic({verdict:'interaction_status_poll_failed', interaction_id:id,
             error:String(error), measured:true, n_considered:1, pending_count:pending.length});
         }
