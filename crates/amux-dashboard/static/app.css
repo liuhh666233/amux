@@ -7804,7 +7804,9 @@ body.light .bd-answer-head { color: #bc4c00; }
   #peek-messages-panel .pm-more { display: block; }
   #peek-messages-panel .pm-more summary { width: 44px; min-width: 44px; min-height: 44px; }
   /* The date picker moves into the menu too, so search gets the row. */
-  #peek-messages-search { min-width: 120px; }
+  /* The inline min-width:0 beat a plain rule; the count shrinks first instead. */
+  #peek-messages-search { min-width: 150px !important; }
+  #peek-messages-count { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #peek-messages-panel .pm-date-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; font-size: .8rem; color: var(--text); min-height: 44px; }
   #peek-messages-panel .pm-date-item input { font-size: .8rem; padding: 4px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
 }
