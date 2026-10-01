@@ -9819,6 +9819,18 @@ pub(crate) enum EmptySendPlan {
 }
 
 /// Takes the RAW capture: stripped of ANSI, a dim suggestion reads as typed.
+/// Text a provider draws on its own composer line that is not a prompt: Claude
+/// Code's queued-messages hint. The dashboard filters the same text
+/// (_draftEchoesSteering in app.js); empty send must too.
+pub(crate) fn is_provider_composer_hint(line: &str) -> bool {
+    let n = line.trim().trim_end_matches('.').to_ascii_lowercase();
+    let n = n.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        n.as_str(),
+        "press up to edit queued messages" | "press ↑ to edit queued messages"
+    )
+}
+
 pub(crate) fn empty_send_plan(raw_frame: &str) -> EmptySendPlan {
     match composer_state(raw_frame) {
         ComposerState::Typed(_) => EmptySendPlan::PressEnter,
@@ -12297,6 +12309,18 @@ async fn send_text_inner_bound(
                 let suggested = line
                     .trim_start_matches(['\u{276f}', '\u{203a}', '>', '\u{a0}', ' '])
                     .trim();
+                if is_provider_composer_hint(suggested) {
+                    // The provider's own hint sits on the ❯ line when messages
+                    // are queued. Submitting it typed "Press up to edit queued
+                    // messages" into amux-helper as an owner message
+                    // (2026-10-01 17:18, history row 72415).
+                    tracing::info!(
+                        session = %name, measured = true, n_considered = 1,
+                        verdict = "empty_send_ignored_provider_hint",
+                        "empty send: the composer shows the provider's hint, not a suggestion; nothing submitted"
+                    );
+                    return (true, "no suggestion found".into());
+                }
                 if !suggested.is_empty() {
                     // A NUMBERED OPTION IS A PICKER, NOT A SUGGESTION
                     // (AMUX-2952, Ethan live: "i keep sending enter when it
@@ -45834,6 +45858,9 @@ mod composer_state_tests {
     fn enter_submits_typed_text_by_key_and_a_dim_suggestion_by_text() {
         // Typed input: the key submits it; re-pasting would double it.
         assert_eq!(empty_send_plan(LIVE_TYPED), EmptySendPlan::PressEnter);
+        assert!(is_provider_composer_hint("Press up to edit queued messages"));
+        assert!(is_provider_composer_hint("  press up to edit queued messages. "));
+        assert!(!is_provider_composer_hint("retry the failing test"));
         // A dim suggestion: a bare Enter does nothing to it, so it is extracted.
         assert_eq!(empty_send_plan(LIVE_PLACEHOLDER), EmptySendPlan::ExtractSuggestion);
         // The control: stripped, the suggestion reads as typed. The plan must be
