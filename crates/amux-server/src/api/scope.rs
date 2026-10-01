@@ -1057,10 +1057,63 @@ async fn scope_write(
     // with. Say who this reaches and when, rather than a bare ok.
     if key == "rules" {
         let reached = crate::api::session_verbs::workers_in_scope(level, name);
-        body["takes_effect"] = json!("at each affected worker's next start (restart a running worker to apply now)");
+        let live = deliver_rules_live(state, level, name, &reached, actor).await;
+        body["takes_effect"] = json!(
+            "now for running workers (the composed rules were sent to each as a message) and in the system prompt from each worker's next start"
+        );
         body["affected_workers"] = json!(reached);
+        body["delivered_live"] = json!(live);
     }
     j(200, body)
+}
+
+/// Send each RUNNING, non-isolated worker in a rules write its newly composed
+/// rules once, as a message. Rules ride in the launch system prompt, so a
+/// change used to reach a running worker only at its next start, and
+/// restarting an orchestrator mid-run kills its background agents and
+/// monitors. Measured 2026-10-01: Ethan's rules for the gs12-platform group
+/// reached 14 running lanes and applied to none of them. Logged per worker as
+/// verdict=rules_delivered_live; returns who got it.
+async fn deliver_rules_live(
+    state: &AppState,
+    level: &str,
+    name: &str,
+    reached: &[String],
+    actor: &str,
+) -> Vec<String> {
+    let mut sent = Vec::new();
+    for w in reached {
+        if crate::api::session_verbs::session_is_isolated(w) {
+            continue;
+        }
+        let running = std::process::Command::new("tmux")
+            .args(["has-session", "-t", &format!("=amux-{w}")])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !running {
+            continue;
+        }
+        let block = crate::api::session_verbs::compose_rules_block(w);
+        if block.is_empty() {
+            continue;
+        }
+        let text = format!(
+            "[amux rules] Your binding rules changed at the {level} scope{}. They apply from now, \
+             and from your next start they are also in your system prompt.\n\n{block}",
+            if level == "global" { String::new() } else { format!(" ({name})") }
+        );
+        let sender = if actor.is_empty() { "owner" } else { actor };
+        match crate::api::session_verbs::steer_enqueue(state, w, &text, "rules-update", sender).await {
+            Ok(_) => {
+                tracing::info!(session = %w, level, scope = name, measured = true, n_considered = 1,
+                    verdict = "rules_delivered_live", "sent the changed rules to a running worker");
+                sent.push(w.clone());
+            }
+            Err(why) => tracing::warn!(session = %w, level, scope = name, why, measured = true, n_considered = 1,
+                verdict = "rules_not_delivered_live", "a running worker in scope could not be sent its changed rules"),
+        }
+    }
+    sent
 }
 
 // ---------------------------------------------------------------------------

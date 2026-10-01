@@ -27988,7 +27988,7 @@ pub(crate) async fn git_checkout_verb(name: &str, body: &Value) -> Response {
 /// - Rules go FIRST in the document. The python call site says why: "a
 ///   constraint buried under prose is a constraint the model has to go looking
 ///   for."
-fn compose_rules_block(name: &str) -> String {
+pub(crate) fn compose_rules_block(name: &str) -> String {
     let mut layers: Vec<(String, String)> = Vec::new();
     let mut take = |label: String, path: std::path::PathBuf| {
         if let Ok(t) = std::fs::read_to_string(&path) {
