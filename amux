@@ -6414,7 +6414,7 @@ USAGE
 }
 
 cmd_land() {
-  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--priority]
+  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority]
   #
   # Rebase this checkout onto the remote branch and push HEAD there, holding a
   # per-repo, per-branch lock for the whole fetch -> rebase -> push loop, so
@@ -6431,7 +6431,7 @@ cmd_land() {
   # block the queue forever. Waiters are served in arrival order (tickets in
   # <lock>.q).
   #
-  # Batching: the holder also lands up to AMUX_LAND_BATCH_MAX (default 3)
+  # Batching: the holder also lands up to --batch-max / AMUX_LAND_BATCH_MAX (default 6; 3 until 2026-10-01, raised when the queue ran 13 deep)
   # waiters queued behind it that share its repository, so N queued pushes cost
   # one pre-push gate run instead of N. Measured 2026-10-01 on Mixpeek main: a
   # median 17-minute hold, waits of 18 to 100 minutes, the queue 7 deep. Each
@@ -6450,7 +6450,7 @@ cmd_land() {
   #
   # Every wait, takeover, batch and outcome is a line in ~/.amux/logs/land.log;
   # a refused push keeps its full output under ~/.amux/logs/land/.
-  local remote=origin branch=main tries=8 max_hold=3600 batch=1 priority=0
+  local remote=origin branch=main tries=8 max_hold=3600 batch=1 priority=0 batch_max="${AMUX_LAND_BATCH_MAX:-6}"
   local orig_args=(${1+"$@"})
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -6460,8 +6460,9 @@ cmd_land() {
       --max-hold) max_hold="${2:?}"; shift 2 ;;
       --no-batch) batch=0; shift ;;
       --priority) priority=1; shift ;;
+      --batch-max) batch_max="${2:?}"; shift 2 ;;
       -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
-      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--priority]" ;;
+      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority]" ;;
     esac
   done
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "amux land: not inside a git checkout"
@@ -6573,7 +6574,7 @@ cmd_land() {
   # cannot take is told why and keeps its place.
   local stack_tip stack_in
   _land_stack() {
-    local max="${AMUX_LAND_BATCH_MAX:-3}" n=0 tk who wsha wcommon wbatch base c tree msg new t0 ok seen=" "
+    local max="$batch_max" n=0 tk who wsha wcommon wbatch base c tree msg new t0 ok seen=" "
     stack_tip="$1"; stack_in=""
     [ "$batch" = 1 ] && [ "$max" -gt 0 ] || return 0
     for tk in $(ls "$q" 2>/dev/null | sort); do
