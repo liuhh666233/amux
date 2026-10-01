@@ -27,8 +27,11 @@
 //! cursor it corresponds to from the history endpoint's `streaming`/`cursor`.
 //!
 //! Log signals: `verdict="chat_turn_completed"` / `"chat_turn_failed"` per
-//! turn with duration and the provider exit, and
-//! `verdict="chat_conversation_reset"` when a stale resume id is replaced.
+//! turn with duration and the provider exit,
+//! `verdict="chat_conversation_reset"` when a stale resume id is replaced, and
+//! across a server restart `chat_turn_reattached` (boot found a detached turn
+//! to follow), `chat_turn_resumed` (it finished and was recorded) or
+//! `chat_turn_lost` (nothing to re-attach to, with the reason).
 
 use super::chat_stream::{parse_cursor, Assembly, Journal, Parser, Replay};
 use super::session_verbs::{emit_event, env_path, home, meta_i64, meta_str, sh_quote, SendOrigin};
@@ -46,7 +49,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
 
 /// The `session_events.type` every chat message is stored under.
@@ -490,10 +493,7 @@ impl ExecutionAdapter for ChatAdapter {
         };
         let pid = *lane.pid.lock().unwrap();
         if let Some(pid) = pid {
-            // SAFETY: plain signal to a child this process spawned.
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
+            signal_turn(pid);
         }
         update_meta(name, &[("chat_running", json!(false))]);
         lane.publish(json!({"type": "stopped", "dropped_queued": dropped}));
@@ -747,6 +747,7 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
             // during an owner turn is delivered as the owner's (owner_relay_quote).
             ("chat_inflight_origin", json!(q.origin)),
             ("chat_inflight_text", json!(q.text.chars().take(300).collect::<String>())),
+            ("chat_inflight_started", json!(crate::config::now_f64())),
         ],
     );
     report_state(state, name, "active", "UserPromptSubmit", &turn_id).await;
@@ -783,8 +784,25 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
         );
         // The failed attempt's error must not linger in the live view.
         lane.publish(json!({"type": "retry", "turn_id": turn_id}));
+        TurnFiles::new(&turn_id, 0).remove();
         out = execute(state, name, &provider, &q.text, lane, &turn_id, true).await;
     }
+    let duration_ms = started.elapsed().as_millis() as u64;
+    finish_turn(state, name, lane, &turn_id, &provider, out, duration_ms).await;
+}
+
+/// Persist and report a finished turn: the one path a live turn and a turn
+/// re-attached after a restart share, so both record the reply the same way.
+async fn finish_turn(
+    state: &AppState,
+    name: &str,
+    lane: &Lane,
+    turn_id: &str,
+    provider: &str,
+    out: TurnOutcome,
+    duration_ms: u64,
+) {
+    let turn_id = turn_id.to_string();
     let interrupted = lane.interrupt.swap(false, Ordering::SeqCst);
     if !out.conversation_id.is_empty() {
         let turns = meta_i64(&load_meta(name), "chat_turns");
@@ -802,7 +820,6 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
             );
         }
     }
-    let duration_ms = started.elapsed().as_millis() as u64;
     let a = &out.asm;
     // An owner interrupt is a choice, not a failure: the partial reply is
     // kept and marked, and the worker goes idle rather than error.
@@ -836,10 +853,24 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
         SOURCE,
     )
     .await;
+    let stem = meta_str(&load_meta(name), "chat_inflight_files");
     update_meta(
         name,
-        &[("chat_inflight_turn", json!("")), ("chat_inflight_origin", json!("")), ("chat_inflight_text", json!(""))],
+        &[
+            ("chat_inflight_turn", json!("")),
+            ("chat_inflight_origin", json!("")),
+            ("chat_inflight_text", json!("")),
+            ("chat_inflight_files", json!("")),
+            ("chat_inflight_pgid", json!(0)),
+            ("chat_inflight_provider", json!("")),
+            ("chat_inflight_started", json!(0)),
+        ],
     );
+    // Removed only after the reply is persisted and the marker cleared, so a
+    // restart between the two can still re-attach and record it.
+    if !stem.is_empty() {
+        TurnFiles::from_stem(&stem).remove();
+    }
     lane.publish(json!({"type": "done", "turn_id": turn_id, "message": msg}));
     match &error {
         None => tracing::info!(session = %name, turn = %turn_id, duration_ms,
@@ -1066,122 +1097,279 @@ async fn execute(
         ),
         None => super::session_verbs::headless_turn_prelude(name, provider, &work_dir),
     };
-    let script = format!("{prelude}exec {} \"$@\"", sh_quote(&provider_bin(provider)));
-    let mut cmd = tokio::process::Command::new("bash");
-    cmd.arg("-c")
-        .arg(&script)
-        .arg("amux-chat")
-        .args(&args)
-        .current_dir(&work_dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            let why = format!("could not start {provider}: {e}");
-            lane.publish(json!({"type": "error", "turn_id": turn_id, "text": why}));
-            return TurnOutcome::failed(turn_id, why);
-        }
-    };
-    let mut out = TurnOutcome::new(turn_id);
-    let mut parser = Parser::new(provider);
-    *lane.pid.lock().unwrap() = child.id();
-    // A companion (the worker page's Chat tab) is told, every turn, the
-    // current state of the worker it talks about. The stored chat history
-    // keeps the owner's plain message; only the provider sees the context.
+    // The companion context is computed before the spawn: the prompt reaches
+    // the provider through the turn's stdin file.
     let companion_of = cfg.get_or("CC_COMPANION_OF", "").trim().to_string();
     let text: String = if companion_of.is_empty() {
         text.to_string()
     } else {
         companion_prompt(state, &companion_of, fresh, text).await
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(text.as_bytes()).await;
-        drop(stdin);
-    }
-    let mut stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        if let Some(e) = stderr.as_mut() {
-            let _ = e.read_to_string(&mut buf).await;
+    let files = TurnFiles::new(turn_id, u32::from(force_fresh));
+    let pgid = match spawn_detached(&files, &prelude, provider, &args, &work_dir, &text).await {
+        Ok(p) => p,
+        Err(why) => {
+            files.remove();
+            lane.publish(json!({"type": "error", "turn_id": turn_id, "text": why}));
+            return TurnOutcome::failed(turn_id, why);
         }
-        buf
-    });
-    if let Some(stdout) = child.stdout.take() {
-        let mut lines = BufReader::new(stdout).lines();
-        let mut last_output = std::time::Instant::now();
-        // Status heartbeat: the fleet list trusts an `active` native report
-        // for 120s only, and a long tool run or a long answer can go that
-        // long with no lifecycle edge, which read as idle mid-turn.
-        let mut beat = tokio::time::interval(HEARTBEAT);
-        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        beat.tick().await;
-        loop {
-            let next = tokio::select! {
-                // `next_line` is cancel-safe, so losing the race to a tick
-                // drops no bytes.
-                l = lines.next_line() => Ok(l),
-                _ = beat.tick() => Err(()),
-            };
-            let next = match next {
-                Err(()) => {
-                    if last_output.elapsed() >= TURN_IDLE_TIMEOUT {
-                        Err(())
-                    } else {
-                        report_state_with(state, name, "active", "Heartbeat", turn_id,
-                            json!({"silent_s": last_output.elapsed().as_secs()})).await;
-                        continue;
-                    }
+    };
+    // What a restarted server needs to re-attach to this turn (see recover).
+    update_meta(
+        name,
+        &[
+            ("chat_inflight_files", json!(files.stem.to_string_lossy())),
+            ("chat_inflight_pgid", json!(pgid)),
+            ("chat_inflight_provider", json!(provider)),
+        ],
+    );
+    follow_turn(state, name, provider, lane, turn_id, &files, pgid).await
+}
+
+// ---------------------------------------------------------------------------
+// DETACHED TURNS (Ethan, 2026-10-01, on "The amux server restarted during this
+// turn, so the reply was lost": "this needs to be better like terminal auto").
+//
+// A terminal worker survives a server restart because tmux owns its process.
+// A chat turn used to be a child of the server with its stdout on a pipe, so
+// the builder's exec() on every commit closed the pipe and killed the turn.
+// Now the provider runs in its own process group, detached from the server,
+// reading its prompt from and writing its output to files under
+// chat-state/turns/. The server only FOLLOWS those files, so a restarted
+// server re-attaches to the same turn and the reply is persisted exactly once
+// (dedupe key `chat:{turn}:assistant`).
+// ---------------------------------------------------------------------------
+
+fn turns_dir() -> std::path::PathBuf {
+    state_dir().join("turns")
+}
+
+/// One turn attempt's files: `<stem>.in` (prompt), `.out` (provider stdout),
+/// `.err`, and `.exit` (exit status, written last by the turn's own shell).
+struct TurnFiles {
+    stem: std::path::PathBuf,
+}
+
+impl TurnFiles {
+    fn new(turn_id: &str, attempt: u32) -> Self {
+        TurnFiles { stem: turns_dir().join(format!("{turn_id}.{attempt}")) }
+    }
+    fn from_stem(stem: &str) -> Self {
+        TurnFiles { stem: std::path::PathBuf::from(stem) }
+    }
+    fn path(&self, ext: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}.{ext}", self.stem.to_string_lossy()))
+    }
+    fn exit_code(&self) -> Option<i32> {
+        std::fs::read_to_string(self.path("exit")).ok().and_then(|t| t.trim().parse().ok())
+    }
+    fn remove(&self) {
+        for ext in ["in", "out", "err", "exit", "exit.tmp"] {
+            let _ = std::fs::remove_file(self.path(ext));
+        }
+    }
+}
+
+/// True while any process of the turn's group is alive.
+fn group_alive(pgid: u32) -> bool {
+    if pgid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks existence/permission.
+    let rc = unsafe { libc::kill(-(pgid as i32), 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// SIGTERM the turn's whole process group (the provider and its shell).
+fn signal_turn(pgid: u32) {
+    if pgid == 0 {
+        return;
+    }
+    // SAFETY: the group was created by this server for one chat turn.
+    unsafe {
+        if libc::kill(-(pgid as i32), libc::SIGTERM) != 0 {
+            libc::kill(pgid as i32, libc::SIGTERM);
+        }
+    }
+}
+
+/// Start the provider detached: a launcher shell in a NEW process group starts
+/// the turn in the background and exits at once, so the turn is reparented away
+/// from the server and survives its restart. Returns the process group id.
+async fn spawn_detached(
+    files: &TurnFiles,
+    prelude: &str,
+    provider: &str,
+    args: &[String],
+    work_dir: &str,
+    prompt: &str,
+) -> Result<u32, String> {
+    std::fs::create_dir_all(turns_dir()).map_err(|e| format!("could not start {provider}: {e}"))?;
+    std::fs::write(files.path("in"), prompt).map_err(|e| format!("could not start {provider}: {e}"))?;
+    let q = |ext: &str| sh_quote(&files.path(ext).to_string_lossy());
+    let inner = format!(
+        "{prelude}{} \"$@\"; ec=$?; printf '%s' \"$ec\" > {tmp} && mv {tmp} {exit}",
+        sh_quote(&provider_bin(provider)),
+        tmp = q("exit.tmp"),
+        exit = q("exit"),
+    );
+    let launcher = format!(
+        "bash -c {} amux-chat \"$@\" < {} > {} 2> {} & echo $!",
+        sh_quote(&inner),
+        q("in"),
+        q("out"),
+        q("err"),
+    );
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg("-c")
+        .arg(&launcher)
+        .arg("amux-chat-launch")
+        .args(args)
+        .current_dir(work_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        // The LAUNCHER is owned and short-lived; the turn it starts is not.
+        .kill_on_drop(true);
+    let child = cmd.spawn().map_err(|e| format!("could not start {provider}: {e}"))?;
+    let pgid = child.id().unwrap_or(0);
+    let done = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .map_err(|_| format!("could not start {provider}: the launcher did not return"))?
+        .map_err(|e| format!("could not start {provider}: {e}"))?;
+    if !done.status.success() || pgid == 0 {
+        return Err(format!(
+            "could not start {provider}: {}",
+            String::from_utf8_lossy(&done.stderr).trim()
+        ));
+    }
+    Ok(pgid)
+}
+
+/// Follow a running (or already finished) detached turn from its files:
+/// parse its output into the same events and assembly a piped turn produced,
+/// report heartbeats and tool lifecycle, and enforce the idle timeout.
+async fn follow_turn(
+    state: &AppState,
+    name: &str,
+    provider: &str,
+    lane: &Lane,
+    turn_id: &str,
+    files: &TurnFiles,
+    pgid: u32,
+) -> TurnOutcome {
+    let mut out = TurnOutcome::new(turn_id);
+    let mut parser = Parser::new(provider);
+    *lane.pid.lock().unwrap() = Some(pgid);
+    // The background shell creates `.out` a moment after the launcher returns.
+    let mut file = None;
+    for _ in 0..100 {
+        if let Ok(f) = tokio::fs::File::open(files.path("out")).await {
+            file = Some(f);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let Some(file) = file else {
+        *lane.pid.lock().unwrap() = None;
+        signal_turn(pgid);
+        let why = format!("{provider} did not start (no output file)");
+        lane.publish(json!({"type": "error", "turn_id": turn_id, "text": why}));
+        out.asm.error = Some(why);
+        return out;
+    };
+    let mut reader = BufReader::new(file);
+    let mut pending = String::new();
+    let mut last_output = std::time::Instant::now();
+    let mut beat = tokio::time::interval(HEARTBEAT);
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    beat.tick().await;
+    let mut poll = tokio::time::interval(Duration::from_millis(100));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Draining: the turn has ended; read what is left, then stop.
+    let mut draining = false;
+    let mut lost = false;
+    loop {
+        let mut buf = String::new();
+        match reader.read_line(&mut buf).await {
+            Ok(0) => {
+                if draining {
+                    break;
                 }
-                Ok(l) => Ok(l),
-            };
-            match next {
-                Ok(Ok(Some(line))) => {
-                    last_output = std::time::Instant::now();
-                    for mut ev in parser.line(&line) {
-                        ev["turn_id"] = json!(turn_id);
-                        out.asm.apply(&ev);
-                        // Hooks-equivalent tool lifecycle, so the fleet sees a
-                        // chat worker's tool activity the way a terminal
-                        // worker's PreToolUse/PostToolUse hooks report it.
-                        match ev["type"].as_str() {
-                            Some("tool_start") => {
-                                report_state_with(state, name, "active", "PreToolUse", turn_id,
-                                    json!({"tool_name": ev["name"]})).await;
-                            }
-                            Some("tool_result") => {
-                                let tool = out.asm.tools.iter().rev()
-                                    .find(|t| Some(t.id.as_str()) == ev["id"].as_str())
-                                    .map(|t| t.name.clone()).unwrap_or_default();
-                                report_state_with(state, name, "active", "PostToolUse", turn_id,
-                                    json!({"tool_name": tool, "is_error": ev["is_error"]})).await;
-                            }
-                            _ => {}
-                        }
-                        lane.publish(ev);
-                    }
+                if files.path("exit").exists() {
+                    draining = true;
+                    continue;
                 }
-                Ok(_) => break,
-                Err(_) => {
-                    let _ = child.start_kill();
+                if !group_alive(pgid) {
+                    // Ended without writing its exit status: killed outright.
+                    // One more pass picks up anything flushed before it died.
+                    lost = true;
+                    draining = true;
+                    continue;
+                }
+                if last_output.elapsed() >= TURN_IDLE_TIMEOUT {
+                    signal_turn(pgid);
                     let why = format!("no output for {}s; turn killed", TURN_IDLE_TIMEOUT.as_secs());
                     lane.publish(json!({"type": "error", "turn_id": turn_id, "text": why}));
                     out.asm.error = Some(why);
                     break;
                 }
+                tokio::select! {
+                    _ = poll.tick() => {}
+                    _ = beat.tick() => {
+                        report_state_with(state, name, "active", "Heartbeat", turn_id,
+                            json!({"silent_s": last_output.elapsed().as_secs()})).await;
+                    }
+                }
+            }
+            Ok(_) => {
+                pending.push_str(&buf);
+                if !pending.ends_with('\n') {
+                    // A partial line: the rest is still being written.
+                    continue;
+                }
+                let line = std::mem::take(&mut pending);
+                last_output = std::time::Instant::now();
+                for mut ev in parser.line(line.trim_end_matches(['\n', '\r'])) {
+                    ev["turn_id"] = json!(turn_id);
+                    out.asm.apply(&ev);
+                    // Hooks-equivalent tool lifecycle, so the fleet sees a
+                    // chat worker's tool activity the way a terminal
+                    // worker's PreToolUse/PostToolUse hooks report it.
+                    match ev["type"].as_str() {
+                        Some("tool_start") => {
+                            report_state_with(state, name, "active", "PreToolUse", turn_id,
+                                json!({"tool_name": ev["name"]})).await;
+                        }
+                        Some("tool_result") => {
+                            let tool = out.asm.tools.iter().rev()
+                                .find(|t| Some(t.id.as_str()) == ev["id"].as_str())
+                                .map(|t| t.name.clone()).unwrap_or_default();
+                            report_state_with(state, name, "active", "PostToolUse", turn_id,
+                                json!({"tool_name": tool, "is_error": ev["is_error"]})).await;
+                        }
+                        _ => {}
+                    }
+                    lane.publish(ev);
+                }
+            }
+            Err(e) => {
+                let why = format!("could not read the turn's output: {e}");
+                lane.publish(json!({"type": "error", "turn_id": turn_id, "text": why}));
+                out.asm.error = Some(why);
+                break;
             }
         }
     }
-    let status = child.wait().await.ok();
     *lane.pid.lock().unwrap() = None;
     out.conversation_id = parser.conversation_id.clone();
     out.model = parser.model.clone();
-    let err_text = stderr_task.await.unwrap_or_default();
+    let err_text = std::fs::read_to_string(files.path("err")).unwrap_or_default();
+    let code = files.exit_code();
     if lane.interrupt.load(Ordering::SeqCst) {
         lane.publish(json!({"type": "interrupted", "turn_id": turn_id}));
-    } else if out.asm.error.is_none() && !status.is_some_and(|s| s.success()) {
+    } else if out.asm.error.is_none() && code != Some(0) {
         let tail: String = err_text
             .lines()
             .rev()
@@ -1191,10 +1379,12 @@ async fn execute(
             .rev()
             .collect::<Vec<_>>()
             .join("\n");
-        let why = if tail.trim().is_empty() {
-            format!("{provider} exited with {:?}", status.and_then(|s| s.code()))
-        } else {
+        let why = if !tail.trim().is_empty() {
             tail
+        } else if lost {
+            format!("{provider} ended without reporting an exit status")
+        } else {
+            format!("{provider} exited with {code:?}")
         };
         lane.publish(json!({"type": "error", "turn_id": turn_id, "text": why}));
         out.asm.error = Some(why);
@@ -1202,12 +1392,43 @@ async fn execute(
     out
 }
 
+/// Re-attach a turn a previous server process started (see DETACHED TURNS):
+/// follow its files to the end, then persist the reply exactly as a live turn
+/// would. Runs before the lane's queue drains.
+async fn reattach_turn(state: &AppState, name: &str, turn_id: &str, files: TurnFiles, pgid: u32, started_at: f64) {
+    let lane = lane(name);
+    let meta = load_meta(name);
+    let provider = {
+        let p = meta_str(&meta, "chat_inflight_provider");
+        if p.is_empty() { provider_of(name) } else { p }
+    };
+    lane.interrupt.store(false, Ordering::SeqCst);
+    lane.publish(json!({
+        "type": "user", "turn_id": turn_id, "text": meta_str(&meta, "chat_inflight_text"),
+        "origin": meta_str(&meta, "chat_inflight_origin"), "ts": started_at, "waiting": 0, "resumed": true,
+    }));
+    report_state(state, name, "active", "UserPromptSubmit", turn_id).await;
+    let out = follow_turn(state, name, &provider, &lane, turn_id, &files, pgid).await;
+    let duration_ms = if started_at > 0.0 {
+        ((crate::config::now_f64() - started_at).max(0.0) * 1000.0) as u64
+    } else {
+        0
+    };
+    let ok = out.asm.error.is_none();
+    finish_turn(state, name, &lane, turn_id, &provider, out, duration_ms).await;
+    tracing::info!(session = %name, turn = %turn_id, duration_ms, ok, measured = true, n_considered = 1,
+        verdict = "chat_turn_resumed", "a chat turn that outlived a server restart finished and was recorded");
+}
+
 /// Boot recovery for one chat worker (see the durability note above).
 ///
 /// A turn marked in flight by a previous process is NOT re-run: its tools may
-/// already have acted. It gets an assistant message carrying an explicit
-/// error, so the transcript says what happened instead of ending on an
-/// unanswered question. Queued messages were never started, so they run.
+/// already have acted. A DETACHED turn whose files exist is re-attached and
+/// followed to its end, so its reply is recorded as if nothing happened (see
+/// DETACHED TURNS). Only a turn with nothing to re-attach to gets an assistant
+/// message carrying an explicit error, so the transcript says what happened
+/// instead of ending on an unanswered question. Queued messages were never
+/// started, so they run (after a re-attached turn).
 /// Returns (interrupted turns reported, queued messages resumed).
 pub async fn recover(state: &AppState, name: &str) -> (usize, usize) {
     // Recovery runs a few seconds after boot, and a message sent in that
@@ -1225,7 +1446,23 @@ pub async fn recover(state: &AppState, name: &str) -> (usize, usize) {
     let meta = load_meta(name);
     let mut interrupted = 0;
     let turn = meta_str(&meta, "chat_inflight_turn");
-    if !turn.is_empty() {
+    let stem = meta_str(&meta, "chat_inflight_files");
+    let pgid = u32::try_from(meta_i64(&meta, "chat_inflight_pgid")).unwrap_or(0);
+    // A detached turn whose files exist outlived the restart (or finished
+    // during it): follow it to the end instead of reporting it lost.
+    let reattach = !turn.is_empty()
+        && !stem.is_empty()
+        && TurnFiles::from_stem(&stem).path("out").exists();
+    if reattach {
+        let files = TurnFiles::from_stem(&stem);
+        tracing::warn!(session = %name, turn = %turn, pgid, alive = group_alive(pgid),
+            finished = files.path("exit").exists(), measured = true, n_considered = 1,
+            verdict = "chat_turn_reattached",
+            "a chat turn outlived a server restart; re-attaching to it instead of reporting it lost");
+    } else if !turn.is_empty() {
+        let reason = if stem.is_empty() { "no_turn_files_recorded" } else { "turn_output_missing" };
+        tracing::warn!(session = %name, turn = %turn, reason, measured = true, n_considered = 1,
+            verdict = "chat_turn_lost", "a chat turn could not be re-attached after a restart");
         let msg = json!({
             "role": "assistant",
             "text": "",
@@ -1249,6 +1486,27 @@ pub async fn recover(state: &AppState, name: &str) -> (usize, usize) {
     }
     let pending = load_queue(name);
     let resumed = pending.len();
+    if reattach {
+        // The re-attached turn finishes first, then the queue drains behind
+        // it, in order, exactly as it would have without the restart.
+        let lane = lane(name);
+        if resumed > 0 && running(name) {
+            let mut q = lane.queue.lock().unwrap();
+            for item in pending.into_iter().rev() {
+                q.push_front(item);
+            }
+            persist_queue(name, &q);
+        }
+        lane.busy.store(true, Ordering::SeqCst);
+        let (st, n) = (state.clone(), name.to_string());
+        let started_at = meta.get("chat_inflight_started").and_then(Value::as_f64).unwrap_or(0.0);
+        let files = TurnFiles::from_stem(&stem);
+        tokio::spawn(async move {
+            reattach_turn(&st, &n, &turn, files, pgid, started_at).await;
+            pump(st, n).await;
+        });
+        return (0, if running(name) { resumed } else { 0 });
+    }
     if resumed > 0 {
         if running(name) {
             let lane = lane(name);
@@ -1644,10 +1902,7 @@ fn interrupt_turn(name: &str) -> (bool, String) {
         return (false, "no turn running".into());
     };
     lane.interrupt.store(true, Ordering::SeqCst);
-    // SAFETY: plain signal to a child this process spawned.
-    unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
-    }
+    signal_turn(pid);
     tracing::info!(session = %name, pid, measured = true, n_considered = 1,
         verdict = "chat_turn_interrupt_requested", "owner interrupted a chat turn");
     (true, "turn interrupted".into())
