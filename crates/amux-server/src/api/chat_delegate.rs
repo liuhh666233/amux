@@ -134,6 +134,12 @@ pub(crate) fn provider_command(
                 format!("{max_usd:.2}"),
                 // Nothing this job does is saved as a conversation.
                 "--no-session-persistence".into(),
+                // The harness hooks in ~/.claude/settings.json report a
+                // WORKER's status and guard a worker's commits; a read-only
+                // job has neither, and their POSTs were refused by the API
+                // guard as delegate writes (seen live 2026-10-01).
+                "--settings".into(),
+                "{\"disableAllHooks\":true}".into(),
             ];
             if mode == Mode::Fork {
                 let id = fork_from.filter(|s| !s.is_empty()).ok_or("fork mode needs the worker's conversation id")?;
@@ -755,6 +761,7 @@ mod tests {
         assert!(!allow.contains("Bash(amux send") && !allow.split(',').any(|t| t == "Bash" || t == "Bash(amux:*)"), "{allow}");
         assert!(!s.contains("dangerously"), "{s}");
         assert!(s.contains("--max-budget-usd 0.50") && s.contains("--no-session-persistence"), "{s}");
+        assert!(s.contains("--settings {\"disableAllHooks\":true}"), "worker hooks do not run in a delegate: {s}");
         assert!(!s.contains("--resume"), "{s}");
     }
 
