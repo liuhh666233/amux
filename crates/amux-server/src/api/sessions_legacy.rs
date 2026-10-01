@@ -1690,6 +1690,20 @@ impl FleetSignals {
             || (self.agent_running(&format!("amux-{name}")) && !report_current)
     }
 
+    /// A current, applying `idle` report: the main turn ended and nothing newer
+    /// has superseded it.
+    fn idle_report_current(&self, name: &str) -> bool {
+        self.reports.get(name).is_some_and(|r| {
+            r["state"].as_str() == Some("idle")
+                && report_applies(
+                    "idle",
+                    r["ts"].as_f64().unwrap_or(0.0),
+                    self.started.get(name).copied().unwrap_or(0.0),
+                    self.now,
+                )
+        })
+    }
+
     /// Raw pane for a lane whose evidence is admissible: recently painted and
     /// non-empty.
     ///
@@ -1927,7 +1941,13 @@ impl FleetSignals {
             .running
             .iter()
             .filter_map(|t| t.strip_prefix("amux-"))
-            .filter(|n| self.pane_probe_candidate(n))
+            // Also an idle-reported lane: its footer is the only place a
+            // background shell shows, and a static footer never repaints, so
+            // the paint-recency gate alone never captured it (2026-09-30: three
+            // gs12 workers read `idle` for an hour with pushes running). The
+            // capture is used for that footer marker only; pane_of still
+            // applies the freshness gate to every other pane-based claim.
+            .filter(|n| self.pane_probe_candidate(n) || self.idle_report_current(n))
             .map(String::from)
             .collect();
         for chunk in names.chunks(12) {
@@ -2372,8 +2392,17 @@ impl FleetSignals {
         // waiting for live agents; Codex explicitly says its background
         // terminal is running. Both describe the lane AFTER the parent prompt
         // became idle, so a fresh parent report cannot contradict them.
+        // The footer marker is part of the frame just captured, so it is
+        // current by construction: an idle-reported lane is read here even when
+        // it has not repainted, and only for this provider-chrome marker.
         let provider_background_working = self
             .pane_of(name)
+            .or_else(|| {
+                self.idle_report_current(name)
+                    .then(|| self.panes.get(name).map(String::as_str))
+                    .flatten()
+                    .filter(|raw| !raw.trim().is_empty())
+            })
             .is_some_and(crate::api::session_verbs::provider_background_working);
         ex.insert(
             "provider_background_working".into(),
@@ -9041,6 +9070,32 @@ Checked, nothing of mine was at risk, no action needed from you.
         );
         s.activity.insert("amux-x".into(), (s.now - 59.0) as i64);
         assert!(s.pane_says_working("x"), "…and one that painted 59s ago is");
+    }
+
+    /// 2026-09-30, gs12 workers: a lane whose turn ended (current idle report)
+    /// and whose footer shows live background shells read `idle` for an hour,
+    /// because a static footer never repaints and the pane was never read. The
+    /// footer marker is now read for idle-reported lanes; the stale-pane rule
+    /// for every other claim is untouched.
+    #[test]
+    fn an_idle_reported_lane_with_background_shells_is_not_idle() {
+        let mut s = signals();
+        s.running.insert("amux-x".into());
+        s.started.insert("x".into(), s.now - 5_000.0);
+        s.activity.insert("amux-x".into(), (s.now - 6_000.0) as i64);
+        s.reports = serde_json::json!({"x": {"state": "idle", "ts": s.now - 300.0, "event": "Stop"}});
+        s.panes.insert(
+            "x".into(),
+            "earlier output\n\u{276f}\u{a0}\n\u{2500}\u{2500}\u{2500}\n  \u{23f5}\u{23f5} bypass permissions on \u{b7} 3 shells \u{b7} \u{2190} 5 agents\n".into(),
+        );
+        assert!(!s.pane_probe_candidate("x"), "premise: a quiet lane is not a paint-recency candidate");
+        assert!(!s.pane_says_working("x"), "the stale-pane rule still holds for spinner and bar evidence");
+        let (status, ex) = s.derive_status_explain("x", true);
+        assert_eq!(ex["provider_background_working"], serde_json::json!(true), "{ex}");
+        assert_ne!(status, "idle", "background shells are work: {ex}");
+        // Without the marker the lane stays idle: this is the control.
+        s.panes.insert("x".into(), "earlier output\n\u{276f}\u{a0}\n  \u{23f5}\u{23f5} bypass permissions on\n".into());
+        assert_eq!(s.derive_status_explain("x", true).0, "idle");
     }
 
     /// The capture predicate and the belief predicate are the same predicate.
