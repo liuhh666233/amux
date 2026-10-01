@@ -1,10 +1,56 @@
-const CACHE = 'amux-v0.9.1199';
+const CACHE = 'amux-v0.9.1200';
 const SHELL_URLS = ['/', '/state/kernel.js', '/vendor/md.js', '/state/feedback.css', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
-// Install: pre-cache entire app shell
+// Every CDN library and stylesheet index.html loads. Pre-cached one by one at
+// install so the WHOLE app works offline, including features not opened yet
+// (2026-10-01: an offline start with the browser HTTP cache evicted had no
+// editor, charts, workspace grid, terminal, map, calendar or drag-sort, because
+// only 3 of 23 CDN files were ever in this cache). Each needs
+// crossorigin="anonymous" in index.html so the response is CORS, not opaque;
+// tests/dashboard_assets.rs keeps the two lists in step.
+const CDN_URLS = [
+  'https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack.min.css',
+  'https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css',
+  'https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown-common-style.css',
+  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+  'https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css',
+  'https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css',
+  'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css',
+  'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css',
+  'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js',
+  'https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js',
+  'https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.js',
+  'https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown.js',
+  'https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js',
+  'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+  'https://cdn.jsdelivr.net/npm/motion@11.11.17/dist/motion.min.js',
+  'https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js',
+  'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js',
+  'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js',
+  'https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js',
+  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+  'https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js',
+  'https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js',
+];
+
+// Install: pre-cache the app shell (atomic), then the CDN libraries (best
+// effort: a CDN hiccup must not block the install, so a miss is counted and
+// reported instead).
 self.addEventListener('install', e => {
   e.waitUntil(
-    caches.open(CACHE).then(c => c.addAll(SHELL_URLS))
+    caches.open(CACHE).then(async c => {
+      await c.addAll(SHELL_URLS);
+      const results = await Promise.allSettled(CDN_URLS.map(u => c.add(new Request(u, { mode: 'cors' }))));
+      const failed = CDN_URLS.filter((u, i) => results[i].status !== 'fulfilled');
+      // Log signal: a sweep can see an install that left libraries uncached.
+      try {
+        await fetch('/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'sw-precache', cache: CACHE, cdn_total: CDN_URLS.length,
+            cdn_cached: CDN_URLS.length - failed.length, cdn_failed: failed.slice(0, 5),
+            verdict: failed.length ? 'cdn_precache_partial' : 'cdn_precache_complete', measured: true }) });
+      } catch (_) {}
+    })
   );
   self.skipWaiting();
 });

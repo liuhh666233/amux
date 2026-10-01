@@ -2293,3 +2293,28 @@ fn the_schedule_dialog_keeps_its_action_row_inside_the_box() {
     let depth = before.matches("<div").count() as i64 - before.matches("</div>").count() as i64;
     assert_eq!(depth, 3, "the action row opens at depth {depth}; it must be a child of the box (3)");
 }
+
+/// OFFLINE: every CDN file index.html loads is CORS-requested and pre-cached by
+/// the service worker. Without `crossorigin` the response is opaque, sw.js
+/// declines to cache it, and an offline start with the browser HTTP cache
+/// evicted lost the editor, charts, terminal, map and calendar (2026-10-01).
+#[test]
+fn every_cdn_asset_is_cors_and_precached_for_offline() {
+    let html = asset("index.html");
+    let sw = asset("sw.js");
+    let mut seen = 0;
+    let mut problems = Vec::new();
+    for tag in html.split('<').filter(|t| t.starts_with("script ") || t.starts_with("link ")) {
+        let tag = tag.split('>').next().unwrap_or("");
+        let Some(url) = ["src=\"", "href=\""].iter().find_map(|k| {
+            tag.find(k).map(|i| &tag[i + k.len()..]).and_then(|r| r.split('"').next())
+        }) else { continue };
+        if !["https://cdn.jsdelivr.net/", "https://unpkg.com/", "https://cdnjs.cloudflare.com/"]
+            .iter().any(|h| url.starts_with(h)) { continue }
+        seen += 1;
+        if !tag.contains("crossorigin") { problems.push(format!("no crossorigin: {url}")); }
+        if !sw.contains(&format!("'{url}'")) { problems.push(format!("not in sw.js CDN_URLS: {url}")); }
+    }
+    assert!(seen >= 10, "found only {seen} CDN tags in index.html; the scan is broken, not the page");
+    assert!(problems.is_empty(), "offline would lose these libraries:\n{}", problems.join("\n"));
+}
