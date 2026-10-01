@@ -6352,7 +6352,8 @@ cmd_land() {
   # The lock is a directory under ~/.amux/locks (mkdir is atomic; macOS has no
   # flock). A lock whose holder pid is gone, or that has been held longer than
   # --max-hold seconds, is taken over with a warning, so a hung push cannot
-  # block the queue forever. Every wait, takeover and outcome is a line in
+  # block the queue forever. Waiters are served in arrival order (tickets in
+  # <lock>.q). Every wait, takeover and outcome is a line in
   # ~/.amux/logs/land.log.
   local remote=origin branch=main tries=8 max_hold=3600
   while [ $# -gt 0 ]; do
@@ -6361,7 +6362,7 @@ cmd_land() {
       --branch) branch="${2:?}"; shift 2 ;;
       --tries) tries="${2:?}"; shift 2 ;;
       --max-hold) max_hold="${2:?}"; shift 2 ;;
-      -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | sed -n '2,17p' | sed 's/^  # \{0,1\}//'; return 0 ;;
+      -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
       *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600]" ;;
     esac
   done
@@ -6374,17 +6375,41 @@ cmd_land() {
   me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}"
   mkdir -p "$HOME/.amux/locks" "$HOME/.amux/logs"
   _land_log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "$*" >> "$log"; echo "amux land: $*" >&2; }
-  local waited=0 announced=0
-  while ! mkdir "$lock" 2>/dev/null; do
+  # FIFO (gs12-compute, 2026-10-01): with only the mkdir lock, whichever waiter
+  # polled first after a release won, and one waited 6030s behind later
+  # arrivals. Each waiter now drops a ticket named by its arrival time and pid
+  # into "$lock.q"; only the oldest live ticket may take the lock. A ticket
+  # whose pid is gone is removed by whoever sees it.
+  local q="$lock.q" ticket waited=0 announced=0 head pos t
+  mkdir -p "$q"
+  ticket="$q/$(printf '%012d' "$(date +%s)")-$$"
+  echo "$me" > "$ticket"
+  trap 'rm -f -- "'"$ticket"'"' EXIT INT TERM
+  while :; do
+    for t in "$q"/*; do
+      [ -e "$t" ] || continue
+      kill -0 "${t##*-}" 2>/dev/null || { _land_log "dropped the ticket of a waiter that exited ($(cat "$t" 2>/dev/null || echo ?), pid ${t##*-})"; rm -f -- "$t"; }
+    done
+    head="$(ls "$q" | sort | head -1)"
+    if [ "$head" = "${ticket##*/}" ] && mkdir "$lock" 2>/dev/null; then break; fi
     local hpid hsince hwho
-    hpid="$(cat "$lock/pid" 2>/dev/null)"; hsince="$(cat "$lock/since" 2>/dev/null || echo 0)"; hwho="$(cat "$lock/who" 2>/dev/null)"
-    if { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ $(( $(date +%s) - ${hsince:-0} )) -gt "$max_hold" ]; then
+    hpid="$(cat "$lock/pid" 2>/dev/null || true)"; hsince="$(cat "$lock/since" 2>/dev/null || echo 0)"; hwho="$(cat "$lock/who" 2>/dev/null || true)"
+    if [ -d "$lock" ] && { { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ $(( $(date +%s) - ${hsince:-0} )) -gt "$max_hold" ]; }; then
       _land_log "taking over a stale lock on $branch (holder ${hwho:-?} pid ${hpid:-?}, since $hsince)"
       rm -rf -- "${lock:?}"; continue
     fi
-    if [ "$announced" = 0 ]; then _land_log "waiting: $branch is being landed by ${hwho:-?} (pid ${hpid:-?})"; announced=1; fi
+    if [ "$announced" = 0 ]; then
+      pos="$(ls "$q" | sort | grep -n -x -F "${ticket##*/}" | cut -d: -f1)"
+      if [ -n "$hwho" ]; then
+        _land_log "waiting: $branch is being landed by $hwho (pid ${hpid:-?}); queue position ${pos:-?}"
+      else
+        _land_log "waiting: queue position ${pos:-?} on $branch, behind $(cat "$q/$head" 2>/dev/null || echo ?)"
+      fi
+      announced=1
+    fi
     sleep 5; waited=$((waited + 5))
   done
+  rm -f -- "$ticket"
   echo $$ > "$lock/pid"; date +%s > "$lock/since"; echo "$me" > "$lock/who"
   trap 'rm -rf -- "'"$lock"'"' EXIT INT TERM
   [ "$waited" -gt 0 ] && _land_log "acquired $branch after waiting ${waited}s"
