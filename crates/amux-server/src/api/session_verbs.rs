@@ -21452,6 +21452,43 @@ async fn unclaim_steering_row(store: &crate::db::SharedStore, id: &str) {
         .await;
 }
 
+/// Deliver a just-queued message NOW when its lane is already at a turn
+/// boundary.
+///
+/// The idle hook drains a lane when it REPORTS idle, and the timer drains every
+/// lane on each pass. A lane that is ALREADY idle when the message arrives
+/// sends no new idle report, so the message waited for the timer, and one timer
+/// pass over a busy fleet takes ~12s (steer-deliver last_tick_ms 12598 on
+/// 2026-10-01). MSG-72091 sat queued 48s on an idle, freshly started worker;
+/// a probe worker idle by its own hook report waited 24s and 37s. This asks
+/// the one question for the one lane, and when the answer is yes takes the same
+/// claimed delivery path the idle hook uses, so the timer and this can never
+/// both type the row (`send_claimed_steering` claims before it types).
+pub(crate) async fn steer_try_deliver_now(state: &AppState, session: &str, id: &str) -> bool {
+    let at_boundary = steer_lane_at_boundary(state, session).await;
+    let delivered = at_boundary && steer_deliver_for_session(state, session).await;
+    if delivered {
+        tracing::info!(session, delivery_id = id, measured = true, n_considered = 1,
+            verdict = "steer_delivered_immediately",
+            "queued message delivered at once: the lane was already at a turn boundary");
+    } else {
+        let reason = if !at_boundary {
+            "not-at-turn-boundary".to_string()
+        } else {
+            steer_skips()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(session)
+                .map(|(_, reason, _)| reason.clone())
+                .unwrap_or_else(|| "boundary seen, no row delivered".to_string())
+        };
+        tracing::info!(session, delivery_id = id, measured = true, n_considered = 1,
+            reason = %reason, verdict = "steer_waited_for_boundary",
+            "queued message waits for the lane's next turn boundary");
+    }
+    delivered
+}
+
 /// Called reactively when a session reports "idle" — the report IS the turn
 /// boundary, so there is no need to re-check `steer_lane_at_boundary` (the
 /// caller just wrote "idle" into session_reports). This closes the race where
@@ -24734,6 +24771,15 @@ pub(crate) async fn steer_mutate(
             link_queued_message(state, name, row_id, &msg_id).await;
             // Autotask/labelling: Python's model-call feature — gap named in
             // the module doc.
+        }
+        // AN IDLE LANE IS A BOUNDARY NOW, not at the next timer pass. Off the
+        // request path: the response still says "queued", and the delivery
+        // records itself exactly as an idle-hook drain does.
+        if blocked.is_none() && delay_s == 0 {
+            let (st, lane, id) = (state.clone(), name.to_string(), msg_id.clone());
+            crate::db::interactions::spawn(async move {
+                steer_try_deliver_now(&st, &lane, &id).await;
+            });
         }
         return j200(json!({
             "ok": true,
@@ -38587,6 +38633,59 @@ mod tests {
             waiting_in_queue, 1,
             "a row nobody has claimed must not be reconciled away"
         );
+    }
+
+    /// MSG-72091 (2026-10-01): a message queued to an idle worker waited for
+    /// the slow timer pass. The POST half of `steer_mutate` must hand an
+    /// unblocked, undelayed row to `steer_try_deliver_now` at enqueue, and
+    /// that function must take the CLAIMED idle-hook path, never type itself.
+    #[test]
+    fn a_queued_message_to_an_idle_lane_is_tried_at_once_through_the_claimed_path() {
+        let src = include_str!("session_verbs.rs");
+        let body = |start: &str| {
+            let at = src.find(start).expect("function present");
+            let rest = &src[at..];
+            &rest[..rest[1..].find("\npub").map(|i| i + 1).unwrap_or(rest.len())]
+        };
+        let mutate = body("pub(crate) async fn steer_mutate(");
+        assert!(
+            mutate.contains("if blocked.is_none() && delay_s == 0 {")
+                && mutate.contains("steer_try_deliver_now(&st, &lane, &id).await;"),
+            "an enqueue must try the lane's boundary at once, not wait for the timer pass"
+        );
+        let now = body("pub(crate) async fn steer_try_deliver_now(");
+        assert!(now.contains("steer_lane_at_boundary(state, session).await"), "boundary checked first");
+        assert!(now.contains("steer_deliver_for_session(state, session).await"), "claimed idle-hook path");
+        assert!(!now.contains("send_text_inner"), "never types outside the claim");
+        assert!(now.contains("steer_delivered_immediately") && now.contains("steer_waited_for_boundary"),
+            "both outcomes say what happened");
+    }
+
+    /// The negative leg, behaviourally: with no live lane there is no boundary,
+    /// so the try leaves the row queued and reports why.
+    #[tokio::test]
+    async fn trying_at_once_never_delivers_to_a_lane_that_is_not_at_a_boundary() {
+        let (st, _dir) = state();
+        let now = now_f64();
+        let _ = st
+            .store
+            .write_async(move |conn| {
+                ensure_fleet_tables(conn)?;
+                conn.execute(
+                    "INSERT INTO steering_queue(id, session, text, queued_at) VALUES('n1','lane-none','hi',?1)",
+                    rusqlite::params![now],
+                )?;
+                Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+            })
+            .await;
+        assert!(!steer_try_deliver_now(&st, "lane-none", "n1").await);
+        let still: i64 = st
+            .store
+            .read()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM steering_queue WHERE id='n1' AND delivering_since IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(still, 1, "a lane with no boundary keeps its row queued and unclaimed");
     }
 
     /// The behavioural half: a guard set at enqueue must still be readable in

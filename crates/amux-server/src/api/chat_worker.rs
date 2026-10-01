@@ -206,7 +206,8 @@ pub(crate) async fn companion_route(
         tracing::info!(session = %key, caller, verdict = "chat_companion_send_from_lane",
             "a lane sent to a Chat tab; recorded as that lane, not the owner");
     }
-    let Dispatch::Handled((ok, message)) = ChatAdapter.deliver(state, &key, &text, origin).await else {
+    let id_for_turn = (!msg_id.is_empty()).then(|| msg_id.clone());
+    let Dispatch::Handled((ok, message)) = ChatAdapter.deliver_with_id(state, &key, &text, origin, id_for_turn).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": "chat adapter did not handle the send"}))).into_response();
     };
     if !ok {
@@ -258,7 +259,7 @@ pub(crate) async fn deliver_delegate_result(state: &AppState, name: &str, text: 
     let lane = lane(name);
     {
         let mut q = lane.queue.lock().unwrap();
-        q.push_back(Queued { text: text.to_string(), origin: "delegate".to_string() });
+        q.push_back(Queued { text: text.to_string(), origin: "delegate".to_string(), msg_id: None });
         persist_queue(name, &q);
     }
     if !lane.busy.swap(true, Ordering::SeqCst) {
@@ -272,10 +273,77 @@ pub(crate) async fn deliver_delegate_result(state: &AppState, name: &str, text: 
 
 pub(crate) struct ChatAdapter;
 
+impl ChatAdapter {
+    /// `deliver`, carrying the dashboard send's `msg_id` onto the recorded
+    /// user message (see `Queued::msg_id`).
+    pub(crate) async fn deliver_with_id(
+        &self,
+        state: &AppState,
+        name: &str,
+        text: &str,
+        origin: SendOrigin,
+        msg_id: Option<String>,
+    ) -> Dispatch<(bool, String)> {
+        if !running(name) {
+            // An owner typing into a stopped chat starts it (there is no
+            // process to boot, so this costs nothing). Automation does not
+            // wake a stopped worker; its steering row stays queued.
+            if origin != SendOrigin::Owner {
+                return Dispatch::Handled((false, "chat worker is not running".into()));
+            }
+            if let Dispatch::Handled((false, why)) = self.start(state, name).await {
+                return Dispatch::Handled((false, why));
+            }
+        }
+        if text.trim().is_empty() {
+            return Dispatch::Handled((false, "empty message".into()));
+        }
+        let lane = lane(name);
+        let ahead = {
+            let mut q = lane.queue.lock().unwrap();
+            q.push_back(Queued {
+                text: text.to_string(),
+                origin: match origin {
+                    SendOrigin::Owner => "owner",
+                    SendOrigin::Automation => "automation",
+                }
+                .to_string(),
+                msg_id: msg_id.filter(|m| !m.is_empty()),
+            });
+            persist_queue(name, &q);
+            q.len() - 1
+        };
+        let turn_running = lane.busy.swap(true, Ordering::SeqCst);
+        if !turn_running {
+            let st = state.clone();
+            let n = name.to_string();
+            tokio::spawn(async move { pump(st, n).await });
+        }
+        // `waiting` = messages queued behind the running turn, which is what
+        // the view shows; `ahead` alone read 0 for the first queued message.
+        let waiting = if turn_running { ahead + 1 } else { 0 };
+        lane.publish(json!({"type": "queued", "ahead": ahead, "waiting": waiting, "busy": turn_running}));
+        Dispatch::Handled((
+            true,
+            if turn_running {
+                format!("queued behind the running turn ({ahead} ahead)")
+            } else {
+                "delivered".into()
+            },
+        ))
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Queued {
     text: String,
     origin: String,
+    /// The dashboard send's `msg_id`, carried onto the recorded user message so
+    /// the client reconciles its pending copy BY ID (2026-10-01: the Chat tab
+    /// showed the server's message and the outbox's pending copy at once).
+    /// Absent on queues persisted before this field existed.
+    #[serde(default)]
+    msg_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -546,52 +614,7 @@ impl ExecutionAdapter for ChatAdapter {
         text: &str,
         origin: SendOrigin,
     ) -> Dispatch<(bool, String)> {
-        if !running(name) {
-            // An owner typing into a stopped chat starts it (there is no
-            // process to boot, so this costs nothing). Automation does not
-            // wake a stopped worker; its steering row stays queued.
-            if origin != SendOrigin::Owner {
-                return Dispatch::Handled((false, "chat worker is not running".into()));
-            }
-            if let Dispatch::Handled((false, why)) = self.start(state, name).await {
-                return Dispatch::Handled((false, why));
-            }
-        }
-        if text.trim().is_empty() {
-            return Dispatch::Handled((false, "empty message".into()));
-        }
-        let lane = lane(name);
-        let ahead = {
-            let mut q = lane.queue.lock().unwrap();
-            q.push_back(Queued {
-                text: text.to_string(),
-                origin: match origin {
-                    SendOrigin::Owner => "owner",
-                    SendOrigin::Automation => "automation",
-                }
-                .to_string(),
-            });
-            persist_queue(name, &q);
-            q.len() - 1
-        };
-        let turn_running = lane.busy.swap(true, Ordering::SeqCst);
-        if !turn_running {
-            let st = state.clone();
-            let n = name.to_string();
-            tokio::spawn(async move { pump(st, n).await });
-        }
-        // `waiting` = messages queued behind the running turn, which is what
-        // the view shows; `ahead` alone read 0 for the first queued message.
-        let waiting = if turn_running { ahead + 1 } else { 0 };
-        lane.publish(json!({"type": "queued", "ahead": ahead, "waiting": waiting, "busy": turn_running}));
-        Dispatch::Handled((
-            true,
-            if turn_running {
-                format!("queued behind the running turn ({ahead} ahead)")
-            } else {
-                "delivered".into()
-            },
-        ))
+        self.deliver_with_id(state, name, text, origin, None).await
     }
 
     fn running(&self, name: &str) -> Dispatch<bool> {
@@ -763,14 +786,14 @@ async fn run_turn(state: &AppState, name: &str, lane: &Lane, q: Queued) {
         state,
         name,
         CHAT_EVENT,
-        Some(json!({"role": "user", "text": q.text, "turn_id": turn_id, "origin": q.origin})),
+        Some(json!({"role": "user", "text": q.text, "turn_id": turn_id, "origin": q.origin, "msg_id": q.msg_id})),
         Some(format!("chat:{turn_id}:user")),
         SOURCE,
     )
     .await;
     let waiting = lane.queue.lock().unwrap().len();
     lane.publish(json!({
-        "type": "user", "turn_id": turn_id, "text": q.text, "origin": q.origin,
+        "type": "user", "turn_id": turn_id, "text": q.text, "origin": q.origin, "msg_id": q.msg_id,
         "ts": crate::config::now_f64(), "waiting": waiting,
     }));
     update_meta(

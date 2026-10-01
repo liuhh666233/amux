@@ -6981,6 +6981,8 @@ function _reportWorkerActionParity(s) {
 }
 
 function render() {
+  // The Send/Queue label reads the target's status, so it follows each render.
+  try { _syncComposerPending(); } catch (_) {}
   // THE PEEK HEADER UPDATES FIRST, ahead of the card-clobbering guard below.
   //
   // It used to sit AFTER that guard, so an open card menu / edit overlay froze
@@ -7335,7 +7337,7 @@ function render() {
             onkeydown="cardSlashAcKeydown('${s.name}',event)"
             onpaste="handleCardPaste('${s.name}',event)"
             onbeforeinput="cardSlashAcBeforeInput('${s.name}',event)"></textarea>
-          <div class="send-split${_sendMode === 'queue' ? ' mode-queue' : ''}"><button class="btn primary send-split-main" ${_composerPendingSends.has(s.name) ? 'disabled' : ''} onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => sendFromInput('${s.name}'))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => sendFromInput('${s.name}'))" onclick="_btnFire(event, () => sendFromInput('${s.name}'))">${_sendMode === 'queue' ? 'Queue' : 'Send'}</button><button class="btn primary send-split-arrow" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => _toggleSendMode(event))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => _toggleSendMode(event))" onclick="_btnFire(event, () => _toggleSendMode(event))" title="Switch send mode">&#x25BC;</button></div>
+          <div class="send-split${_sendMode === 'queue' ? ' mode-queue' : ''}"><button class="btn primary send-split-main" ${_composerPendingSends.has(s.name) ? 'disabled' : ''} onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => sendFromInput('${s.name}'))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => sendFromInput('${s.name}'))" onclick="_btnFire(event, () => sendFromInput('${s.name}'))" title="${esc(_sendTitleFor(s.name))}">${_sendLabelFor(s.name)}</button><button class="btn primary send-split-arrow" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => _toggleSendMode(event))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => _toggleSendMode(event))" onclick="_btnFire(event, () => _toggleSendMode(event))" title="Switch send mode">&#x25BC;</button></div>
         </div>` : ''}
       </div>
     </div>`;
@@ -10297,7 +10299,8 @@ async function doSend(name, text, identity = {}) {
   const isolated = sessions.find(s => s.name === name)?.isolated;
   // A chat worker shows the message as a bubble with its own time; the
   // terminal's "[06:25 PM]" prefix only cluttered it.
-  const chatTarget = _workerRenderer(name) === 'chat';
+  // A worker's Chat tab (`<worker>@chat`) is a chat too: no "[HH:MM]" stamp.
+  const chatTarget = _workerRenderer(name) === 'chat' || String(name).endsWith('@chat');
   const payload = isSlashCmd || isolated || chatTarget ? text : _stampSendTime(text, new Date(), _cloudEmail || _localMemberEmail);
   // One msg_id per logical send, reused verbatim by the offline-queue replay:
   // the server dedups on it, so a retry after a lost response (e.g. the
@@ -13654,7 +13657,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1207';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1208';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -14185,7 +14188,7 @@ function _chatOnEvent(name, m) {
   }
   if (m.type === 'user') {
     if (!_chat.messages.some(x => x.turn_id === m.turn_id && x.role === 'user'))
-      _chat.messages.push({ role: 'user', text: m.text, turn_id: m.turn_id, origin: m.origin, ts: m.ts });
+      _chat.messages.push({ role: 'user', text: m.text, turn_id: m.turn_id, origin: m.origin, ts: m.ts, msg_id: m.msg_id });
     _chat.streaming = _chatNewTurn({ turn_id: m.turn_id });
     _chat.busy = true;
     _chat.queued = m.waiting || 0;
@@ -14380,7 +14383,12 @@ function _chatRender(errorText) {
     html += '<div class="chat-offline-note" role="status" style="cursor:pointer;" onclick="_chatReconnect()">'
       + 'Stream disconnected. <u>Reconnect</u></div>';
   }
-  const pendingSends = _pendingSendsFor(_chat.name);
+  // A pending send the server has already recorded is the SAME message: drop
+  // it BY msg_id (never by text). The outbox entry outlives the server's copy
+  // while its response is in flight or awaiting a receipt, and the Chat tab
+  // showed both (Ethan, 2026-10-01: "chat creates a duplicate message").
+  const recordedIds = new Set(_chat.messages.filter(x => x.role === 'user' && x.msg_id).map(x => x.msg_id));
+  const pendingSends = _pendingSendsFor(_chat.name).filter(p => !p.msg_id || !recordedIds.has(p.msg_id));
   if (!_chat.messages.length && !_chat.streaming && !errorText && !pendingSends.length) {
     html += '<div class="chat-empty">' + (chatOf
       ? 'Ask anything about ' + esc(chatOf) + '\u2019s work below.'
@@ -18624,6 +18632,23 @@ if (!localStorage.getItem('amux_send_mode_v2')) {
   _sendMode = 'send';
   try { localStorage.setItem('amux_send_mode', 'send'); localStorage.setItem('amux_send_mode_v2', '1'); } catch(e) {}
 }
+// THE LABEL SAYS WHAT A PRESS WILL DO (2026-10-01, MSG-72091: Queue mode
+// stuck on from an earlier choice read "Queue" on an IDLE worker, and the
+// message then waited). A queued message to an idle worker is delivered at
+// once (the server tries the lane's boundary at enqueue), so for an idle target
+// the press IS a send and says so; "Queue" shows only while the worker is busy,
+// which is the one case where queueing changes anything.
+function _sendLabelFor(session) {
+  if (_sendMode !== 'queue') return 'Send';
+  const s = (typeof sessions !== 'undefined' && sessions.find(x => x.name === session)) || {};
+  return s.status === 'active' ? 'Queue' : 'Send';
+}
+function _sendTitleFor(session) {
+  if (_sendMode !== 'queue') return 'Send now';
+  return _sendLabelFor(session) === 'Queue'
+    ? 'Queue mode: delivered when this worker finishes its current turn'
+    : 'Queue mode: this worker is idle, so it is delivered now';
+}
 function _toggleSendMode(e) {
   e?.stopPropagation();
   _sendMode = _sendMode === 'send' ? 'queue' : 'send';
@@ -18637,8 +18662,6 @@ function _updateSendSplit() {
   // Queue while every card still said Send for the same mode.
   document.querySelectorAll('.send-split').forEach(split => {
     split.classList.toggle('mode-queue', _sendMode === 'queue');
-    const main = split.querySelector('.send-split-main');
-    if (main) main.textContent = _sendMode === 'queue' ? 'Queue' : 'Send';
   });
   _syncComposerPending();
 }
@@ -18660,9 +18683,10 @@ function _syncComposerPending() {
     const pending = _composerPendingSends.has(session);
     btn.disabled = pending;
     // The brief lock covers local persistence only; delivery belongs in Messages.
-    btn.textContent = _sendMode === 'queue' ? 'Queue' : 'Send';
+    btn.textContent = _sendLabelFor(session);
+    btn.title = _sendTitleFor(session);
   };
-  sync(document.querySelector('#peek-overlay .send-split-main'), peekSession);
+  sync(document.querySelector('#peek-overlay .send-split-main'), (typeof _peekChatTarget === 'function' && _peekChatTarget()) || peekSession);
   document.querySelectorAll('.card[data-session]').forEach(card =>
     sync(card.querySelector('.send-split-main'), card.dataset.session));
 }
