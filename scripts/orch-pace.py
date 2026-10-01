@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""orch-pace: is an orchestration on pace for its deadline?
+
+Usage:
+  scripts/orch-pace.py --orchestrator mixpeek-override --lane-prefix gs12- \
+      --deadline 2026-10-04T23:59:00-04:00 \
+      --proof-prefix "GS12 proof" --proof-prefix "GS12 requirement" [--json]
+
+Counts the plan's cards on the board (the orchestrator's board plus every lane
+whose name starts with --lane-prefix; archived cards excluded), appends a
+snapshot to ~/.amux/logs/orch-pace-<orchestrator>.jsonl, and compares the
+rate since the previous snapshots with the rate the deadline needs.
+
+Two finish lines, both from the board:
+  work:  plan cards that are terminal (done, verified, discarded)
+  proof: completion cards (titles starting with a --proof-prefix) at verified
+
+Pace is measured, never estimated: `rate_6h` is cards CLOSED done or verified
+in the last six hours (their closed_at), per hour, and `needed` is open cards
+over hours left. Discards leave the open count but are not progress: they are
+reported beside the rate so "finishing" by discarding is visible. The verdict
+is ON PACE when rate_6h >= needed and BEHIND otherwise; with no closed_at on
+any card it is UNMEASURED and says so rather than reading as on pace. Proof has a checkpoint of its own: half the completion
+cards verified by 24 hours before the deadline.
+
+Written 2026-10-01 for goal spec 12 (Ethan: "it needs to be finished by
+Sunday and verify that we're on pace continuously until then").
+"""
+import argparse, datetime as dt, json, os, ssl, subprocess, sys, urllib.request
+
+TERMINAL = {"done", "verified", "discarded"}
+
+
+def amux_url():
+    try:
+        return subprocess.run(["amux", "url"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return os.environ.get("AMUX_URL", "")
+
+
+def board(url):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(f"{url}/api/board?all=1&slim=0", context=ctx, timeout=60) as r:
+        return json.load(r)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--orchestrator", required=True)
+    ap.add_argument("--lane-prefix", required=True)
+    ap.add_argument("--deadline", required=True, help="ISO-8601 with offset")
+    ap.add_argument("--proof-prefix", action="append", default=[])
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+
+    now = dt.datetime.now(dt.timezone.utc)
+    deadline = dt.datetime.fromisoformat(a.deadline)
+    hours_left = max((deadline - now).total_seconds() / 3600, 0.0)
+
+    cards = [
+        c for c in board(amux_url())
+        if not c.get("archived")
+        and ((c.get("session") or "") == a.orchestrator or (c.get("session") or "").startswith(a.lane_prefix))
+        and c.get("type") not in ("epic", "watch", "tripwire")
+    ]
+    total = len(cards)
+    terminal = sum(1 for c in cards if c.get("status") in TERMINAL)
+    proof = [c for c in cards if c.get("session") == a.orchestrator
+             and any((c.get("title") or "").startswith(p) for p in a.proof_prefix)]
+    proof_verified = sum(1 for c in proof if c.get("status") == "verified")
+    needsyou = sorted(c["id"] for c in cards if c.get("status") == "needsyou")
+
+    snap = {"ts": now.timestamp(), "total": total, "terminal": terminal,
+            "proof_total": len(proof), "proof_verified": proof_verified}
+    hist_path = os.path.expanduser(f"~/.amux/logs/orch-pace-{a.orchestrator}.jsonl")
+    hist = []
+    if os.path.exists(hist_path):
+        with open(hist_path) as f:
+            hist = [json.loads(l) for l in f if l.strip()]
+    with open(hist_path, "a") as f:
+        f.write(json.dumps(snap) + "\n")
+
+    def closed_ts(c):
+        v = c.get("closed_at") or (c.get("entered_state_at") if c.get("status") in TERMINAL else None)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            try:
+                return dt.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
+    since = now.timestamp() - 6 * 3600
+    stamped = [c for c in cards if c.get("status") in TERMINAL and closed_ts(c) is not None]
+    recent = [c for c in stamped if closed_ts(c) >= since]
+    progressed = sum(1 for c in recent if c.get("status") in ("done", "verified"))
+    discarded_6h = sum(1 for c in recent if c.get("status") == "discarded")
+    rate = progressed / 6.0 if stamped else None
+    open_cards = total - terminal
+    needed = open_cards / hours_left if hours_left > 0 else float("inf")
+    if rate is None:
+        verdict = "UNMEASURED"
+    elif rate >= needed:
+        verdict = "ON PACE"
+    else:
+        verdict = "BEHIND"
+    checkpoint = deadline - dt.timedelta(hours=24)
+    proof_target_now = len(proof) // 2 if now >= checkpoint else 0
+    proof_verdict = "ON PACE" if proof_verified >= proof_target_now else "BEHIND"
+
+    out = {
+        "verdict": verdict, "hours_left": round(hours_left, 1),
+        "cards_total": total, "cards_terminal": terminal, "cards_open": open_cards,
+        "needed_per_h": round(needed, 2),
+        "rate_6h_per_h": None if rate is None else round(rate, 2),
+        "discarded_6h": discarded_6h,
+        "history_snapshots": len(hist) + 1,
+        "proof_verified": proof_verified, "proof_total": len(proof),
+        "proof_checkpoint": f"{len(proof)//2} verified by {checkpoint.isoformat()}",
+        "proof_verdict": proof_verdict,
+        "needsyou": needsyou,
+        "population": f"{a.orchestrator} + {a.lane_prefix}* boards, non-archived, epics/watches/tripwires excluded",
+    }
+    if a.json:
+        print(json.dumps(out))
+    else:
+        r = "unmeasured (no card carries a close time)" if rate is None else f"{rate:.2f}/h done or verified"
+        print(f"{verdict}: {terminal}/{total} plan cards terminal, {open_cards} open, "
+              f"{hours_left:.1f}h left -> need {needed:.2f}/h, measured {r} over the last 6h "
+              f"(plus {discarded_6h} discarded, not counted as progress)")
+        print(f"proof: {proof_verified}/{len(proof)} completion cards verified ({proof_verdict}; "
+              f"checkpoint {len(proof)//2} by {checkpoint.isoformat()})")
+        print(f"needsyou: {', '.join(needsyou) or 'none'}")
+        print(f"population: {out['population']}")
+    return 0 if verdict != "BEHIND" and proof_verdict != "BEHIND" else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
