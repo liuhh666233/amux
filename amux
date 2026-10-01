@@ -6452,23 +6452,39 @@ _land_status() {
   fi
 }
 
-# _land_cancel: stop every detached `amux land` of this lane (whole process
-# group: the wrapper, the land, its git push and hook) and report each.
+# _land_cancel [pid]: stop a detached `amux land` (whole process group: the
+# wrapper, the land, its git push and hook). With a pid, that one (it must be
+# this session's). Without, every detached land of this session started from
+# THIS checkout (gs12-restore, 2026-10-01: keyed by session alone, --cancel in
+# one worktree stopped another worktree's land and missed its own).
 _land_cancel() {
-  local me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" d="$HOME/.amux/locks/detached" f pid who n=0
+  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" d="$HOME/.amux/locks/detached" f pid who where here n=0
+  here="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
   for f in "$d"/*; do
     [ -f "$f" ] || continue
-    pid="${f##*/}"; who="$(head -1 "$f" 2>/dev/null)"
+    pid="${f##*/}"; who="$(sed -n 1p "$f" 2>/dev/null)"; where="$(sed -n 3p "$f" 2>/dev/null)"
     [ "$who" = "$me" ] || continue
+    if [ -n "$want" ]; then
+      [ "$pid" = "$want" ] || continue
+    else
+      # A record from before checkouts were recorded has no line 3: leave it
+      # to an explicit pid rather than guess which checkout it belongs to.
+      [ "$where" = "$here" ] || continue
+    fi
     if kill -0 "$pid" 2>/dev/null; then
       kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-      echo "amux land: cancelled detached land pid $pid (process group) for $me"
-      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "cancelled detached land (pid $pid)" >> "$HOME/.amux/logs/land.log"
+      echo "amux land: cancelled detached land pid $pid (process group) for $me in ${where:-unknown checkout}"
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "cancelled detached land (pid $pid, ${where:-unknown checkout})" >> "$HOME/.amux/logs/land.log"
       n=$((n + 1))
     fi
     rm -f -- "${f:?}"
   done
-  [ "$n" -gt 0 ] || echo "amux land: no detached land running for $me"
+  if [ "$n" -eq 0 ]; then
+    echo "amux land: no detached land of $me found for ${want:+pid $want}${want:-this checkout ($here)}. Others of this session:"
+    for f in "$d"/*; do
+      [ -f "$f" ] && [ "$(sed -n 1p "$f")" = "$me" ] && kill -0 "${f##*/}" 2>/dev/null && echo "  pid ${f##*/} from $(sed -n 3p "$f" || echo '?')"
+    done
+  fi
   return 0
 }
 
@@ -6541,7 +6557,7 @@ cmd_land() {
       --batch-max) batch_max="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --detach) detach=1; shift ;;
       --sha) land_sha="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
-      --cancel) _land_cancel; return $? ;;
+      --cancel) shift; _land_cancel "${1:-}"; return $? ;;
       --status) _land_status; return $? ;;
       -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
       *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | amux land --cancel" ;;
@@ -6574,7 +6590,17 @@ cmd_land() {
   common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
   mkdir -p "$HOME/.amux/locks" "$HOME/.amux/logs"
   if [ "$detach" = 1 ]; then
-    local dlog dpid
+    local dlog dpid _f _here _there
+    # One session landing from several checkouts is legal, but --cancel and
+    # the completion message are per checkout, so say so (gs12-restore,
+    # 2026-10-01: three detached lands from three worktrees of one session).
+    _here="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+    for _f in "$HOME/.amux/locks/detached"/*; do
+      [ -f "$_f" ] || continue
+      [ "$(sed -n 1p "$_f")" = "$me" ] && kill -0 "${_f##*/}" 2>/dev/null || continue
+      _there="$(sed -n 3p "$_f")"
+      [ -n "$_there" ] && [ "$_there" != "$_here" ] && echo "amux land: note: $me already has a detached land queued from $_there (pid ${_f##*/}); this one is for $_here. Cancel per checkout with: amux land --cancel (run in that checkout) or amux land --cancel <pid>." >&2
+    done
     dlog="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-detached.log"
     mkdir -p "${dlog%/*}"
     # The runner re-runs land without --detach, then tells the lane how it
@@ -6602,7 +6628,7 @@ p.communicate(msg.encode())
     # of the whole land; --cancel kills that group (gs12-gates, 2026-10-01:
     # killing the printed pid alone left the child land queued).
     mkdir -p "$HOME/.amux/locks/detached"
-    printf '%s\n%s\n' "$me" "$dlog" > "$HOME/.amux/locks/detached/$dpid"
+    printf '%s\n%s\n%s\n' "$me" "$dlog" "$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)" > "$HOME/.amux/locks/detached/$dpid"
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "detached land started (pid $dpid, log $dlog)" >> "$log"
     echo "amux land: detached (pid $dpid). Output: $dlog. You get a message when it lands or stops; nothing to poll. Stop it with: amux land --cancel"
     return 0
