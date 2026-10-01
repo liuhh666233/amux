@@ -199,10 +199,12 @@ def main():
 
     now = time.time()
     holds, landed = holds_by_repo(now - 6 * 3600)
+    installed_ver = ""
     try:
-        cli_mtime = os.stat(os.path.join(HOME, ".local", "bin", "amux")).st_mtime
+        m = re.search(r'^LAND_BEHAVIOR_VERSION="([^"]+)"', open(os.path.join(HOME, ".local", "bin", "amux"), errors="replace").read(), re.M)
+        installed_ver = m.group(1) if m else ""
     except OSError:
-        cli_mtime = None
+        pass
     try:
         state = json.load(open(STATE))
     except Exception:
@@ -226,12 +228,18 @@ def main():
             else:
                 arrived = int(t[:12])
             waits.append((now - arrived) / 60)
-            st = ps_start(pid)
-            # 30 minutes of slack: every CLI install would otherwise mark
-            # every waiter stale; a land started well before it is the real
-            # case (the 18:32Z GH_TOKEN fix reached no land started earlier).
-            if cli_mtime and st and st < cli_mtime - 1800:
-                stale.append(f"{who} (pid {pid})")
+            # Stale = the ticket records an older LAND_BEHAVIOR_VERSION than
+            # the installed CLI. Install time moved on every install, lint-only
+            # ones included, and flagged eight waiters for a pointless requeue
+            # (2026-10-01). A ticket with no version predates versioning and is
+            # not flagged: the honest answer there is "unknown".
+            try:
+                tv = open(os.path.join(qd, t), errors="replace").read().splitlines()
+                tver = tv[4].strip() if len(tv) > 4 else ""
+            except OSError:
+                tver = ""
+            if installed_ver and tver and tver < installed_ver:
+                stale.append(f"{who} (pid {pid}, land {tver} < {installed_ver})")
         holder, attempt = None, None
         if os.path.isdir(lock):
             holder = (open(os.path.join(lock, "who")).read().strip() if os.path.exists(os.path.join(lock, "who")) else "?")

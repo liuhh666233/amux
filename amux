@@ -6574,6 +6574,15 @@ _land_cancel() {
   return 0
 }
 
+# LAND_BEHAVIOR_VERSION: bump ONLY when `amux land`'s behavior changes (queue
+# order, locking, batching, push environment), not for comments or lint fixes.
+# Each ticket records it, so scripts/pipeline-bottlenecks.py flags a waiter as
+# running stale land code by version, not by the CLI's install time: every
+# install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
+# had eight waiters flagged for a cancel-and-requeue that would have cost
+# each its place for nothing.
+LAND_BEHAVIOR_VERSION="2026-10-01.1"
+
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
   #
@@ -6788,7 +6797,7 @@ p.communicate(msg.encode())
   else
     tname="$(printf '%012d' "$(date +%s)")-$$"
   fi
-  _land_ticket() { printf '%s\n%s\n%s\n%s\n' "$me" "${land_sha:-$(git rev-parse HEAD)}" "$common" "$batchable" > "${q:?}/${tname:?}"; }
+  _land_ticket() { printf '%s\n%s\n%s\n%s\n%s\n' "$me" "${land_sha:-$(git rev-parse HEAD)}" "$common" "$batchable" "$LAND_BEHAVIOR_VERSION" > "${q:?}/${tname:?}"; }
   _land_ticket
   if [ "$priority" = 1 ]; then
     local _ord=0 _f
