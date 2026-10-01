@@ -36,8 +36,13 @@
 //! the index while the worker's next push runs is the likely source of the
 //! phantom above. Logs verdict=orphaned_push_reaped.
 //!
-//! Every 2 minutes (was 10): the phantom recurred within one 10-minute tick on
-//! three workers, which all wrap their pushes in a manual skip-worktree.
+//! Every 10 minutes, and never in a worktree with a push in flight
+//! (2026-10-01, GC-21). The tick was 2 minutes while the trigger was unknown.
+//! Mixpeek's pre-push hook now guards the skip-worktree bits itself: it
+//! snapshots them at entry, re-checks between stages, restores lost ones and
+//! fails the push naming the window. A sweep repairing the bit mid-hook hid
+//! the loss from that guard, so a worktree with a live `git push` or
+//! pre-push hook is left to the guard (verdict=worktree_repair_deferred_push).
 //!
 //! Logs verdict=worktree_sparse_repaired per lane it fixed, and
 //! verdict=worktree_hygiene_sweep per tick with the population considered.
@@ -45,7 +50,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-const TICK_SECS: u64 = 120;
+const TICK_SECS: u64 = 600;
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn spawn() -> super::PeriodicTask {
@@ -178,6 +183,29 @@ pub(crate) fn live_git_push_pids(ps: &str) -> Vec<u32> {
         .collect()
 }
 
+/// PIDs of a push in flight: a live `git push`, or any process running the
+/// pre-push hook (whatever its parent).
+pub(crate) fn push_in_flight_pids(ps: &str) -> Vec<u32> {
+    let mut pids = live_git_push_pids(ps);
+    pids.extend(ps.lines().filter_map(|l| {
+        let pid: u32 = l.split_whitespace().next()?.parse().ok()?;
+        l.contains("githooks/pre-push").then_some(pid)
+    }));
+    pids
+}
+
+/// Working directories of every push in flight.
+async fn push_in_flight_cwds() -> Vec<std::path::PathBuf> {
+    let Some(ps) = cmd_out("ps", &["-Ao", "pid=,ppid=,etime=,command="]).await else { return Vec::new() };
+    let mut out = Vec::new();
+    for pid in push_in_flight_pids(&ps) {
+        if let Some(cwd) = process_cwd(pid).await {
+            out.push(std::path::PathBuf::from(cwd));
+        }
+    }
+    out
+}
+
 async fn reap_orphaned_pushes(worktrees: &[(String, std::path::PathBuf)]) -> usize {
     let Some(ps) = cmd_out("ps", &["-Ao", "pid=,ppid=,etime=,command="]).await else { return 0 };
     // PPID 1 alone does not prove the push is dead (2026-10-01, gs12-compute):
@@ -212,6 +240,7 @@ async fn reap_orphaned_pushes(worktrees: &[(String, std::path::PathBuf)]) -> usi
 async fn sweep() {
     let (mut worktrees, mut lanes_fixed) = (0usize, 0usize);
     let mut paths: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let pushing = push_in_flight_cwds().await;
     for lane in crate::api::session_verbs::all_lane_names() {
         if crate::api::session_verbs::session_is_isolated(&lane) {
             continue;
@@ -219,6 +248,12 @@ async fn sweep() {
         let Some(wt) = crate::api::session_verbs::worker_worktree(&lane) else { continue };
         worktrees += 1;
         paths.push((lane.clone(), wt.clone()));
+        if pushing.iter().any(|p| p.starts_with(&wt)) {
+            tracing::info!(session = %lane, measured = true, n_considered = 1,
+                verdict = "worktree_repair_deferred_push",
+                "push in flight in this worktree; its pre-push guard owns the skip-worktree bits, not this sweep");
+            continue;
+        }
         if repair(&lane, &wt).await.is_some_and(|f| !f.is_empty()) {
             lanes_fixed += 1;
         }
@@ -259,6 +294,15 @@ mod tests {
                   555 1 01:00 bash -c echo git push later\n";
         assert_eq!(live_git_push_pids(ps), vec![95959, 47045],
             "only a real `git push` argv counts, not remote-https or a shell mentioning it");
+    }
+
+    #[test]
+    fn a_hook_or_a_push_marks_the_worktree_busy() {
+        let ps = "100 99 01:00 git push origin HEAD:main\n\
+                  101 100 01:00 bash /Users/ethan/Dev/mixpeek/.githooks/pre-push origin x\n\
+                  102 1 01:00 bash /Users/ethan/Dev/mixpeek/.githooks/pre-push origin x\n\
+                  103 1 01:00 /usr/sbin/cron\n";
+        assert_eq!(push_in_flight_pids(ps), vec![100, 101, 102]);
     }
 
     #[test]
