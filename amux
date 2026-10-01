@@ -6370,6 +6370,7 @@ cmd_land() {
   # Every wait, takeover, batch and outcome is a line in ~/.amux/logs/land.log;
   # a refused push keeps its full output under ~/.amux/logs/land/.
   local remote=origin branch=main tries=8 max_hold=3600 batch=1
+  local orig_args=(${1+"$@"})
   while [ $# -gt 0 ]; do
     case "$1" in
       --remote) remote="${2:?}"; shift 2 ;;
@@ -6439,8 +6440,15 @@ cmd_land() {
     head="$(ls "$q" | sort | head -1)"
     if [ "$head" = "$tname" ] && mkdir "$lock" 2>/dev/null; then break; fi
     local hpid hsince hwho
-    hpid="$(cat "$lock/pid" 2>/dev/null || true)"; hsince="$(cat "$lock/since" 2>/dev/null || echo 0)"; hwho="$(cat "$lock/who" 2>/dev/null || true)"
-    if [ -d "$lock" ] && { { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ $(( $(date +%s) - ${hsince:-0} )) -gt "$max_hold" ]; }; then
+    hpid="$(cat "$lock/pid" 2>/dev/null || true)"; hwho="$(cat "$lock/who" 2>/dev/null || true)"
+    # No `since` yet means a holder between its mkdir and its first write.
+    # Reading that as 0 made it look decades old: gs12-cicd deleted
+    # gs12-retrievers' brand-new lock at 12:10:44Z and two lanes pushed at
+    # once. The directory's own mtime is the floor.
+    hsince="$(cat "$lock/since" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || date +%s)"
+    # Only the head of the queue may take a lock over, so waiters behind it
+    # cannot race each other into the same decision.
+    if [ "$head" = "$tname" ] && [ -d "$lock" ] && { { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ $(( $(date +%s) - ${hsince:-$(date +%s)} )) -gt "$max_hold" ]; }; then
       if [ -n "$hpid" ] && kill -0 "$hpid" 2>/dev/null; then
         _land_log "taking over a lock on $branch whose current attempt passed --max-hold ${max_hold}s (holder ${hwho:-?} pid $hpid STILL ALIVE, attempt since $hsince); its push may still land"
       else
@@ -6530,6 +6538,13 @@ cmd_land() {
     # and the solo re-push ran past 3600s on 2026-10-01 and a waiter took over
     # a live holder mid-push (11:09Z). A takeover also checks the pid is gone
     # or this stamp is older than --max-hold.
+    # Still ours? A holder whose lock was taken over must not push beside the
+    # new holder; it re-queues from scratch instead.
+    if [ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]; then
+      _land_log "lost the lock on $branch to $(cat "$lock/who" 2>/dev/null || echo ?) before attempt $i; re-queuing"
+      trap - EXIT INT TERM
+      exec bash "$0" land ${orig_args[@]+"${orig_args[@]}"}
+    fi
     date +%s > "$lock/since"
     git fetch -q "$remote" "$branch" || { _land_log "fetch failed (attempt $i)"; sleep 5; continue; }
     if ! git rebase -q "$remote/$branch"; then
