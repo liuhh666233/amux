@@ -6433,8 +6433,23 @@ cmd_land() {
       _land_log "lost a race to a push outside land (attempt $i); refetching"
       continue
     fi
+    # Keep the whole hook output (gs12-spend, 2026-10-01): the deciding line
+    # ("✗ FAILED — 2 selected test(s) ...") sits above the ERROR list, so a
+    # tail lost it and two lanes re-ran the full hook by hand to find it.
+    local full verdicts
+    full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$.log"
+    mkdir -p "${full%/*}"
+    find "${full%/*}" -name '*.log' -mtime +14 -delete 2>/dev/null || true
+    printf '%s\n' "$out" > "$full"
+    verdicts="$(printf '%s\n' "$out" | grep -E '✗|FAILED|BLOCKED|REFUSED|refus|^error:|^fatal:' | head -15)"
     printf '%s\n' "$out" | tail -20
-    _land_log "push failed (attempt $i, rc $rc), not a race; stopping"
+    if [ -n "$verdicts" ]; then
+      printf '\namux land: verdict lines from the push:\n%s\n' "$verdicts" >&2
+    fi
+    _land_log "push failed (attempt $i, rc $rc), not a race; stopping. Full output: $full"
+    if [ -n "$verdicts" ]; then
+      printf '%s\n' "$verdicts" | sed 's/^/    /' >> "$log"
+    fi
     return "$rc"
   done
   _land_log "gave up after $tries attempts on $branch"
