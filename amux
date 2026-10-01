@@ -6487,7 +6487,19 @@ cmd_land() {
     git rev-parse --git-dir >/dev/null 2>&1 || die "amux land: not inside a git repository"
     land_sha="$(git rev-parse --verify -q "$land_sha^{commit}")" || die "amux land: --sha does not name a commit in this repository"
   else
-    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "amux land: not inside a git checkout"
+    # Intermittent "not a git repository" from checkouts that were fine
+    # seconds later (gs12-tiering 13:50Z and 15:10Z, the amux checkout 15:13Z,
+    # 2026-10-01; cause not pinned). Retry briefly, and when it persists or
+    # recovers, write what git saw to land.log so the next one names its cause.
+    local _try _diag
+    for _try in 1 2 3 4; do
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 && break
+      _diag="cwd=$PWD dotgit=$( [ -f .git ] && echo "file:$(head -c 200 .git)" || { [ -d .git ] && echo dir || echo missing; } ) core.bare=$( { git config --get core.bare 2>&1 || true; } | head -c 80) rev-parse=$( { git rev-parse --git-dir 2>&1 || true; } | head -c 160) GIT_DIR=${GIT_DIR:-} GIT_WORK_TREE=${GIT_WORK_TREE:-}"
+      mkdir -p "$HOME/.amux/logs"
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" "not-a-checkout attempt $_try: $_diag" >> "$HOME/.amux/logs/land.log"
+      [ "$_try" -lt 4 ] && sleep 2
+    done
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "amux land: not inside a git checkout (diagnostics in ~/.amux/logs/land.log)"
   fi
   local url key lock log me common
   url="$(git remote get-url "$remote" 2>/dev/null)" || die "amux land: no remote '$remote'"
