@@ -9115,7 +9115,12 @@ function updateRateLimitPill() {
   const pill = document.getElementById('rate-limit-pill');
   const txt = document.getElementById('rate-limit-pill-text');
   if (!pill || !txt) return;
-  const blocked = sessions.filter(s => s.rate_limited_until);
+  // SAME PREDICATE AS THE BULK ACTIONS IT OPENS (_isLimitedNow). Counting any
+  // non-zero rate_limited_until showed "2 limited · reset 15:50" fifteen hours
+  // after that reset, over a modal that said "No limited workers" (2026-10-01:
+  // amux-cloud and gtm-ticker, stopped, kept the past reset in meta).
+  const now = Date.now() / 1000;
+  const blocked = sessions.filter(s => s.rate_limited_until && _isLimitedNow(s, now));
   const credit = sessions.filter(s => s.credit_limited);
   const n = blocked.length + credit.length;
   if (!n) {
@@ -9241,7 +9246,7 @@ function showTelemetryDetail() {
     (hooked.length - bad.length) + ' of ' + hooked.length + ' running workers are reporting their status', html);
 }
 function _scrollToFirstRateLimited() {
-  const target = sessions.find(s => s.rate_limited_until) || sessions.find(s => s.credit_limited);
+  const target = sessions.find(s => s.rate_limited_until && _isLimitedNow(s, Date.now() / 1000)) || sessions.find(s => s.credit_limited);
   if (!target) return;
   const sel = '[data-session="' + target.name.replace(/"/g, '\\"') + '"]';
   const card = document.querySelector(sel);
@@ -13553,7 +13558,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1201';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1202';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
