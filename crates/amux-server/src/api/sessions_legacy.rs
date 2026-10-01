@@ -2770,6 +2770,14 @@ pub fn active_python_sessions(conn: &rusqlite::Connection) -> BTreeSet<String> {
     // reads active on one screen and idle on the other. Bounded: only lanes
     // that painted inside the contradiction window are probed.
     signals.capture_panes();
+    active_set_from_signals(&signals)
+}
+
+/// The `active` set from signals that are already loaded AND have had their
+/// panes captured. Split out of [`active_python_sessions`] so the status-history
+/// job, which loads exactly these signals every tick anyway, can publish the set
+/// for the board instead of every board read deriving it again (AMUX-5374).
+pub fn active_set_from_signals(signals: &FleetSignals) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(amux_home().join("sessions")) else {
         return out;
@@ -2790,19 +2798,43 @@ pub fn active_python_sessions(conn: &rusqlite::Connection) -> BTreeSet<String> {
     out
 }
 
-/// How long a board read may reuse the last `active_python_sessions` set.
-const BOARD_ACTIVE_SET_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a board read may reuse the last active set. Longer than two
+/// status-history ticks (20s), so a set that job publishes stays usable until
+/// its next one lands; negligible against the 30-minute `stale` threshold.
+const BOARD_ACTIVE_SET_TTL: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// [`active_python_sessions`] for the BOARD, reused for a few seconds (AMUX-5374).
+type ActiveSetSlot = Option<(std::path::PathBuf, std::time::Instant, BTreeSet<String>)>;
+
+fn active_set_cache() -> &'static std::sync::Mutex<ActiveSetSlot> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<ActiveSetSlot>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// The cached set, if it belongs to `home` and is still recent.
+fn cached_active_set(slot: &ActiveSetSlot, home: &std::path::Path) -> Option<BTreeSet<String>> {
+    let (h, at, set) = slot.as_ref()?;
+    (h == home && at.elapsed() < BOARD_ACTIVE_SET_TTL).then(|| set.clone())
+}
+
+/// Store a freshly derived active set for the board to reuse. Called by the
+/// status-history job after it loads and captures the fleet signals.
+pub fn publish_active_set(set: BTreeSet<String>) {
+    let mut slot = active_set_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *slot = Some((amux_home(), std::time::Instant::now(), set));
+}
+
+/// [`active_python_sessions`] for the BOARD, reused while recent (AMUX-5374).
+/// Normally served from the set the status-history job publishes every tick;
+/// derived here only when nothing recent is cached (startup, or the job off).
 ///
 /// The board needs this set only for the `stale` flag, which fires after 30
-/// MINUTES without an update, so a set a few seconds old changes no answer. But
+/// MINUTES without an update, so a set under a minute old changes no answer. But
 /// deriving it runs the fleet probes: `tmux list-sessions`, pane captures, `ps`,
 /// the transcript scan. Measured 2026-09-30 with the new `board_list_slow`
 /// phase split on a 68-session machine: sessions_ms=1900 of a 2197ms board read
 /// whose SQL took 165ms and whose rows took 129ms. The dashboard polls the board
-/// constantly, so every poll paid for a fleet scan the session list had already
-/// done.
+/// constantly, so every poll paid for a fleet scan the status-history job had
+/// already done.
 ///
 /// Same derivation, same function; only the reuse is new, so the two views
 /// still share one predicate. Keyed by home so parallel tests with their own
@@ -2810,17 +2842,10 @@ const BOARD_ACTIVE_SET_TTL: std::time::Duration = std::time::Duration::from_secs
 /// purpose: concurrent board reads wait for one scan instead of each running
 /// their own.
 pub fn active_python_sessions_recent(conn: &rusqlite::Connection) -> BTreeSet<String> {
-    type Slot = Option<(std::path::PathBuf, std::time::Instant, BTreeSet<String>)>;
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Slot>> = std::sync::OnceLock::new();
     let home = amux_home();
-    let mut slot = CACHE
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some((h, at, set)) = slot.as_ref() {
-        if *h == home && at.elapsed() < BOARD_ACTIVE_SET_TTL {
-            return set.clone();
-        }
+    let mut slot = active_set_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(set) = cached_active_set(&slot, &home) {
+        return set;
     }
     let set = active_python_sessions(conn);
     *slot = Some((home, std::time::Instant::now(), set.clone()));
@@ -8755,6 +8780,26 @@ Checked, nothing of mine was at risk, no action needed from you.
             "bar-only repaints must not read as generation: {ex}"
         );
         assert_eq!(ex["pane"]["churn_distinct_frames"], json!(1), "{ex}");
+    }
+
+    /// AMUX-5374. The board reuses a recent active set only for the SAME home:
+    /// parallel tests (and a second server) each have their own, and reading
+    /// another home's set would flag the wrong cards stale. The control is the
+    /// expired entry, which must not be reused either.
+    #[test]
+    fn a_cached_active_set_is_reused_only_for_its_own_home_while_recent() {
+        let set: BTreeSet<String> = ["lane-a".to_string()].into_iter().collect();
+        let home = std::path::PathBuf::from("/tmp/home-a");
+        let fresh: ActiveSetSlot = Some((home.clone(), std::time::Instant::now(), set.clone()));
+        assert_eq!(cached_active_set(&fresh, &home), Some(set.clone()));
+        assert_eq!(cached_active_set(&fresh, std::path::Path::new("/tmp/home-b")), None);
+        let old = std::time::Instant::now()
+            .checked_sub(BOARD_ACTIVE_SET_TTL + std::time::Duration::from_secs(1));
+        if let Some(old) = old {
+            let expired: ActiveSetSlot = Some((home.clone(), old, set));
+            assert_eq!(cached_active_set(&expired, &home), None);
+        }
+        assert_eq!(cached_active_set(&None, &home), None);
     }
 
     /// The wrapper IS the explain's verdict — one fn, so the view can never

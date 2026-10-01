@@ -167,6 +167,12 @@ pub fn tick(state: &AppState) -> (u32, u32, u32) {
     // status from signals the dashboard does not have, and record a history
     // that disagrees with the thing it exists to explain.
     signals.capture_panes();
+    // These are exactly the signals the board's `stale` flag needs. Publish
+    // the active set so a board read reuses it instead of re-running every
+    // fleet probe itself (AMUX-5374: 1.9s of a 2.2s board read).
+    crate::api::sessions_legacy::publish_active_set(
+        crate::api::sessions_legacy::active_set_from_signals(&signals),
+    );
 
     let mut rows: Vec<(String, String)> = Vec::new();
     let mut lanes = 0u32;
