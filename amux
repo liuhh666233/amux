@@ -6475,6 +6475,22 @@ cmd_land() {
   common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
   mkdir -p "$HOME/.amux/locks" "$HOME/.amux/logs"
   _land_log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "$*" >> "$log"; echo "amux land: $*" >&2; }
+  # _land_pushing <pid>: does that process have a live `git push` or pre-push
+  # hook among its descendants?
+  _land_pushing() {
+    local frontier="$1" next found=1 p
+    for _ in 1 2 3 4 5 6 7 8; do
+      next=""
+      for p in $frontier; do next="$next $(pgrep -P "$p" 2>/dev/null | tr '\n' ' ')"; done
+      [ -n "${next// /}" ] || break
+      for p in $next; do
+        if ps -o command= -p "$p" 2>/dev/null | grep -qE 'git push|git-push|pre-push'; then found=0; break 2; fi
+      done
+      frontier="$next"
+    done
+    return "$found"
+  }
+  local deferred_logged=""
 
   # FIFO (gs12-compute, 2026-10-01): with only the mkdir lock, whichever waiter
   # polled first after a release won, and one waited 6030s behind later
@@ -6545,7 +6561,21 @@ cmd_land() {
     hsince="$(cat "$lock/since" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || date +%s)"
     # Only the head of the queue may take a lock over, so waiters behind it
     # cannot race each other into the same decision.
-    if [ "$head" = "$tname" ] && [ -d "$lock" ] && { { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ $(( $(date +%s) - ${hsince:-$(date +%s)} )) -gt "$max_hold" ]; }; then
+    # A holder whose `git push` or pre-push hook is still running is slow,
+    # not stuck: taking it over makes it lose its race and re-run a 50-minute
+    # gate (mixpeek-override, 2026-10-01, on gs12-gates' .githooks push). Time
+    # takes over only a holder with no push in flight, or one past a hard cap
+    # of 3x --max-hold, so a truly hung push cannot block the queue forever.
+    local held_s=$(( $(date +%s) - ${hsince:-$(date +%s)} )) timed_out=0
+    if [ "$held_s" -gt "$max_hold" ]; then
+      if [ -n "$hpid" ] && _land_pushing "$hpid" && [ "$held_s" -le $(( max_hold * 3 )) ]; then
+        [ "${deferred_logged:-}" = "$hpid" ] || _land_log "holder ${hwho:-?} (pid $hpid) passed --max-hold ${max_hold}s with its push still running; waiting (hard cap $(( max_hold * 3 ))s)"
+        deferred_logged="$hpid"
+      else
+        timed_out=1
+      fi
+    fi
+    if [ "$head" = "$tname" ] && [ -d "$lock" ] && { { [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; } || [ "$timed_out" = 1 ]; }; then
       if [ -n "$hpid" ] && kill -0 "$hpid" 2>/dev/null; then
         _land_log "taking over a lock on $branch whose current attempt passed --max-hold ${max_hold}s (holder ${hwho:-?} pid $hpid STILL ALIVE, attempt since $hsince); its push may still land"
       else
