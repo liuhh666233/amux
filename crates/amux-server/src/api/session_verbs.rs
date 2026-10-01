@@ -16826,11 +16826,37 @@ async fn wake_session(state: &AppState, name: &str) -> (bool, String) {
         return (false, format!("session '{name}' not found"));
     }
     let mut cfg = parse_env(name);
+    let was_paused = cfg.get("CC_PAUSED") == Some("1");
     cfg.remove("CC_ARCHIVED");
     if cfg.write(&f).is_err() {
         return (false, "could not write session env".into());
     }
     archive_session_issues(state, name, 0).await;
+    // WAKE BRINGS A WORKER BACK, INCLUDING FROM A PAUSE. Archiving usually
+    // happens to a paused worker, so CC_PAUSED rides along into the archive,
+    // and start_session then refused the woken worker with "worker is paused;
+    // resume it first" (Ethan, 2026-10-01). Resume through the same lifecycle
+    // path the Resume button uses, which clears the pause and starts it.
+    if was_paused {
+        let resp = crate::api::workers::resume_worker(
+            axum::extract::State(state.clone()),
+            None,
+            axum::extract::Path(name.to_string()),
+        )
+        .await;
+        let ok = resp.status().is_success();
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        tracing::info!(session = %name, verdict = if ok { "wake_resumed_paused" } else { "wake_resume_refused" },
+            measured = true, n_considered = 1, "woke an archived worker that was also paused");
+        return if ok {
+            (true, "woken: un-archived and resumed".into())
+        } else {
+            (false, format!("un-archived, but resuming it was refused: {body}"))
+        };
+    }
     start_session(state, name, "", false).await
 }
 
