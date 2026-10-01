@@ -375,11 +375,14 @@ test('a delayed live-frame request cannot hold the terminal loading screen open'
   await boot(page, {
     transcript: 'full response paints without waiting for live\n',
     live: 'current terminal frame\n',
-    liveDelayMs: 3000,
+    // The bound must sit clearly below the delay. With a 3000ms delay and a
+    // 2500ms bound, page boot alone used most of the budget on ios-safari CI
+    // (2900ms, 2026-10-01) without the screen ever waiting on the request.
+    liveDelayMs: 8000,
     waitForBothFrames: false,
   });
   await expect(page.locator('#peek-body')).toContainText('current terminal frame', { timeout: 700 });
-  expect(Date.now() - started).toBeLessThan(2500);
+  expect(Date.now() - started).toBeLessThan(6000);
   await expect(page.locator('#peek-body .peek-loading')).toHaveCount(0);
 });
 

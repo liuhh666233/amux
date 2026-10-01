@@ -102,6 +102,18 @@ for (const outcome of ['refused', 'accepted', 'queued', 'unconfirmed'] as const)
         expect(persisted).toHaveLength(1);
         expect(JSON.parse(persisted[0].options.body)).toEqual(intent);
         if (outcome === 'unconfirmed') {
+          // The reload starts an automatic sync, and runSyncBanner() JOINS a
+          // sync already in flight. Reading `before` while that one was still
+          // running made the manual call add no new lookup (CI red on
+          // ios-safari, 2026-10-01, "Received: 2"). Let it settle first.
+          await page.evaluate(async () => {
+            for (let i = 0; i < 50; i++) {
+              // eslint-disable-next-line no-undef
+              const flight = (globalThis as any).eval('typeof _syncFlight !== "undefined" ? _syncFlight : null');
+              if (!flight) return;
+              await flight.catch(() => {});
+            }
+          });
           const before = receiptReads;
           await page.evaluate(() => (window as any).runSyncBanner(true));
           expect(receiptReads, 'uncertain delivery retries only the receipt lookup').toBeGreaterThan(before);
