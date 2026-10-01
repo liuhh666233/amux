@@ -1438,7 +1438,7 @@ function showConnHistory() {
         + (q.error ? '<div style="color:' + (uncertain ? 'var(--yellow,#d29922)' : 'var(--red,#e55)') + ';font-size:0.72rem;">' + esc(q.error).substring(0, 100) + '</div>' : '')
         + '</div>'
         + '<span style="color:var(--dim);flex-shrink:0;font-variant-numeric:tabular-nums;font-size:0.76rem;">' + timeStr + '</span>'
-        + (blocked ? ' <button type="button" onclick="_dismissQueuedOp(\'' + escJs(q.id) + '\');document.getElementById(\'conn-hist-modal\')?.remove();showConnHistory();" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:0.85rem;padding:0 2px;" title="Dismiss">&#x2715;</button>' : '')
+        + (blocked ? ' <button type="button" class="conn-op-dismiss" aria-label="Dismiss failed change" onclick="_dismissQueuedOp(\'' + escJs(q.id) + '\');document.getElementById(\'conn-hist-modal\')?.remove();showConnHistory();" title="Dismiss">&#x2715;</button>' : '')
         + '</div>';
     }).join('');
     const draftRows = drafts.map(d =>
@@ -1451,7 +1451,10 @@ function showConnHistory() {
       + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"><b style="font-size:0.85rem;">Pending operations</b>'
       + '<span style="font-size:0.72rem;color:var(--dim);">' + pending + '</span></div>'
       + draftRows + itemRows
-      + '<div style="margin-top:6px;"><button class="btn" onclick="event.preventDefault();document.getElementById(\'conn-hist-modal\').remove();runSyncBanner();" style="font-size:0.75rem;">Retry now</button></div>'
+      // forceRetry, not runSyncBanner: replay skips blocked changes, and since
+      // 07b42586 this modal is the only place a failed change is shown, so
+      // its Retry has to re-arm them or a failed change can never be retried.
+      + '<div style="margin-top:6px;"><button class="btn" id="conn-retry-now" onclick="event.preventDefault();document.getElementById(\'conn-hist-modal\').remove();forceRetry();" style="font-size:0.75rem;">Retry now</button></div>'
       + '</div>';
   }
   const clearHtml = _connEvents.length
@@ -3358,8 +3361,12 @@ let _syncPillText = '';
 // The pill is the one place sync state lives. With work pending or in flight a
 // tap opens the checklist; otherwise it keeps opening connection history.
 function _connPillClick() {
+  // "N failed" opens where a failed change can be reviewed and dismissed. The
+  // sync checklist leaves blocked ops out on purpose, so sending the tap there
+  // showed a list without the failure the badge named (AMUX-5371).
+  const failed = offlineQueue.some(q => q.state === 'blocked' && !_outboxUncertainMessage(q));
   const pending = offlineQueue.length || drafts.length || _syncPillText;
-  if (!pending) return showConnHistory();
+  if (failed || !pending) return showConnHistory();
   _syncBannerRequested = true;
   const banner = document.getElementById('sync-banner');
   if (banner) banner.classList.add('active');
@@ -3803,6 +3810,19 @@ async function clearQueue() {
 async function forceRetry() {
   closeQueueModal();
   if (!offlineQueue.length && !drafts.length) return;
+  const rearmed = offlineQueue.filter(q => q.state === 'blocked').length;
+  if (rearmed) {
+    // A failed change re-armed by the owner: visible in /api/client-debug so a
+    // Retry that never reaches blocked changes again shows up as zero.
+    try {
+      fetch(API + '/api/client-debug', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ kind: 'outbox-retry', verdict: 'blocked_rearmed', rearmed,
+          measured: true, n_considered: offlineQueue.length,
+          ver: (typeof APP_VER !== 'undefined' ? APP_VER : '?') })
+      }).catch(() => {});
+    } catch (e) {}
+  }
   await _mutateQueue(current => current.forEach(q => { q.state = 'pending'; q.reviewed_at = Date.now(); }));
   _syncBannerAuto = true;
   if (online) { runSyncBanner(); } else { setOnline(true); }
@@ -8116,6 +8136,15 @@ function _capTabCustomizerHeight(menu) {
       .getPropertyValue('--safe-bottom')) || 0;
     const avail = Math.max(120, window.innerHeight - top - 12 - inset);
     menu.style.setProperty('--tc-max-h', avail + 'px');
+    // THE PHONE SHEET MUST STOP BELOW ITS OWN TOGGLE (AMUX-5371). Capped only
+    // by the viewport, 21 rows grew the sheet over the tab bar and hid the ⊞
+    // that opened it, so the tap meant to close it landed on a row instead
+    // (e2e lifecycle/torrents + journey, mobile). Measured from the button.
+    const btn = document.querySelector('.tab-customize-wrap > .tab-customize-btn');
+    if (btn && window.innerWidth <= 600) {
+      const below = btn.getBoundingClientRect().bottom + 8;
+      menu.style.setProperty('--tc-sheet-max', Math.max(200, window.innerHeight - below - 8 - inset) + 'px');
+    }
   } catch (e) { /* a cap we cannot compute must not stop the menu opening */ }
 }
 
@@ -13514,7 +13543,10 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1196';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1197';   // bump together with the sw.js CACHE version
+// The dashboard's code ran, so a cache-clear pass reached it: reset the landing
+// page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
+try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
 // Warm the shared catalog so model-type filters are exact on first use. A
 // failure is non-fatal (custom ids and the open-string fallback still work)
 // and is already reported by _loadModelCatalog.
@@ -16132,6 +16164,14 @@ const _NON_HUMAN_PROMPT_MARKS = [
   // same envelope with the owner named first. The owner is a person, so these
   // are Human; checked before the generic envelope because the first match wins.
   ['[amux-origin: the owner', 'human'],
+  // Claude Code's own placeholders (AMUX-5377). "[Image #N]" is what the TUI
+  // shows for an image the person pasted into the prompt; the "[Image:
+  // source|original ...]" lines are metadata the harness writes beside an
+  // image it read; the continuation line opens a compaction summary.
+  ['[Image #', 'human'],
+  ['[Image: source:', 'amux'],
+  ['[Image: original ', 'amux'],
+  ['This session is being continued from a previous conversation', 'amux'],
   ['[amux-origin:', 'session'],     // a peer worker, server-verified origin
   // CLAUDE CODE'S OWN PEER ENVELOPE (Ethan, 2026-09-23, on a screenshot of a
   // peek pane: "we still have shit not working or presenting accurately"). A
@@ -16177,7 +16217,11 @@ function _peekGeminiPrompts() {
 }
 function _peekPromptNormalized(text) {
   const glyph = _peekGeminiPrompts() ? /^[ \t\u00a0]*[❯›>][ \t\u00a0]*/ : /^[ \t\u00a0]*[❯›][ \t\u00a0]*/;
+  // A long paste can arrive wrapped in <pasted_content id="..."> (AMUX-5377:
+  // peer envelopes and board notes read Unclassified because the wrapper, not
+  // the "[amux-origin:" marker, was what the text started with).
   return String(text || '').replace(glyph, '')
+    .replace(/^\s*<pasted_content\b[^>]*>\s*/i, '').replace(/\s*<\/pasted_content>\s*$/i, '')
     .replace(/^\[\d{1,2}:\d{2}(?:\s*[AP]M)?\]\s*/i, '').replace(/\s+/g, ' ').trim();
 }
 // CLASSIFICATION MUST NOT WAIT ON THE MESSAGES TAB'S FULL PAGE.
@@ -16201,6 +16245,25 @@ async function _peekLoadKindHints(sess) {
     _peekKindHints = rows;
     _peekReclassifyPrompts();
   } catch (e) { /* markers still classify; the tab's page may still arrive */ }
+}
+
+// Older provenance for older output (AMUX-5377). The first 50 rows cover the
+// live frame; an earlier conversation page holds messages from further back,
+// and without their rows a person's plain message stays Unclassified. Pull the
+// next rows only when an unclassified prompt is on screen, bounded.
+const _PEEK_KIND_HINTS_MAX = 2000;
+let _peekKindHintsBusy = false;
+async function _peekExtendKindHints(sess) {
+  if (_peekKindHintsBusy || _peekKindHintsFor !== sess || _peekKindHints.length >= _PEEK_KIND_HINTS_MAX) return false;
+  if (!document.querySelector('#peek-body .peek-prompt[data-msg-kind="unknown"]')) return false;
+  _peekKindHintsBusy = true;
+  try {
+    const rows = await _peekMsgFetch({ level: 'worker', name: sess }, _peekKindHints.length, 200);
+    if (peekSession !== sess || _peekKindHintsFor !== sess || !rows.length) return false;
+    _peekKindHints = _peekKindHints.concat(rows);
+    _peekReclassifyPrompts();
+    return true;
+  } catch (e) { return false; } finally { _peekKindHintsBusy = false; }
 }
 
 function _classifyPromptKind(promptText) {
@@ -16745,6 +16808,8 @@ async function _peekLoadEarlier(options) {
       earlier.loadedKb += _PEEK_LOG_CHUNK_KB;
       earlier.done = remaining <= 0;
       verdict = text.trim() ? 'loaded' : (earlier.done ? 'beginning' : 'empty');
+      // Older output needs older provenance rows to classify (AMUX-5377).
+      if (verdict === 'loaded') setTimeout(() => _peekExtendKindHints(name), 0);
     }
     // Paint immediately (refreshPeek skips DOM writes while scrolled up) and
     // anchor at the bottom of the just-loaded chunk so reading continues
@@ -17473,6 +17538,7 @@ async function _peekLoadEarlierUntil(found) {
   while (pages < _PEEK_EARLIER_MAX_PAGES) {
     verdict = await _peekLoadEarlier({quiet: true});
     pages++;
+    await _peekExtendKindHints(peekSession);
     _peekReclassifyPrompts();
     if (found() || !(verdict === 'loaded' || verdict === 'empty')) break;
   }

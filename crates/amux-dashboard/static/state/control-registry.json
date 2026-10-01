@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2362,
+  "n_considered": 2363,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -1906,6 +1906,12 @@
     },
     "_peekEditSchedule": {
       "kind": "command._peekEditSchedule",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_peekExtendKindHints": {
+      "kind": "command._peekExtendKindHints",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"
