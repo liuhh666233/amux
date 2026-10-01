@@ -47,3 +47,12 @@ if(process.argv.includes('--check')) {
   await build({entryPoints:[dir+'/kernel.mjs'],bundle:true,minify:true,format:'iife',outfile:dir+'/kernel.js'});
 }
 console.log(`interaction registry: ${functions.size} functions considered, ${mutations.size} command-capable handlers declared`);
+// The button-feedback audit doc is generated from the same app.js. It used to
+// need its own command, which nobody ran: spa-lint's --check then failed every
+// e2e shard on main after ordinary app.js edits (2026-10-01). Regenerate it
+// here, where every app.js edit already passes. Skipped when the script is not
+// in this tree (the pre-commit hook checks a partial export; CI checks the doc).
+if(fs.existsSync('scripts/button-audit.mjs')) {
+  const {execFileSync}=await import('node:child_process');
+  execFileSync(process.execPath,['scripts/button-audit.mjs',...(process.argv.includes('--check')?['--check']:[])],{stdio:'inherit'});
+}
