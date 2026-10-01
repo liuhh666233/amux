@@ -174,6 +174,16 @@ DISK_FLOOR_GB=${AMUX_CLEANUP_DISK_FLOOR_GB:-150}
 HOURS_TO_FULL=${AMUX_CLEANUP_HOURS_TO_FULL:-24}
 BURN_MIN_GBH=${AMUX_CLEANUP_BURN_MIN_GBH:-1}
 SWAP_FREE_FLOOR_MB=${AMUX_CLEANUP_SWAP_FREE_FLOOR_MB:-512}
+# macOS never proactively reclaims swap: once a page is written out, it sits
+# in the swapfile until the owning process touches it again, long after the
+# pressure spike that caused it has passed. MO-3655/MO-3657 measured
+# swap_free PINNED at the same 438.06MB across multiple hours while
+# kern.memorystatus_vm_pressure_level stayed 1 (normal) and load/free% both
+# visibly improved around it -- a floor read alone cannot tell "actively
+# low" from "low once, years ago." Below this fraction of swap_total free is
+# still trusted even with pr==1, since the kernel's own pressure read can
+# lag a genuine fast-moving emergency.
+SWAP_FREE_CRITICAL_PCT=${AMUX_CLEANUP_SWAP_FREE_CRITICAL_PCT:-0.10}
 CPU_SHARE=${AMUX_CLEANUP_CPU_SHARE:-0.9}
 STATE_DIR=${AMUX_CLEANUP_STATE_DIR:-$HOME/.amux/logs/mac-cleanup}
 # Not the desktop lane: it is ISOLATED, and amux refuses automated sends into an
@@ -707,13 +717,21 @@ disk_trend() { # <prev_ts> <prev_free_gb> <now_ts> <now_free_gb> <min_gbh>
 # swap_free=0.00MB each time, kern.memorystatus_vm_pressure_level=1 (normal)
 # and >=90% memory free every time -- a swapfile that was never created is not
 # a constraint, so this class only trips when a swapfile actually exists.
+# A low swap_free can ALSO be stale rather than never-created: MO-3655/3657
+# measured the identical 438.06MB free across several hours while pressure
+# stayed 1 (normal) and load/free% both improved -- macOS does not walk swap
+# back down once pages are written, so a floor-only check conflates "low
+# right now" with "low once, now stale." pr==1 (kernel-confirmed normal) is
+# trusted over a stale swap_free UNLESS swap itself is critically low as a
+# fraction of its own total, which still trips even if pressure hasn't
+# caught up to a genuinely fast-moving emergency.
 classify_constraints() { # <disk_free_gb> <burn> <hours_to_full> <pressure> <swap_free_mb> <load15> <ncpu> <family_exceeds:0|1> <swap_total_mb>
   awk -v df="$1" -v b="$2" -v h="$3" -v pr="$4" -v sw="$5" -v l="$6" -v n="$7" -v fam="$8" -v swt="$9" \
-      -v floor="$DISK_FLOOR_GB" -v htf="$HOURS_TO_FULL" -v swf="$SWAP_FREE_FLOOR_MB" -v cs="$CPU_SHARE" 'BEGIN{
+      -v floor="$DISK_FLOOR_GB" -v htf="$HOURS_TO_FULL" -v swf="$SWAP_FREE_FLOOR_MB" -v cs="$CPU_SHARE" -v swcp="$SWAP_FREE_CRITICAL_PCT" 'BEGIN{
     if (df >= 0 && df < floor) printf "disk free %.1fG is under the %dG floor\n", df, floor
     else if (h != "-" && h+0 < htf) printf "disk burning %.1fG/h, full in %.1fh (under %dh)\n", b, h, htf
     if (pr >= 2) printf "memory kernel pressure %d after the purge arm\n", pr
-    else if (swt > 0 && sw >= 0 && sw < swf) printf "memory swap has %dMB free (under %dMB)\n", sw, swf
+    else if (swt > 0 && sw >= 0 && sw < swf && (pr != 1 || sw/swt < swcp)) printf "memory swap has %dMB free (under %dMB)\n", sw, swf
     if (l >= 0 && n > 0 && l/n > cs) printf "cpu 15-min load %.1f is %.0f%% of %d cores (over %.0f%%)\n", l, l/n*100, n, cs*100
     if (fam == 1) print "family a process family is over its share of RAM"
   }'

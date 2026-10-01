@@ -39,7 +39,7 @@ check "a filling-up disk has no ETA"                       "-"    "$(mkhist 13 -
 check "garbage input is unmeasured, not a crash"           "- -"  "$(echo 'not json' | burn_from_history 1 | awk '{print $1, $2}')"
 
 echo "2. classification"
-DISK_FLOOR_GB=150; HOURS_TO_FULL=24; SWAP_FREE_FLOOR_MB=512; CPU_SHARE=0.9
+DISK_FLOOR_GB=150; HOURS_TO_FULL=24; SWAP_FREE_FLOOR_MB=512; CPU_SHARE=0.9; SWAP_FREE_CRITICAL_PCT=0.10
 check "a healthy machine is not constrained"          ""   "$(classify_constraints 600 - - 1 2000 10 28 0 20000)"
 check "under the disk floor"                          "disk" "$(classify_constraints 100 - - 1 2000 10 28 0 20000 | awk '{print $1}')"
 check "above the floor but full within the window"   "yes" "$(has "$(classify_constraints 300 20 15 1 2000 10 28 0 20000)" 'disk burning 20.0G/h, full in 15.0h')"
@@ -55,6 +55,13 @@ check "fresh boot, swap free=0 AND total=0: not a constraint"  ""       "$(class
 check "same free=0, but a real swapfile (total>0): still trips" "memory" "$(classify_constraints 600 - - 1 0 10 28 0 20000 | awk '{print $1}')"
 check "swap_total unmeasured (-1) does not trip either"          ""       "$(classify_constraints 600 - - 1 0 10 28 0 -1)"
 check "kernel pressure still trips independently of swap_total" "memory" "$(classify_constraints 600 - - 2 0 10 28 0 0 | awk '{print $1}')"
+
+echo "2c. a low swap_free can be STALE, not current, once pressure is confirmed normal (MO-3655/3657: identical 438.06MB free across hours while pressure stayed 1 and load/free% visibly improved)"
+check "pr==1 and 43% of swap still free (today's real numbers): not a constraint" "" "$(classify_constraints 600 - - 1 438 10 28 0 1024)"
+check "pr unmeasured (-1) with the same ratio: still trips (cannot trust pressure)" "memory" "$(classify_constraints 600 - - -1 438 10 28 0 1024 | awk '{print $1}')"
+check "pr==1 but under the critical percent (<10% of swap left): still trips despite normal pressure" "memory" "$(classify_constraints 600 - - 1 50 10 28 0 1024 | awk '{print $1}')"
+check "pr==1 right at the critical percent boundary (exactly 10%): does not trip" "" "$(classify_constraints 600 - - 1 102 10 28 0 1020)"
+check "pr==2 still trips via the pressure branch regardless of the percent gate" "memory" "$(classify_constraints 600 - - 2 438 10 28 0 1024 | awk '{print $1}')"
 
 echo "3. state and cooldown"
 S="$FIX/st/state"
