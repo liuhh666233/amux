@@ -6776,7 +6776,12 @@ p.communicate(msg.encode())
     [ -z "$lanes" ] || _land_log "batching ${lanes} behind this push (one gate run)"
     # `|| rc=$?`, not `; rc=$?`: this CLI runs under set -e, and a rejected
     # push in a bare assignment would exit the script before the retry.
-    rc=0; out="$(git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
+    # AMUX_LAND_HOLDER_PID marks this push as the lock holder's, so a pre-push
+    # hook can refuse any OTHER push to the branch while a land is in its gate
+    # (a direct push moves the tip and forces the holder's gate to start over:
+    # gtm ticks and homepage grafts did that to gs12-gates' 50-minute gate on
+    # 2026-10-01). AMUX_LAND_LOCK names the lock to compare against.
+    rc=0; out="$(AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
     if [ $rc -eq 0 ]; then
       if [ -n "$lanes" ]; then
         _land_tell "landed $(git rev-parse --short "$stack_tip") on $branch, batched by $me"
