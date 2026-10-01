@@ -1121,6 +1121,8 @@ pub const TIMESTAMP_COLUMNS: &[(&str, &str, bool)] = &[
     ("board_signals", "raised_at", false),
     // SECONDS: DEFAULT (unixepoch('subsec')) in migration 0061.
     ("board_change_log", "changed_at", false),
+    ("chatgpt_oauth_requests", "decided_at", false), // chatgpt_app.rs, REAL epoch seconds
+    ("chatgpt_oauth_tokens", "revoked_at", false), // chatgpt_app.rs, REAL epoch seconds
     ("cmd_history", "delivered_at", true),
     ("cmd_history", "intake_called_at", false),
     ("cmd_history", "intake_retry_at", false),

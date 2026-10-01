@@ -138,7 +138,7 @@ pub(crate) fn orphan_push_pids(ps: &str, min_age: u64) -> Vec<u32> {
 }
 
 async fn cmd_out(prog: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::time::timeout(GIT_TIMEOUT, tokio::process::Command::new(prog).args(args).output())
+    let out = tokio::time::timeout(GIT_TIMEOUT, tokio::process::Command::new(prog).args(args).kill_on_drop(true).output())
         .await
         .ok()?
         .ok()?;
