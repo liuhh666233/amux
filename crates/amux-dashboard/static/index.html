@@ -2659,7 +2659,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <div class="peek-tasks-add" style="gap:8px;padding:8px 10px;">
       <input type="search" id="peek-messages-search" placeholder="Search messages sent to this worker&hellip;" oninput="_peekMessagesRender()"
         style="flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:0.82rem;color:var(--text);outline:none;">
-      <input type="date" id="peek-msgs-date-jump" class="amux-dp" onchange="_peekMsgsJumpToDate(this.value)" title="Jump to a date" style="font-size:0.8rem;padding:5px 7px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);color-scheme:dark;">
+      <input type="date" id="peek-msgs-date-jump" class="amux-dp pm-wide" onchange="_peekMsgsJumpToDate(this.value)" title="Jump to a date" style="font-size:0.8rem;padding:5px 7px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);color-scheme:dark;">
       <span id="peek-messages-count" style="font-size:0.72rem;color:var(--dim);align-self:center;white-space:nowrap;"></span>
       <button class="btn pm-wide" id="peek-ask-toggle" onclick="_peekAskToggle()" title="Ask a question about this worker's messages"
         style="font-size:0.78rem;padding:4px 10px;flex:0 0 auto;">&#x1F4AC; Ask</button>
@@ -2671,6 +2671,8 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <div class="worker-group-dropdown">
           <button type="button" onclick="this.closest('details').open=false;_peekAskToggle()">&#x1F4AC; Ask about these messages</button>
           <button type="button" onclick="this.closest('details').open=false;_exportMessageHistory()">Export message history (JSON)</button>
+          <label class="pm-date-item">Jump to date
+            <input type="date" class="amux-dp" onchange="this.closest('details').open=false;_peekMsgsJumpToDate(this.value)"></label>
         </div>
       </details>
     </div>

@@ -27,6 +27,10 @@ test('Messages tab: Ask and Export sit in the row on wide screens and in a ⋯ m
   if (phone) {
     await expect(more).toBeVisible();
     await expect(wide.first()).toBeHidden();
+    await expect(page.locator('#peek-msgs-date-jump')).toBeHidden();
+    const search = await page.locator('#peek-messages-search').boundingBox();
+    expect(search!.width).toBeGreaterThanOrEqual(120);
+    await expect(more.locator('.pm-date-item input[type=date]')).toHaveCount(1);
     const box = await more.locator('summary').boundingBox();
     expect(box!.height).toBeGreaterThanOrEqual(44);
     await more.locator('summary').click();
