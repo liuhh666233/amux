@@ -21,7 +21,7 @@ check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1: expec
 yn() { if "$@"; then echo yes; else echo no; fi; }
 AMUX_CLEANUP_LIB_ONLY=1 . "$TICK"
 export AMUX_CLEANUP_STATE_DIR="$FIX/assess-state" AMUX_CLEANUP_ESCALATE_CMD="true" AMUX_CLEANUP_HISTORY_CMD="true" AMUX_CLEANUP_CARD_CMD="true" AMUX_CLEANUP_VM_LIST_CMD="true"   # never page a real lane from a test (DESKT-57)
-DEFAULT_KEEP=$TARGET_KEEP; DEFAULT_ROOTS=$TARGET_ROOTS; DEFAULT_VM_PRUNE=$VM_PRUNE_CMD      # what the scheduler actually runs with, before this file overrides the knobs
+DEFAULT_KEEP=$TARGET_KEEP; DEFAULT_ROOTS=$TARGET_ROOTS; DEFAULT_VM_PRUNE=$VM_PRUNE_CMD; DEFAULT_VM_STOP=$VM_STOP_CMD      # what the scheduler actually runs with, before this file overrides the knobs
 
 # Knobs the arm reads. Small budgets: nothing here should ever wait on them.
 TARGET_DEPTH=8; TARGET_SCAN_S=30; TARGET_WALK_S=30; TARGET_BUDGET_S=120
@@ -147,8 +147,8 @@ check "control: within budget it is reaped"            "no"  "$(yn test -e "$R/p
 fresh_root budw
 mk_target "$R/one/target" old; mk_target "$R/two/target" old
 orig_dir_idle=$(declare -f dir_idle)
-dir_idle() { echo x >> "$FIX/walks"; sleep 3; return 0; }
-rm -f "$FIX/walks"; : > "$FIX/walks"; TARGET_BUDGET_S=2; run 0
+dir_idle() { echo x >> "$FIX/walks"; sleep 6; return 0; }
+rm -f "$FIX/walks"; : > "$FIX/walks"; TARGET_BUDGET_S=3; run 0
 check "the second candidate is not even walked once the budget is spent" "1" "$(grep -c x "$FIX/walks" | tr -d ' ')"
 eval "$orig_dir_idle"
 # Delete phase: the walk is instant but sizing (du) takes 3s, budget 2s. The delete loop must stop by itself.
@@ -267,6 +267,33 @@ check "and is counted failed" "yes" "$(grep -q 'failed 2' "$FIX/out.txt" && echo
 VM_LIST_CMD="true"; prune_vm_build_caches 0 > "$FIX/out.txt"
 check "no running VM says so" "yes" "$(grep -q 'no running colima VM' "$FIX/out.txt" && echo yes || echo no)"
 check "the default prune is build cache only" "yes" "$(printf '%s' "$DEFAULT_VM_PRUNE" | grep -q 'builder prune -f' && ! printf '%s' "$DEFAULT_VM_PRUNE" | grep -q -E 'system|image|volume' && echo yes || echo no)"
+
+echo "12d. idle VMs are stopped under pressure, busy or unmeasured ones never (DESKT-70)"
+printf '%s\n' '{"name":"idle","status":"Running"}' '{"name":"busy","status":"Running"}' '{"name":"quiet-but-working","status":"Running"}' '{"name":"blind","status":"Running"}' '{"name":"off","status":"Stopped"}' > "$FIX/vms2.json"
+cat > "$FIX/vmload.sh" <<'VL'
+#!/bin/bash
+case "$1" in idle|quiet-but-working) printf '0.05 0.10 0.12 1/300 9\n86400.0 1000.0\n';; young) printf '0.01 0.01 0.01 1/300 9\n600.0 50.0\n';; busy) printf '6.1 6.0 5.9 9/300 9\n86400.0 10.0\n';; *) exit 1;; esac
+VL
+cat > "$FIX/vmev.sh" <<'VE'
+#!/bin/bash
+case "$1" in idle) printf 'exec_create\nexec_start\nexec_die\n';; quiet-but-working) printf 'exec_start\ncreate\nstart\n';; *) :;; esac
+VE
+printf '#!/bin/bash\necho "$1" >> %s\n' "$FIX/stops" > "$FIX/vmstop.sh"; chmod +x "$FIX"/vmload.sh "$FIX"/vmev.sh "$FIX"/vmstop.sh
+VM_LIST_CMD="cat $FIX/vms2.json"; VM_LOAD_CMD="$FIX/vmload.sh PROFILE"; VM_EVENTS_CMD="$FIX/vmev.sh PROFILE"; VM_STOP_CMD="$FIX/vmstop.sh PROFILE"
+STATE_DIR="$FIX/vmstate"; : > "$FIX/stops"
+rc=0; vm_is_idle idle || rc=$?;              check "healthcheck-only activity at low load is idle" "0" "$rc"
+rc=0; vm_is_idle busy || rc=$?;              check "a loaded VM is busy" "1" "$rc"
+rc=0; vm_is_idle quiet-but-working || rc=$?; check "a container created in the window is busy, even at low load" "1" "$rc"
+rc=0; vm_is_idle blind || rc=$?;             check "an unreadable guest is unmeasured, not idle" "2" "$rc"
+rc=0; vm_is_idle young || rc=$?;             check "a VM up less than the window is busy, however quiet" "1" "$rc"
+stop_idle_vms 0 "memory pressure 2" > "$FIX/out.txt"
+check "only the idle VM is stopped" "idle" "$(tr '\n' ' ' < "$FIX/stops" | sed 's/ $//')"
+check "the stop is recorded with its restore command" "yes" "$(grep -q 'stopped colima VM idle .*Restore: colima start -p idle' "$FIX/vmstate/vm-stops.log" && echo yes || echo no)"
+check "the summary counts kept busy and unmeasured" "yes" "$(grep -q 'stopped 1, kept busy 2, kept unmeasured 1' "$FIX/out.txt" && echo yes || echo no)"
+: > "$FIX/stops"; stop_idle_vms 1 "memory pressure 2" > "$FIX/out.txt"
+check "dry run stops nothing" "0" "$(grep -c . "$FIX/stops" | tr -d ' ')"
+check "and names what it would stop" "yes" "$(grep -q 'would stop idle colima VM idle' "$FIX/out.txt" && echo yes || echo no)"
+check "the default stop is a stop, never a delete" "yes" "$(printf '%s' "$DEFAULT_VM_STOP" | grep -q '^colima stop -p PROFILE$' && echo yes || echo no)"
 
 echo "13. the defaults the scheduler runs with"
 check "the amux shared target is protected by default"  "yes" "$(printf '%s' "$DEFAULT_KEEP" | grep -Eq "\.amux/rust-build-target(:|\$)" && echo yes || echo no)"

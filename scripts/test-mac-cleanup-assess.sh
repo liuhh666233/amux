@@ -16,6 +16,8 @@ has() { if printf '%s' "$1" | grep -q -- "$2"; then echo yes; else echo no; fi; 
 AMUX_CLEANUP_LIB_ONLY=1 . "$TICK"
 # No end-to-end cell here may prune a real VM (DESKT-69) or reap real build output.
 export AMUX_CLEANUP_VM_LIST_CMD="true"
+# The tick reads live memory pressure; a loaded Mac must not decide these cells.
+export AMUX_CLEANUP_PRESSURE_CMD="echo 1"
 
 echo "1. disk trend"
 check "no previous reading is unmeasured, not zero"   "- -"      "$(disk_trend 0 0 1000 500 1)"
@@ -152,8 +154,8 @@ if [ "$(uname)" = Darwin ]; then
   check "and sends nothing"                            "no"  "$([ -f "$FIX/sent.log" ] && echo yes || echo no)"
   out=$(tick 999999 "$REC")
   check "control: a constrained disk escalates"        "yes" "$(has "$out" 'escalated to mac-ops-test')"
-  check "to the configured target"                     "1"   "$(grep -c 'to=mac-ops-test' "$FIX/sent.log" | tr -d ' ')"
-  msg=$(sed -n 's/.*file=//p' "$FIX/sent.log" | head -1)
+  check "to the configured target"                     "1"   "$(grep -c 'to=mac-ops-test file=.*\.disk\.msg' "$FIX/sent.log" | tr -d ' ')"
+  msg=$(sed -n 's/.*file=//p' "$FIX/sent.log" | grep '\.disk\.msg$' | head -1)
   check "the message's first line is the ask"          "yes" "$(head -1 "$msg" | grep -q '^Ask: find and fix the ROOT CAUSE' && echo yes || echo no)"
   bundle=$(sed -n 's/^Evidence: \([^ ]*\).*/\1/p' "$msg")
   check "the bundle it names exists"                   "yes" "$([ -f "$bundle" ] && echo yes || echo no)"
@@ -162,14 +164,16 @@ if [ "$(uname)" = Darwin ]; then
   check "the done line counts it"                      "yes" "$(has "$out" 'escalated=1')"
   out=$(tick 999999 "$REC")
   check "a second tick inside the cooldown is suppressed" "yes" "$(has "$out" 'escalation suppressed')"
-  check "and sends nothing more"                       "1"   "$(grep -c 'to=mac-ops-test' "$FIX/sent.log" | tr -d ' ')"
+  # Count DISK sends only: the tick reads the machine's real memory pressure and
+  # load, so on a loaded Mac a memory or cpu escalation can legitimately join in.
+  check "and sends nothing more"                       "1"   "$(grep -c 'to=mac-ops-test file=.*\.disk\.msg' "$FIX/sent.log" | tr -d ' ')"
   # Recurrence: the model turn wrote its card id; the cooldown lapses; the next
   # escalation must quote that card. The cooldown is shortened, not faked.
   echo MO-9999 > "${msg%.msg}.card"
   state_put "$FIX/tick/state" "esc_disk=$(( $(date +%s) - 7*3600 ))"
   out=$(tick 999999 "$REC")
   check "after the cooldown a recurrence escalates"     "yes" "$(has "$out" 'recurrence, previous 7.0h ago, card MO-9999')"
-  msg2=$(sed -n 's/.*file=//p' "$FIX/sent.log" | tail -1)
+  msg2=$(sed -n 's/.*file=//p' "$FIX/sent.log" | grep '\.disk\.msg$' | tail -1)
   check "and the prompt quotes the previous card"       "yes" "$(grep -q 'card: MO-9999; measured then: disk=' "$msg2" && echo yes || echo no)"
 else
   echo "  skip macOS-only cells (the tick's probes are macOS commands): not run on $(uname)"

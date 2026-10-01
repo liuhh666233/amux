@@ -150,6 +150,25 @@ VM_LIST_CMD=${AMUX_CLEANUP_VM_LIST_CMD:-colima list --json}
 VM_PRUNE_CMD=${AMUX_CLEANUP_VM_PRUNE_CMD:-docker --context colima-PROFILE builder prune -f}
 VM_TRIM_CMD=${AMUX_CLEANUP_VM_TRIM_CMD:-colima ssh -p PROFILE -- sudo fstrim -a}
 VM_STEP_S=${AMUX_CLEANUP_VM_STEP_S:-120}
+# Idle colima VMs under pressure (DESKT-70). On 2026-10-01 eight goal-spec lanes
+# had each started a private VM (16-32G apiece); with five running the Mac hit
+# load 116 and memory pressure 2, and the one idle VM stopped by hand freed ~80G
+# of footprint. A VM is IDLE when its guest 15-minute load is under
+# VM_IDLE_LOAD and docker recorded no event other than a healthcheck exec in the
+# last VM_IDLE_MIN minutes. Stopping is reversible (`colima start -p <p>`;
+# images, containers and volumes stay on disk), it runs only under memory
+# pressure or the tight-disk threshold, and every stop is recorded with its
+# restore command in $STATE_DIR/vm-stops.log.
+VM_IDLE_LOAD=${AMUX_CLEANUP_VM_IDLE_LOAD:-0.5}
+# Seam for the kernel pressure reading the assess stage and the idle-VM arm act on,
+# so a suite on a loaded Mac does not inherit the machine's live pressure (DESKT-70).
+PRESSURE_CMD=${AMUX_CLEANUP_PRESSURE_CMD:-sysctl -n kern.memorystatus_vm_pressure_level}
+VM_IDLE_MIN=${AMUX_CLEANUP_VM_IDLE_MIN:-60}
+# Seams. PROFILE is the colima profile. The load probe prints /proc/loadavg; the
+# events probe prints one docker event action per line.
+VM_LOAD_CMD=${AMUX_CLEANUP_VM_LOAD_CMD:-colima ssh -p PROFILE -- cat /proc/loadavg /proc/uptime}
+VM_EVENTS_CMD=${AMUX_CLEANUP_VM_EVENTS_CMD:-docker --context colima-PROFILE events --since MINm --until 0s --format \{\{.Action\}\}}
+VM_STOP_CMD=${AMUX_CLEANUP_VM_STOP_CMD:-colima stop -p PROFILE}
 TARGET_KEEP=${AMUX_CLEANUP_TARGET_KEEP:-$HOME/.amux/rust-build-target:$HOME/.ao/data/cargo-target-shared:${CARGO_TARGET_DIR:-}}
 TARGET_DEPTH=${AMUX_CLEANUP_TARGET_DEPTH:-8}
 TARGET_SCAN_S=${AMUX_CLEANUP_TARGET_SCAN_S:-90}
@@ -906,6 +925,54 @@ EOF
   echo "mac-cleanup: vm build cache: pruned ${VMS_PRUNED} running VM(s), failed ${VMS_FAILED} (images, containers and volumes untouched)"
 }
 
+# 0 if a VM is idle: guest 15-min load under the threshold AND no docker event
+# but healthcheck execs in the window. 1 if busy. 2 if either probe could not be
+# read, which is BUSY for every purpose: an unmeasured VM is never stopped.
+vm_is_idle() { # <profile>
+  local p=$1 cmd load ev rc=0
+  cmd=${VM_LOAD_CMD//PROFILE/$p}
+  local probe up
+  probe=$(perl -e 'alarm 30; exec @ARGV' $cmd 2>/dev/null) || rc=$?
+  load=$(printf '%s\n' "$probe" | awk 'NR==1{print $3}'); up=$(printf '%s\n' "$probe" | awk 'NR==2{print int($1)}')
+  case "$load" in ''|*[!0-9.]*) return 2 ;; esac
+  case "$up" in ''|*[!0-9]*) return 2 ;; esac
+  # A VM younger than the window has had no chance to show activity: on
+  # 2026-10-01 gs12-obs read idle 25 minutes after a lane created it.
+  [ "$up" -ge $(( VM_IDLE_MIN * 60 )) ] || return 1
+  cmd=${VM_EVENTS_CMD//PROFILE/$p}; cmd=${cmd//MIN/$VM_IDLE_MIN}
+  ev=$(perl -e 'alarm 30; exec @ARGV' $cmd 2>/dev/null) || return 2
+  awk -v l="$load" -v t="$VM_IDLE_LOAD" 'BEGIN{ exit !(l+0 < t+0) }' || return 1
+  if printf '%s\n' "$ev" | grep -v -E '^(exec_create|exec_start|exec_die)' | grep -q .; then return 1; fi
+  return 0
+}
+
+# Stop every idle running VM. Sets VMS_STOPPED. Records each stop.
+stop_idle_vms() { # <dry:0|1> <why>
+  local dry=$1 why=$2 p rc n_busy=0 n_unk=0 profiles cmd
+  VMS_STOPPED=0
+  profiles=$(running_vm_profiles)
+  if [ -z "$profiles" ]; then echo "mac-cleanup: idle VMs: no running colima VM"; return 0; fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    rc=0; vm_is_idle "$p" || rc=$?
+    if [ "$rc" = 1 ]; then n_busy=$((n_busy+1)); continue; fi
+    if [ "$rc" = 2 ]; then n_unk=$((n_unk+1)); continue; fi
+    if [ "$dry" = 1 ]; then echo "mac-cleanup:   would stop idle colima VM $p (dry run)"; continue; fi
+    cmd=${VM_STOP_CMD//PROFILE/$p}
+    if perl -e 'alarm 180; exec @ARGV' $cmd >/dev/null 2>&1; then
+      VMS_STOPPED=$((VMS_STOPPED+1))
+      mkdir -p "$STATE_DIR"
+      echo "$(date '+%F %T') stopped colima VM $p ($why; guest load under $VM_IDLE_LOAD, no docker activity but healthchecks for ${VM_IDLE_MIN}m). Restore: colima start -p $p" >> "$STATE_DIR/vm-stops.log"
+      echo "mac-cleanup:   stopped idle colima VM $p (restore: colima start -p $p)"
+    else
+      echo "mac-cleanup:   FAILED to stop idle colima VM $p"
+    fi
+  done <<EOF
+$profiles
+EOF
+  echo "mac-cleanup: idle VMs: stopped ${VMS_STOPPED}, kept busy ${n_busy}, kept unmeasured ${n_unk} (only under $why)"
+}
+
 effective_target_idle_h() { # <disk_free_gb> <normal_h> <tight_free_gb> <tight_h>
   awk -v f="$1" -v n="$2" -v t="$3" -v h="$4" 'BEGIN{ if (f >= 0 && f < t && h < n) print h; else print n }'
 }
@@ -1103,6 +1170,10 @@ fi
 reap_idle_cargo_targets "$TARGET_ROOTS" "$tgt_idle" "$DRY"
 VMS_PRUNED=0
 if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then prune_vm_build_caches "$DRY"; fi
+VMS_STOPPED=0
+vm_level=$($PRESSURE_CMD 2>/dev/null); case "$vm_level" in ''|*[!0-9]*) vm_level=-1 ;; esac
+if [ "$vm_level" -ge 2 ]; then stop_idle_vms "$DRY" "memory pressure $vm_level"
+elif [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then stop_idle_vms "$DRY" "disk under ${TARGET_TIGHT_FREE_GB}G"; fi
 reap_idle_worktrees "$WORKTREE_ROOTS" "$WORKTREE_IDLE_H" "$DRY"
 
 # ── act: thin APFS local snapshots when the disk is tight ────────────────────
@@ -1172,7 +1243,7 @@ if [ -n "${fam_kb:-}" ] && family_exceeds "$fam_kb" "$phys_kb" "$FAMILY_SHARE_PC
 now=$(date +%s)
 disk_now=$(df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2{ printf "%.1f", $4/1048576 }')
 case "$disk_now" in ''|*[!0-9.]*) disk_now=-1 ;; esac
-level_now=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null); case "$level_now" in ''|*[!0-9]*) level_now=-1 ;; esac
+level_now=$($PRESSURE_CMD 2>/dev/null); case "$level_now" in ''|*[!0-9]*) level_now=-1 ;; esac
 swap_free_now=$(sysctl -n vm.swapusage 2>/dev/null | sed -E 's/.*free = ([0-9.]+)M.*/\1/'); case "$swap_free_now" in ''|*[!0-9.]*) swap_free_now=-1 ;; esac
 swap_total_now=$(sysctl -n vm.swapusage 2>/dev/null | sed -E 's/.*total = ([0-9.]+)M.*/\1/'); case "$swap_total_now" in ''|*[!0-9.]*) swap_total_now=-1 ;; esac
 load15=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $4}'); case "$load15" in ''|*[!0-9.]*) load15=-1 ;; esac
