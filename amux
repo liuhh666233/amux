@@ -6413,6 +6413,45 @@ ${BOLD}amux signal${RESET} — wait on, or raise, a named clearance signal
 USAGE
 }
 
+# _land_status: the queue as land will serve it, the holder, and an estimate.
+_land_status() {
+  local remote=origin branch=main url key lock q me holder since n=0 t who mine="" med
+  url="$(git remote get-url "$remote" 2>/dev/null)" || die "amux land --status: run it inside the repository's checkout"
+  key="$(printf '%s %s' "$url" "$branch" | shasum | cut -c1-16)"
+  lock="$HOME/.amux/locks/land-$key"; q="$lock.q"
+  me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}"
+  if [ -d "$lock" ]; then
+    since=$(cat "$lock/since" 2>/dev/null || echo 0)
+    echo "holder: $(cat "$lock/who" 2>/dev/null || echo ?) (pid $(cat "$lock/pid" 2>/dev/null || echo ?)), current attempt $(( ($(date +%s) - since) / 60 )) min"
+  else
+    echo "holder: none"
+  fi
+  # Median minutes from acquired to landed/failed, from today's land.log.
+  med=$(awk -v d="$(date -u +%Y-%m-%d)" -v k="[$key]" '
+    index($1, d) == 1 && $NF == k {
+      split($1, a, /[T:Z]/); s = a[2]*3600 + a[3]*60 + a[4]
+      if ($3 == "acquired") st[$2] = s
+      else if (($3 == "landed" || $3 == "push") && ($2 in st)) { print int((s - st[$2]) / 60); delete st[$2] }
+    }' "$HOME/.amux/logs/land.log" 2>/dev/null | sort -n | awk '{ v[NR] = $1 } END { if (NR) print v[int((NR + 1) / 2)] }')
+  for t in $(ls "$q" 2>/dev/null | sort); do
+    n=$((n + 1)); who="$(head -1 "$q/$t" 2>/dev/null || echo ?)"
+    local tag="" since_t
+    [ "${t:0:3}" = "000" ] && tag="priority "
+    since_t=$((10#${t%%-*}))
+    [ "$tag" = "priority " ] && since_t=$(( $(date +%s) / 1000000000 * 1000000000 + 10#${t:3:9} ))
+    printf '%3d  %-24s %s%s\n' "$n" "$who" "$tag" "waiting $(( ($(date +%s) - since_t) / 60 )) min"
+    [ "$who" = "$me" ] && [ -z "$mine" ] && mine=$n
+  done
+  [ "$n" -gt 0 ] || echo "queue: empty"
+  if [ -n "$mine" ]; then
+    if [ -n "$med" ]; then
+      echo "you ($me): position $mine; today's median hold is $med min, batches carry up to ${AMUX_LAND_BATCH_MAX:-6}; expect roughly $(( (mine + 5) / 6 * med ))-$(( mine * med )) min (fewer turns if batched, more if a batch is refused)"
+    else
+      echo "you ($me): position $mine; no completed holds today to estimate from"
+    fi
+  fi
+}
+
 # _land_cancel: stop every detached `amux land` of this lane (whole process
 # group: the wrapper, the land, its git push and hook) and report each.
 _land_cancel() {
@@ -6434,7 +6473,7 @@ _land_cancel() {
 }
 
 cmd_land() {
-  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel
+  # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
   #
   # Rebase this checkout onto the remote branch and push HEAD there, holding a
   # per-repo, per-branch lock for the whole fetch -> rebase -> push loop, so
@@ -6503,6 +6542,7 @@ cmd_land() {
       --detach) detach=1; shift ;;
       --sha) land_sha="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --cancel) _land_cancel; return $? ;;
+      --status) _land_status; return $? ;;
       -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
       *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | amux land --cancel" ;;
     esac
@@ -6567,7 +6607,9 @@ p.communicate(msg.encode())
     echo "amux land: detached (pid $dpid). Output: $dlog. You get a message when it lands or stops; nothing to poll. Stop it with: amux land --cancel"
     return 0
   fi
-  _land_log() { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "$*" >> "$log"; echo "amux land: $*" >&2; }
+  # Each line ends with the repository's lock key, so per-repository readings
+  # (--status's median hold) are not mixed with other repositories' lands.
+  _land_log() { printf '%s %s %s [%s]\n' "$(date -u +%FT%TZ)" "$me" "$*" "$key" >> "$log"; echo "amux land: $*" >&2; }
   # _land_pushing <pid>: does that process have a live `git push` or pre-push
   # hook among its descendants?
   _land_pushing() {
@@ -6649,6 +6691,22 @@ p.communicate(msg.encode())
       kill -0 "${t##*-}" 2>/dev/null || { _land_log "dropped the ticket of a waiter that exited ($(head -1 "$t" 2>/dev/null || echo ?), pid ${t##*-})"; rm -f -- "${t:?}"; }
     done
     head="$(ls "$q" | sort | head -1)"
+    # AGING (gs12-retrievers, 2026-10-01: the first ordinary ticket waited
+    # 4h20m while four --priority tickets passed it). Past
+    # AMUX_LAND_PRIORITY_AGING_S (default 7200) an ordinary waiter renames ITS
+    # OWN ticket into the priority range, keeping its arrival time, so plain
+    # name order (what every waiter, old or new, serves by) puts it ahead of
+    # priority tickets that arrived after it. Only a ticket's own waiter
+    # renames it.
+    if [ "${tname:0:3}" != "000" ] && [ $(( $(date +%s) - 10#${tname%%-*} )) -gt "${AMUX_LAND_PRIORITY_AGING_S:-7200}" ]; then
+      local aged="000$(printf '%09d' $(( 10#${tname%%-*} % 1000000000 )))-$$"
+      if mv -- "${q:?}/${tname:?}" "${q:?}/${aged:?}" 2>/dev/null; then
+        _land_log "waited past ${AMUX_LAND_PRIORITY_AGING_S:-7200}s; ticket aged into the priority order at its arrival time"
+        tname="$aged"
+        trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
+        head="$(ls "$q" | sort | head -1)"
+      fi
+    fi
     if [ "$head" = "$tname" ] && mkdir "$lock" 2>/dev/null; then break; fi
     local hpid hsince hwho
     hpid="$(cat "$lock/pid" 2>/dev/null || true)"; hwho="$(cat "$lock/who" 2>/dev/null || true)"
