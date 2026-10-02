@@ -2,7 +2,7 @@
 // between the worker name and the model pill and clipped mid-word; tapping it
 // must open the card with somewhere to answer. And the group row's Reset goes
 // first. No real data changes: the worker, card and every write are fakes.
-import { test, expect, Page } from './fixtures';
+import { test, expect, Page, allowUnusedRoute } from './fixtures';
 
 const ASK = 'Should I go ahead with the shard move to the larger spot instance tonight, or hold until tomorrow?';
 
@@ -13,7 +13,6 @@ async function boot(page: Page) {
 }
 
 test('needs-input chip has its own row, is not clipped, and opens the card with the answer focused', async ({ page }) => {
-  await boot(page);
   const card: any = { id: 'NI-9001', title: 'Shard move decision', status: 'needsyou', session: 'ni-worker', desc: '', archived: false };
   const sent: any[] = [];
   const patches: any[] = [];
@@ -30,13 +29,36 @@ test('needs-input chip has its own row, is not clipped, and opens the card with 
     return r.fulfill({ json: card });
   });
   await page.route('**/api/needs-input/log', r => r.fulfill({ json: { ok: true } }));
-  await page.evaluate(({ card, ask }) => {
+  const worker = { name: 'ni-worker', running: true, status: 'waiting', waiting_reason: 'owner', lifecycle: 'active',
+    owner_block: { card: card.id, ask: ASK }, tags: [], dir: '/tmp', flags: '', provider: 'claude', model: 'claude-opus-5-5' };
+  // Serve the fake worker from /api/sessions too. Pushed only into memory, a
+  // routine sessions refresh replaced the list mid-test and the title row lost
+  // its "needs input" status (iOS, run 36989151604).
+  const sessionsList = /\/api\/sessions(?:\?.*)?$/;
+  // The live stream also replaces the list with its own snapshots; hold it
+  // closed so only this route supplies sessions.
+  await page.route('**/api/events**', r => r.abort());
+  allowUnusedRoute(page, '**/api/events**');
+  await page.route(sessionsList, async r => {
+    if (r.request().method() !== 'GET') return r.fallback();
+    // A refresh still in flight when the test ends must not throw into the
+    // NEXT test ("route.fetch: Test ended").
+    try {
+      const headers = { ...r.request().headers() };
+      delete headers['if-none-match'];   // a 304 has no list to add the worker to
+      const res = await r.fetch({ headers });
+      const list = await res.json().catch(() => []);
+      await r.fulfill({ status: 200, json: [...(Array.isArray(list) ? list.filter((x: any) => x.name !== worker.name) : []), worker] });
+    } catch { /* test over */ }
+  });
+  allowUnusedRoute(page, sessionsList);
+  await boot(page);
+  await page.evaluate(({ card, worker }) => {
     const g = globalThis as any;
-    g.eval('sessions').push({ name: 'ni-worker', running: true, status: 'waiting', waiting_reason: 'owner', lifecycle: 'active',
-      owner_block: { card: card.id, ask }, tags: [], dir: '/tmp', flags: '', provider: 'claude', model: 'claude-opus-5-5' });
+    if (!g.eval('sessions').some((x: any) => x.name === worker.name)) g.eval('sessions').push({ ...worker });
     g.eval('boardItems').push({ ...card });
     g.openPeek('ni-worker');
-  }, { card, ask: ASK });
+  }, { card, worker });
   await page.waitForFunction(() => (document.getElementById('peek-overlay') as HTMLElement).dataset.session === 'ni-worker');
   await page.evaluate(() => (globalThis as any).updatePeekStatus());
   const row = page.locator('#peek-needs-input-row');
@@ -57,6 +79,12 @@ test('needs-input chip has its own row, is not clipped, and opens the card with 
   expect(geo.right).toBeLessThanOrEqual(geo.vw + 0.5);
   expect(geo.h).toBeGreaterThanOrEqual(44);
   expect(geo.titleHasChip).toBe(false);
+  // A sessions refresh in this window is what CI hit; force one so the race is
+  // exercised every run instead of by luck.
+  await page.evaluate(() => (globalThis as any).fetchSessions());
+  await page.waitForTimeout(500);
+  await page.evaluate(() => (globalThis as any).updatePeekStatus());
+  expect(await page.evaluate(() => (globalThis as any).eval('sessions').some((x: any) => x.name === 'ni-worker'))).toBe(true);
   await expect(page.locator('#peek-title-row')).toContainText('needs input');
   // Tap: the card opens with the answer box focused.
   await chip.click();
