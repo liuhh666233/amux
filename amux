@@ -6470,6 +6470,40 @@ USAGE
 }
 
 # _land_status: the queue as land will serve it, the holder, and an estimate.
+# MO-4104: refuse a doomed ticket at enqueue, in seconds, instead of at the
+# head of the queue after a full gate run that sends a whole batch back. The
+# repo supplies the check: $AMUX_LAND_PRECHECK, else an executable
+# .githooks/land-precheck in the checkout. It is called as
+# `<check> <base> <tip>` (base = the remote branch) and a non-zero exit refuses
+# the ticket with the check's own output. Measured 2026-10-01: 7 of the 10
+# refusals whose log named the leg were commit-body or render guards that take
+# seconds, and each cost a batch a full gate (mixpeek-override, MO-4104). A
+# check that times out (AMUX_LAND_PRECHECK_TIMEOUT_S, default 180) or cannot
+# run is logged as unmeasured and the ticket queues: the gate still runs.
+_land_precheck() {
+  local remote="$1" branch="$2" tip="$3" me="$4" log="$5" chk top out rc t0 full
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+  chk="${AMUX_LAND_PRECHECK:-}"
+  [ -n "$chk" ] || { [ -x "$top/.githooks/land-precheck" ] && chk="$top/.githooks/land-precheck"; }
+  [ -n "$chk" ] || return 0
+  git fetch -q "$remote" "$branch" 2>/dev/null || true
+  git rev-parse -q --verify "$remote/$branch^{commit}" >/dev/null 2>&1 || {
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured: no $remote/$branch" >> "$log"; return 0; }
+  t0=$(date +%s); rc=0
+  out="$(cd "$top" && perl -e 'alarm shift; exec @ARGV or exit 127' "${AMUX_LAND_PRECHECK_TIMEOUT_S:-180}" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
+  full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-precheck.log"
+  mkdir -p "${full%/*}"; printf '%s\n' "$out" > "$full"
+  case "$rc" in
+    0) printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck passed in $(( $(date +%s) - t0 ))s" >> "$log"; return 0 ;;
+    142|127|126)
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured (rc $rc: timed out or could not run); queued anyway. Output: $full" >> "$log"; return 0 ;;
+  esac
+  printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck refused (rc $rc, $(( $(date +%s) - t0 ))s); not queued. Output: $full" >> "$log"
+  printf '%s\n' "$out" | tail -30 >&2
+  echo "amux land: refused before queueing: the repository's land precheck failed on this range (full output $full). Fix the commits and run amux land again." >&2
+  return 1
+}
+
 # MO-4102: is this --priority push entitled to jump the queue? Prints the
 # refusal and returns 1 when not. A range that cannot be measured is allowed and
 # logged as unmeasured rather than refused on a guess.
@@ -6651,7 +6685,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.1"
+LAND_BEHAVIOR_VERSION="2026-10-02.2"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -6767,6 +6801,9 @@ cmd_land() {
   if [ "$priority" = 1 ] && [ "${AMUX_LAND_PRIORITY_CHECKED:-}" != 1 ]; then
     _land_priority_check "$remote" "$branch" "${land_sha:-HEAD}" "$prio_reason" "$me" "$log" || return 2
   fi
+  if [ "${AMUX_LAND_PRECHECKED:-}" != 1 ]; then
+    _land_precheck "$remote" "$branch" "${land_sha:-HEAD}" "$me" "$log" || return 3
+  fi
   if [ "$detach" = 1 ]; then
     local dlog dpid _f _here _there
     # One session landing from several checkouts is legal, but --cancel and
@@ -6791,7 +6828,7 @@ cmd_land() {
     mkdir -p "${dlog%/*}"
     # The runner re-runs land without --detach, then tells the lane how it
     # ended: the last land.log lines are the outcome, the log the detail.
-    AMUX_LAND_PRIORITY_CHECKED="$priority" AMUX_LAND_ME="$me" AMUX_LAND_DLOG="$dlog" AMUX_LAND_SELF="$0" python3 -c '
+    AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED="$priority" AMUX_LAND_ME="$me" AMUX_LAND_DLOG="$dlog" AMUX_LAND_SELF="$0" python3 -c '
 import os, sys, subprocess
 os.setsid()
 me, dlog, amux = os.environ["AMUX_LAND_ME"], os.environ["AMUX_LAND_DLOG"], os.environ["AMUX_LAND_SELF"]
@@ -6932,6 +6969,12 @@ p.communicate(msg.encode())
           fi
           _land_log "left out of a batch ($res); conflicts only with the batch ahead, not with $remote/$branch; keeping its place"
           ;;
+        *refused\ the\ batch\ on\ your\ commit*)
+          rm -f -- "${q:?}/${tname:?}"
+          _land_log "the push hook refused a batch on this lane's commit (MO-4104); stopping. ${res#excluded: }"
+          printf 'amux land: %s\n' "$res" >&2
+          return 1
+          ;;
         *)
           # After a refused batch nobody knows whose commit was refused, so
           # this lane lands alone rather than poisoning the next batch too.
@@ -7045,14 +7088,15 @@ p.communicate(msg.encode())
   # cannot take is told why and keeps its place.
   local stack_tip stack_in
   _land_stack() {
-    local max="$batch_max" n=0 tk who wsha wcommon wbatch base c tree msg new t0 ok seen=" "
-    stack_tip="$1"; stack_in=""
+    local max="$batch_max" n=0 tk who wsha wcommon wbatch base c tree msg new t0 ok seen=" " made
+    stack_tip="$1"; stack_in=""; stack_map=""
     [ "$batch" = 1 ] && [ "$max" -gt 0 ] || return 0
     for tk in $(ls "$q" 2>/dev/null | sort); do
       [ "$n" -lt "$max" ] || break
       # A --priority ticket lands alone in both roles (gs12-gates, 2026-10-01:
       # gs12-cicd batched its priority ticket at 16:57Z).
       case "$tk" in 000*) continue ;; esac
+      case "$batch_skip" in *" $tk "*) continue ;; esac
       kill -0 "${tk##*-}" 2>/dev/null || continue
       who=""; wsha=""; wcommon=""; wbatch=""
       { read -r who; read -r wsha; read -r wcommon; read -r wbatch; } < "$q/$tk" 2>/dev/null || true
@@ -7067,7 +7111,7 @@ p.communicate(msg.encode())
       if [ -n "$(git rev-list --merges "$base..$wsha")" ]; then
         echo "excluded: its range contains a merge commit" > "$rdir/$tk"; continue
       fi
-      t0="$stack_tip"; ok=1
+      t0="$stack_tip"; ok=1; made=""
       for c in $(git rev-list --reverse "$base..$wsha"); do
         tree="$(git merge-tree --write-tree "$stack_tip" "$c" 2>/dev/null | head -1)" || { ok=0; break; }
         [ -n "$tree" ] || { ok=0; break; }
@@ -7076,7 +7120,7 @@ p.communicate(msg.encode())
         msg="$(git log -1 --format=%B "$c")"
         new="$(GIT_AUTHOR_NAME="$(git log -1 --format=%an "$c")" GIT_AUTHOR_EMAIL="$(git log -1 --format=%ae "$c")" \
                GIT_AUTHOR_DATE="$(git log -1 --format=%aD "$c")" git commit-tree "$tree" -p "$stack_tip" -m "$msg")" || { ok=0; break; }
-        stack_tip="$new"
+        stack_tip="$new"; made="$made $new $c"
       done
       if [ "$ok" = 0 ]; then
         stack_tip="$t0"
@@ -7085,8 +7129,23 @@ p.communicate(msg.encode())
       [ "$stack_tip" != "$t0" ] || continue
       stack_in="${stack_in}${tk} ${who}
 "
+      stack_map="${stack_map}${tk}${made}
+"
       n=$((n + 1))
     done
+  }
+  # _land_named_waiters <hook output>: tickets of batched waiters whose commits
+  # (replayed or original) the output names by a 10+ character sha prefix.
+  _land_named_waiters() {
+    local line tk c hit
+    while read -r line; do
+      [ -n "$line" ] || continue
+      tk="${line%% *}"; hit=""
+      for c in ${line#* }; do
+        printf '%s' "$1" | grep -qi -- "${c:0:10}" && { hit=1; break; }
+      done
+      [ -n "$hit" ] && printf '%s ' "$tk"
+    done <<< "$stack_map"
   }
   # _land_tell <message>: write the outcome to every batched waiter; a landed
   # waiter's ticket is removed so the next holder does not batch it again.
@@ -7099,7 +7158,7 @@ p.communicate(msg.encode())
     done <<< "$stack_in"
   }
 
-  local i out rc full verdicts lanes solo=0
+  local i out rc full verdicts lanes solo=0 batch_skip=" " stack_map="" named
   # A --priority holder lands alone again (mixpeek-override, 2026-10-02: the
   # granted one-line Fast Checks fix batched six lanes, 23 min into the gate,
   # and any one of them could refuse it). AMUX_LAND_PRIORITY_BATCH=1 restores
@@ -7209,8 +7268,24 @@ p.communicate(msg.encode())
     fi
     verdicts="$(printf '%s\n' "$out" | grep -E '✗|FAILED|BLOCKED|REFUSED|refus|^error:|^fatal:' | head -15)"
     if [ -n "$lanes" ]; then
-      # A refused batch blames nobody: push this lane alone, and the batched
-      # waiters keep their places and land on their own turns.
+      # MO-4104: when the refusal NAMES a batched waiter's commit (replayed or
+      # original sha, 10+ hex chars), drop that waiter and retry the rest of the
+      # batch: one bad commit no longer sends five good lanes back to the queue.
+      named="$(_land_named_waiters "$out")"
+      if [ -n "$named" ]; then
+        local _tk _rest _excl=""
+        for _tk in $named; do
+          batch_skip="$batch_skip$_tk "
+          _rest="$(printf '%s\n' "$stack_in" | awk -v t="$_tk" '$1==t {print $2}')"
+          _excl="$_excl${_excl:+, }$_rest"
+          echo "excluded: the push hook refused the batch on your commit (full output $full); fix it and run amux land again" > "$rdir/$_tk"
+          rm -f -- "${q:?}/${_tk:?}"
+        done
+        _land_log "batch with ${lanes} refused on ${_excl}'s commit (attempt $i, rc $rc); retrying the batch without it. Full output: $full"
+        continue
+      fi
+      # A refusal that names no waiter blames nobody: push this lane alone, and
+      # the batched waiters keep their places and land on their own turns.
       _land_tell "excluded: the batch was refused by the push hook (full output $full); landing on your own turn"
       _land_log "batch with ${lanes} refused (attempt $i, rc $rc); pushing this lane alone. Full output: $full"
       solo=1
