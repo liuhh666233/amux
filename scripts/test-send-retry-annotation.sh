@@ -141,7 +141,7 @@ fi
 # opposite defect: it spoke, but on stdout.
 PY_FIRST=$(awk '
   /python3 - <<.PYEOF./ { collecting=1; buf=""; next }
-  collecting && /^PYEOF$/ { if (buf ~ /origin-stamped\)/ && buf !~ /retry/) print buf; collecting=0; next }
+  collecting && /^PYEOF$/ { if (buf ~ /origin-stamped\)/ && buf !~ /origin-stamped, retry/) print buf; collecting=0; next }
   collecting { buf = buf $0 "\n" }
 ' amux)
 CELLS=$((CELLS + 1))
@@ -158,12 +158,28 @@ else
   fi
 fi
 
+# 3b. A PENDING delivery is not a refusal (2026-10-02: printing it as FAILED
+#     made a lane resend under new ids and the target got three copies). The
+#     python must exit 3, silently, so the shell polls the same message id;
+#     an UNCERTAIN one exits 4 and says UNCONFIRMED on stderr, never FAILED.
+PEND='{"ok":false,"submission":"pending","retryable":true,"error":"previous message acceptance is still pending; retry the same message ID"}'
+UNC='{"ok":false,"submission":"uncertain","retryable":false,"error":"uncertain"}'
+for blk in PY PY_FIRST; do
+  code=$(eval "_R=2 _R_WAITED=4 RESP='$PEND' TGT=somelane python3 -c \"\$$blk\" >/dev/null 2>&1; echo \$?")
+  CELLS=$((CELLS + 1))
+  if [ "$code" = 3 ]; then echo "  ok    $blk: pending exits 3 (poll the same id)"; else echo "  FAIL  $blk: pending exited $code, not 3"; FAILED=$((FAILED + 1)); fi
+  err=$(eval "_R=2 _R_WAITED=4 RESP='$UNC' TGT=somelane python3 -c \"\$$blk\" 2>&1 >/dev/null; echo \" rc=\$?\"")
+  CELLS=$((CELLS + 1))
+  case "$err" in *UNCONFIRMED*rc=4*) echo "  ok    $blk: uncertain says UNCONFIRMED and exits 4" ;;
+    *) echo "  FAIL  $blk: uncertain gave: $err"; FAILED=$((FAILED + 1)) ;; esac
+done
+
 # 4. THE SHELL HALF. Cells 1-3 drive the python directly, so deleting the
 #    assignment that FEEDS it leaves them all green — measured: mutating
 #    `_R="$_retry" _R_WAITED=... RESP=` down to `RESP=` kept 9 of 9 passing.
 #    Half the original bug lived in the shell, so a suite that only exercises
 #    the python cannot see it. Asserted against the shipped bytes.
-assign=$(grep -c '_R="\$_retry" _R_WAITED="\$(( _retry \* 2 ))" RESP=' amux)
+assign=$(grep -c '_R="\$_retry" _R_WAITED="\$_waited" RESP=' amux)
 CELLS=$((CELLS + 1))
 if [ "$assign" -eq 1 ]; then
   echo "  ok    the shell passes the loop variable into the block (1 call site)"
@@ -177,8 +193,8 @@ fi
 # which is precisely how this shipped broken: `_retry` was the loop variable and
 # `_R` was what the python read.
 CELLS=$((CELLS + 1))
-if grep -q 'for _retry in 1 2; do' amux; then
-  echo "  ok    _retry is still the loop variable the assignment reads"
+if grep -q '_retry=\$((_retry + 1))' amux && grep -q '_waited=\$((_waited + ' amux; then
+  echo "  ok    _retry and _waited are still advanced by the loop the assignment reads"
 else
   echo "  FAIL  the retry loop no longer defines _retry, so the assignment is dead"
   FAILED=$((FAILED + 1))
