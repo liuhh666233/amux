@@ -19,6 +19,8 @@ pub fn routes() -> Router<AppState> {
         .route("/", get(get_map).post(post_map))
         .route("/pins", post(post_pin))
         .route("/search", get(search))
+        // Location history (AMUX-5458): owned by the Map, stored in SQLite.
+        .merge(super::location::routes())
 }
 
 fn map_path() -> std::path::PathBuf {

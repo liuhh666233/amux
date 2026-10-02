@@ -1123,6 +1123,11 @@ pub const TIMESTAMP_COLUMNS: &[(&str, &str, bool)] = &[
     ("board_change_log", "changed_at", false),
     ("chatgpt_oauth_requests", "decided_at", false), // chatgpt_app.rs, REAL epoch seconds
     ("chatgpt_oauth_tokens", "revoked_at", false), // chatgpt_app.rs, REAL epoch seconds
+    ("location_points", "received", false), // location.rs, epoch seconds
+    ("location_points", "ts", false),       // phone fix time, epoch seconds
+    ("location_visits", "arrival", false),
+    ("location_visits", "departure", false),
+    ("location_visits", "received", false),
     ("cmd_history", "delivered_at", true),
     ("cmd_history", "intake_called_at", false),
     ("cmd_history", "intake_retry_at", false),

@@ -59,6 +59,7 @@ pub mod journal;
 pub mod layout_presets;
 pub mod log_search;
 pub mod lookup;
+pub mod location;
 pub mod map;
 pub mod mcp;
 pub mod mdai;

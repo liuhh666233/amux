@@ -553,6 +553,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "0098_chatgpt_app_oauth",
         sql: include_str!("../../migrations/0098_chatgpt_app_oauth.sql"),
     },
+    Migration {
+        version: 99,
+        name: "0099_location_history",
+        sql: include_str!("../../migrations/0099_location_history.sql"),
+    },
 ];
 
 /// Migrations embedded in THIS binary that the DB has not recorded yet.

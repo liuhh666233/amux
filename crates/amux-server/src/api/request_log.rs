@@ -3059,6 +3059,30 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         methods: &["GET"],
     },
     RouteEntry {
+        path: "/api/map/location/points",
+        methods: &["GET", "POST"],
+    },
+    RouteEntry {
+        path: "/api/map/location/points/range",
+        methods: &["DELETE"],
+    },
+    RouteEntry {
+        path: "/api/map/location/visits",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/map/location/timeline",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/map/location/segments/{id}",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/map/location/summary",
+        methods: &["GET"],
+    },
+    RouteEntry {
         path: "/api/graph/fleet",
         methods: &["GET"],
     },
