@@ -84,6 +84,7 @@ pub fn routes() -> Router<AppState> {
         .route("/stop", post(stop))
         .route("/identify", post(identify))
         .route("/profiles", get(profiles))
+        .route("/profile/list", get(profiles))
         .route("/profile-access", get(super::browser_scope::profile_access))
         .route("/profile/create", post(profile_create))
         .route("/profile/combine", post(profile_combine))
@@ -94,6 +95,17 @@ pub fn routes() -> Router<AppState> {
         .route("/state", get(state_verb))
         .route("/keepalive", post(keepalive))
         .route("/action", post(action))
+        // Verb routes agents guess before reading the catalog (/eval, /click and
+        // /resize each 404'd in the last 7 days). Each is /action with that verb.
+        .route("/eval", post(|s, h, b| action_as("eval", s, h, b)))
+        .route("/click", post(|s, h, b| action_as("click", s, h, b)))
+        .route("/type", post(|s, h, b| action_as("type", s, h, b)))
+        .route("/key", post(|s, h, b| action_as("key", s, h, b)))
+        .route("/scroll", post(|s, h, b| action_as("scroll", s, h, b)))
+        .route("/wait", post(|s, h, b| action_as("wait", s, h, b)))
+        .route("/extract", post(|s, h, b| action_as("extract", s, h, b)))
+        .route("/back", post(|s, h, b| action_as("back", s, h, b)))
+        .route("/resize", post(|s, h, b| action_as("viewport", s, h, b)))
         .route("/inspect", get(inspect))
         .route("/inspect/clear", post(inspect_clear))
         .route("/search", get(search))
@@ -1069,6 +1081,53 @@ fn driver_err(e: chrome::DriverError) -> Response {
     }
 }
 
+/// Relaunch `session`'s browser if the reaper released it recently.
+///
+/// `None`: nothing to resume, so the caller answers the usual 409. `Some(Ok)`:
+/// relaunched, resolve again. `Some(Err)`: a relaunch was attempted and failed,
+/// and the 409 says why. Never takes over a profile another lane now holds, and
+/// re-checks profile scope, since the release may predate a scope change.
+async fn relaunch_released(session: &str) -> Option<Result<(), Response>> {
+    use crate::runtime_jobs::browser_reaper as reaper;
+    let home = chrome::amux_home();
+    let now = now_epoch();
+    let rec = reaper::resumable(&reaper::read_released(&home), session, now, reaper::relaunch_window_s())?;
+    if chrome::running_snapshot_for(&rec.profile).is_some() {
+        tracing::info!(session, profile = %rec.profile, verdict = "browser_auto_relaunch_skipped",
+            reason = "profile_now_running", measured = true, n_considered = 1,
+            "browser: not resuming a released browser; its profile is running again");
+        return None;
+    }
+    if let Err(denied) = super::browser_scope::profile_allowed(session, &rec.profile) {
+        reaper::take_released(&home, session);
+        return Some(Err(denied.response()));
+    }
+    let url = if rec.url.is_empty() { "about:blank" } else { rec.url.as_str() };
+    match chrome::start(&home, &rec.profile, url, session, session, true).await {
+        Ok(_) => {
+            reaper::take_released(&home, session);
+            tracing::info!(session, profile = %rec.profile, released_s_ago = now - rec.released_at,
+                released_by = %rec.reason, verdict = "browser_auto_relaunched", measured = true,
+                n_considered = 1, "browser: relaunched a released browser for its owner's next verb");
+            Some(Ok(()))
+        }
+        Err(e) => {
+            tracing::warn!(session, profile = %rec.profile, error = %e,
+                verdict = "browser_auto_relaunch_failed", measured = true, n_considered = 1,
+                "browser: could not relaunch a released browser");
+            Some(Err(err(
+                StatusCode::CONFLICT,
+                json!({
+                    "error": "your browser was released for inactivity and relaunching it failed",
+                    "relaunch_error": with_cause(&e),
+                    "profile": rec.profile,
+                    "hint": "POST /api/browser/start {\"profile\":\"...\",\"url\":\"...\"} to start it yourself",
+                }),
+            )))
+        }
+    }
+}
+
 /// 504 for a CDP call that never answered, 400 for a page-side exception
 /// (AMUX-98), 502 for everything else — a real transport/protocol failure
 /// (AMUX-3672).
@@ -1119,9 +1178,19 @@ pub(crate) async fn connect_session(
             }
         }
     }
-    let page = chrome::resolve_page(session, create_url)
-        .await
-        .map_err(driver_err)?;
+    let page = match chrome::resolve_page(session, create_url).await {
+        Ok(p) => p,
+        // RESUME A RELEASED BROWSER. The reaper closes a lane's browser after
+        // 5 quiet minutes; the lane's next verb used to get this 409 (93 in 7
+        // days). The login is on disk, so relaunch the same profile on the page
+        // it was on, then carry on.
+        Err(chrome::DriverError::NotRunning) => match relaunch_released(session).await {
+            Some(Ok(())) => chrome::resolve_page(session, create_url).await.map_err(driver_err)?,
+            Some(Err(resp)) => return Err(resp),
+            None => return Err(driver_err(chrome::DriverError::NotRunning)),
+        },
+        Err(e) => return Err(driver_err(e)),
+    };
     let first = match chrome::CdpClient::connect(&page.ws_url).await {
         Ok(cdp) => return Ok((page, cdp)),
         Err(e) => e,
@@ -2159,6 +2228,28 @@ async fn stop(
     // and actor, so an anonymous stop can no longer read as a mystery death
     // (AMUX-3063's other half — the 09:05 stop had no actor on record). The
     // owner named here is now the owner of the browser actually being stopped.
+    // An ANONYMOUS stop of a browser some lane owns is refused unless forced.
+    // In the last log window four such stops closed other lanes' live browsers
+    // (gs12-spend twice): a bare curl with no X-Amux-Session cannot be a
+    // considered cleanup, it is a script that forgot who it is.
+    let forced = body.get("force").and_then(Value::as_bool).unwrap_or(false);
+    if !owner_of_target.is_empty() && attrib.is_none() && !forced {
+        tracing::warn!(
+            owner = %owner_of_target, profile = %profile, pid = target_pid,
+            verdict = "browser_stop_unattributed_refused", measured = true, n_considered = 1,
+            "browser: refused an unattributed stop of another lane's browser"
+        );
+        return err(
+            StatusCode::CONFLICT,
+            json!({
+                "ok": false,
+                "code": "browser_stop_unattributed",
+                "error": format!("this browser belongs to {owner_of_target}; an unattributed stop would close it"),
+                "stopped": false,
+                "how_to_fix": "send X-Amux-Session: <your session> (or use `amux browser stop`), or add \"force\": true to stop it anyway",
+            }),
+        );
+    }
     let owner = Some(owner_of_target);
     if let Some(o) = owner.as_deref() {
         if attrib.as_deref() != Some(o) {
@@ -2366,6 +2457,8 @@ async fn profiles(headers: HeaderMap, Query(q): Query<ProfilesQuery>) -> Respons
 
 #[derive(Deserialize)]
 struct CreateBody {
+    // `profile` is what callers send by analogy with /start (2 refusals in 7 days).
+    #[serde(alias = "profile")]
     name: String,
     #[serde(default)]
     url: String,
@@ -2797,7 +2890,8 @@ async fn profile_delete(Path(name): Path<String>) -> Response {
 
 #[derive(Deserialize, Default)]
 struct NavigateBody {
-    #[serde(default)]
+    // 22 navigates in 7 days failed "url required"; accept the obvious synonyms.
+    #[serde(default, alias = "href", alias = "link")]
     url: String,
     #[serde(default)]
     session: Option<String>,
@@ -2813,7 +2907,7 @@ async fn navigate(
     let Json(b) = body.unwrap_or_default();
     let url = b.url.trim().to_string();
     if url.is_empty() {
-        return err(StatusCode::BAD_REQUEST, json!({ "error": "url required" }));
+        return err(StatusCode::BAD_REQUEST, json!({ "error": "url required", "example": {"url": "https://example.com"} }));
     }
     let session = resolve_session(b.session.as_deref(), &headers);
     let actor = explicit_session(b.session.as_deref(), &headers);
@@ -3173,6 +3267,21 @@ async fn action(
         res.headers_mut().insert("x-amux-action", v);
     }
     res
+}
+
+/// `/api/browser/<verb>` is `/api/browser/action` with `action: <verb>`. An
+/// explicit `action` in the body wins, so a caller is never silently rerouted.
+async fn action_as(
+    verb: &'static str,
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<Value>>,
+) -> Response {
+    let mut v = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    if let Some(o) = v.as_object_mut() {
+        o.entry("action").or_insert_with(|| json!(verb));
+    }
+    action(state, headers, Some(Json(v))).await
 }
 
 async fn action_inner(
@@ -4329,6 +4438,92 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, v, proxied)
+    }
+
+    /// Ethan 2026-10-02 ("make amux browser more robust"): the verb routes
+    /// agents guess reach the action handler instead of the 404 catalog, and the
+    /// guessed list route answers.
+    #[tokio::test]
+    async fn guessed_verb_routes_and_profile_list_are_served() {
+        let _reg = crate::integrations::browser::TEST_REGISTRY.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(dir.path());
+        chrome::test_clear_running();
+        let app = app();
+        for path in ["/api/browser/eval", "/api/browser/click", "/api/browser/resize"] {
+            let (status, v, _) = send(&app, "POST", path, Some(r#"{"session":"w1"}"#)).await;
+            assert_ne!(status, StatusCode::NOT_FOUND, "{path} fell to the catalog: {v}");
+            assert!(v.get("actions").is_none(), "{path} answered the catalog: {v}");
+        }
+        let (status, v, _) = send(&app, "GET", "/api/browser/profile/list", None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        // `href` is accepted for `url`: no browser runs, so the answer is the
+        // not-running 409, never "url required".
+        let (status, v, _) =
+            send(&app, "POST", "/api/browser/navigate", Some(r#"{"href":"https://example.com","session":"w1"}"#)).await;
+        assert_ne!(v["error"], "url required", "{status} {v}");
+    }
+
+    /// An unattributed stop may not close a browser another lane owns; with a
+    /// session it proceeds as before (cross-session stays possible, attributed).
+    #[tokio::test]
+    async fn an_unattributed_stop_of_a_lanes_browser_is_refused() {
+        let _reg = crate::integrations::browser::TEST_REGISTRY.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(dir.path());
+        chrome::test_clear_running();
+        chrome::test_seed_running("p-owned", "lane-a", 4_000_001);
+        let app = app();
+        let (status, v, _) = send(&app, "POST", "/api/browser/stop", Some(r#"{"profile":"p-owned"}"#)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["code"], "browser_stop_unattributed", "{v}");
+        assert!(chrome::running_snapshot_for("p-owned").is_some(), "nothing was stopped");
+        chrome::test_clear_running();
+    }
+
+    /// A lane whose browser the reaper released gets it back on its next verb
+    /// instead of "no amux-launched browser is running". Exercised through the
+    /// one branch that needs no Chrome: the released profile is now out of the
+    /// lane's scope, so the relaunch is consulted and refused with the scope
+    /// answer. Without the relaunch hook this is the generic not-running 409.
+    #[tokio::test]
+    async fn a_released_browser_is_consulted_on_the_owners_next_verb() {
+        let _reg = crate::integrations::browser::TEST_REGISTRY.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(dir.path());
+        chrome::test_clear_running();
+        let h = dir.path();
+        std::fs::write(h.join("amux.env"), "AMUX_BROWSER_PROFILES_DENY=netsuite\n").unwrap();
+        std::fs::create_dir_all(h.join("sessions")).unwrap();
+        std::fs::write(h.join("sessions/w2.env"), "").unwrap();
+        crate::runtime_jobs::browser_reaper::put_released(
+            h,
+            "w2",
+            crate::runtime_jobs::browser_reaper::Released {
+                profile: "netsuite".into(),
+                url: "https://example.com".into(),
+                released_at: now_epoch(),
+                reason: "activity".into(),
+            },
+        );
+        let app = app();
+        let (status, v, _) = send(&app, "GET", "/api/browser/state?session=w2", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["code"], "profile_not_in_scope", "{v}");
+        // Another lane's verb does not inherit w2's released browser.
+        std::fs::write(h.join("sessions/w3.env"), "").unwrap();
+        crate::runtime_jobs::browser_reaper::put_released(
+            h,
+            "w2",
+            crate::runtime_jobs::browser_reaper::Released {
+                profile: "netsuite".into(),
+                url: String::new(),
+                released_at: now_epoch(),
+                reason: "activity".into(),
+            },
+        );
+        let (status, v, _) = send(&app, "GET", "/api/browser/state?session=w3", None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
     }
 
     /// AMUX-5307 through the real routes, over a hermetic home. The refusal

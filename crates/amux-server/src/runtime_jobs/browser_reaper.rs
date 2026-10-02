@@ -446,6 +446,7 @@ async fn tick_with_limits(
                     "browser: no activity for the whole window — releasing \
                      (AMUX_BROWSER_ACTIVITY_REAP_S). Logins survive on disk."
                 );
+                record_released(home, &owner, &profile, port, "activity").await;
                 crate::integrations::browser::stop_profile_as(home, &profile, "activity-reaper")
                     .await;
                 if let Some(st) = store {
@@ -476,6 +477,7 @@ async fn tick_with_limits(
                 "browser: TTL exceeded — releasing profile (AMUX_BROWSER_TTL_S). \
                  Any open page is lost; saved login is on disk and survives."
             );
+            record_released(home, &owner, &profile, port, "ttl").await;
             crate::integrations::browser::stop_profile_as(home, &profile, "ttl-reaper").await;
             if let Some(st) = store {
                 notify_owner_of_reap(
@@ -1047,5 +1049,146 @@ mod profile_ttl_tests {
         // Worker A is driving `alpha`; worker B's `beta` is ancient junk.
         assert!(!should_reap_profile("alpha", false, true, old, TTL));
         assert!(should_reap_profile("beta", false, false, old, TTL));
+    }
+}
+
+
+// ── Resume after a release (Ethan, 2026-10-02: "make amux browser more robust
+// and reliable"). In 7 days of /api/browser traffic, 93 calls failed with "no
+// amux-launched browser is running", most of them the next verb from a lane
+// whose browser this reaper had just released for being quiet 5 minutes while
+// the lane was thinking or building. The login survives on disk, so the right
+// answer to that next verb is to relaunch the same profile on the page it was
+// on, not a 409. This records what is needed to do that; the relaunch itself
+// is `api::browser::relaunch_released`.
+
+/// One released browser, keyed by the session that owned it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Released {
+    pub profile: String,
+    /// The first real page's URL at release time, or empty.
+    pub url: String,
+    pub released_at: i64,
+    /// Which reaper arm released it (`activity` | `ttl`).
+    pub reason: String,
+}
+
+fn released_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("browser-released.json")
+}
+
+pub fn read_released(home: &std::path::Path) -> HashMap<String, Released> {
+    std::fs::read_to_string(released_path(home))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_released(home: &std::path::Path, m: &HashMap<String, Released>) {
+    let path = released_path(home);
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(body) = serde_json::to_string_pretty(m) {
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+/// How long after a release the owner's next verb relaunches it.
+/// `AMUX_BROWSER_RELAUNCH_S`, default 6 hours; `0` disables resume.
+pub fn relaunch_window_s() -> i64 {
+    std::env::var("AMUX_BROWSER_RELAUNCH_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(6 * 3600)
+}
+
+/// Pure: the record to resume for `session`, if any is inside the window.
+pub fn resumable(
+    m: &HashMap<String, Released>,
+    session: &str,
+    now: i64,
+    window_s: i64,
+) -> Option<Released> {
+    if window_s <= 0 || session.is_empty() {
+        return None;
+    }
+    m.get(session)
+        .filter(|r| now - r.released_at <= window_s && !r.profile.is_empty())
+        .cloned()
+}
+
+pub fn put_released(home: &std::path::Path, owner: &str, rec: Released) {
+    let mut m = read_released(home);
+    let now = rec.released_at;
+    // Bounded: drop anything already past the window so the file cannot grow.
+    let w = relaunch_window_s().max(0);
+    m.retain(|_, r| now - r.released_at <= w);
+    m.insert(owner.to_string(), rec);
+    write_released(home, &m);
+}
+
+pub fn take_released(home: &std::path::Path, owner: &str) {
+    let mut m = read_released(home);
+    if m.remove(owner).is_some() {
+        write_released(home, &m);
+    }
+}
+
+async fn record_released(home: &std::path::Path, owner: &str, profile: &str, port: u16, reason: &str) {
+    if owner.is_empty() {
+        return; // nobody to resume for; notify_owner_of_reap already logs this case
+    }
+    let url = crate::integrations::browser::cdp_list(port)
+        .await
+        .ok()
+        .and_then(|v| {
+            v.as_array().and_then(|a| {
+                a.iter()
+                    .filter(|t| t.get("type").and_then(|x| x.as_str()) == Some("page"))
+                    .filter_map(|t| t.get("url").and_then(|x| x.as_str()))
+                    .find(|u| u.starts_with("http"))
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_default();
+    put_released(
+        home,
+        owner,
+        Released { profile: profile.to_string(), url, released_at: now_f64() as i64, reason: reason.to_string() },
+    );
+}
+
+#[cfg(test)]
+mod released_tests {
+    use super::*;
+
+    fn rec(at: i64) -> Released {
+        Released { profile: "p".into(), url: "https://x".into(), released_at: at, reason: "activity".into() }
+    }
+
+    #[test]
+    fn a_release_inside_the_window_is_resumable_for_its_owner_only() {
+        let mut m = HashMap::new();
+        m.insert("lane-a".to_string(), rec(1000));
+        assert_eq!(resumable(&m, "lane-a", 1000 + 60, 3600), Some(rec(1000)));
+        assert_eq!(resumable(&m, "lane-b", 1000 + 60, 3600), None, "another lane must not inherit it");
+    }
+
+    #[test]
+    fn a_release_past_the_window_or_with_resume_disabled_is_not_resumed() {
+        let mut m = HashMap::new();
+        m.insert("lane-a".to_string(), rec(1000));
+        assert_eq!(resumable(&m, "lane-a", 1000 + 3601, 3600), None);
+        assert_eq!(resumable(&m, "lane-a", 1000 + 10, 0), None, "0 disables resume");
+    }
+
+    #[test]
+    fn the_record_round_trips_on_disk_and_is_consumed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        put_released(dir.path(), "lane-a", rec(now_f64() as i64));
+        assert!(read_released(dir.path()).contains_key("lane-a"));
+        take_released(dir.path(), "lane-a");
+        assert!(!read_released(dir.path()).contains_key("lane-a"));
     }
 }

@@ -5487,6 +5487,11 @@ PYEOF
       cat <<'EOF'
 amux browser profiles             — list every saved profile; '+' marks the ones you may use
 amux browser identify [profile]   — make the amux Chrome window say it is the amux window
+amux browser create <name> [url]  : create a saved profile (logins persist on disk)
+amux browser start <profile> [url] [--headed] : launch a profile (headless by default)
+amux browser stop [profile]       : stop your browser (attributed to $AMUX_SESSION)
+amux browser status               : what is running, who started it
+amux browser delete <name>        : delete a saved profile
 
   With no profile: every running amux browser draws a blue bar naming its
   profile, and none is raised. A Chrome window WITHOUT a bar is the human's own.
@@ -5496,7 +5501,57 @@ amux browser identify [profile]   — make the amux Chrome window say it is the 
   their own and the two are visually identical.
 EOF
       ;;
-    *) die "amux browser: unknown subcommand '$sub' (try: profiles, identify)" ;;
+    create|new|start|stop|status|delete|rm)
+      # Profile lifecycle from the CLI (Ethan, 2026-10-02: "store profiles").
+      # Thin wrappers over /api/browser/*: the server owns the logic, and every
+      # call carries X-Amux-Session so a stop is attributed (an unattributed
+      # stop of another lane's browser is refused).
+      local me="${AMUX_SESSION:-}" method="POST" path body='{}'
+      case "$sub" in
+        create|new)
+          [[ -n "${1:-}" ]] || die "usage: amux browser create <name> [url]"
+          path="profile/create"
+          body=$(NAME="$1" URL="${2:-}" python3 -c 'import json,os;print(json.dumps({"name":os.environ["NAME"],"url":os.environ["URL"]}))') ;;
+        start)
+          [[ -n "${1:-}" ]] || die "usage: amux browser start <profile> [url] [--headed]"
+          local headless=true; [[ " $* " == *" --headed "* ]] && headless=false
+          path="start"
+          body=$(P="$1" URL="${2:-about:blank}" H="$headless" python3 -c 'import json,os;u=os.environ["URL"];u="about:blank" if u=="--headed" else u;print(json.dumps({"profile":os.environ["P"],"url":u,"headless":os.environ["H"]=="true"}))') ;;
+        stop)
+          path="stop"
+          [[ -n "${1:-}" ]] && body=$(P="$1" python3 -c 'import json,os;print(json.dumps({"profile":os.environ["P"]}))') ;;
+        status)
+          method="GET"; path="status"; body="" ;;
+        delete|rm)
+          [[ -n "${1:-}" ]] || die "usage: amux browser delete <name>"
+          method="DELETE"; path="profile/$(P="$1" python3 -c 'import os,urllib.parse;print(urllib.parse.quote(os.environ["P"],safe=""))')"; body="" ;;
+      esac
+      local resp code
+      if [[ -n "$body" ]]; then
+        resp=$(_curl -sk -m 90 -w '\n%{http_code}' -X "$method" -H 'Content-Type: application/json' \
+          -H "X-Amux-Session: ${me}" -d "$body" "$AMUX_API/api/browser/$path" 2>/dev/null) || resp=""
+      else
+        resp=$(_curl -sk -m 30 -w '\n%{http_code}' -X "$method" -H "X-Amux-Session: ${me}" \
+          "$AMUX_API/api/browser/$path" 2>/dev/null) || resp=""
+      fi
+      [[ -z "$resp" ]] && die "amux server unreachable at ${AMUX_API}"
+      code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
+      RESP="$resp" CODE="$code" SUB="$sub" python3 - <<'PYEOF'
+import json, os, sys
+code = os.environ["CODE"]
+try:
+    d = json.loads(os.environ["RESP"])
+except Exception:
+    print(f"browser {os.environ['SUB']}: HTTP {code}: {os.environ['RESP'][:300]}"); sys.exit(1)
+if not code.startswith("2") or d.get("ok") is False or d.get("error"):
+    print(f"browser {os.environ['SUB']} FAILED (HTTP {code}): {d.get('error') or d}")
+    if d.get("how_to_fix"): print("  fix:", d["how_to_fix"])
+    if d.get("hint"): print("  hint:", d["hint"])
+    sys.exit(1)
+print(json.dumps(d, indent=2)[:2000])
+PYEOF
+      ;;
+    *) die "amux browser: unknown subcommand '$sub' (try: profiles, identify, create, start, stop, status, delete)" ;;
   esac
 }
 

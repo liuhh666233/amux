@@ -4261,19 +4261,47 @@ pub fn state_js() -> String {
         .replace("__TEXT_CAP__", &(obs_state_cap() + 1).to_string())
 }
 
+/// The JS expression that resolves a caller's selector to one element (or null).
+///
+/// CSS goes to `document.querySelector`. Playwright-style `text=Label` (also
+/// `text="Label"`) is what agents reach for first, and native `querySelector`
+/// throws on it: 42 failed actions in 7 days were exactly that. It resolves to
+/// the SMALLEST visible element whose normalized text equals the label
+/// (case-insensitive), falling back to the smallest one that contains it, so
+/// `text=Scheduler` hits the button, not the page body around it.
+pub(crate) fn query_js(selector: &str) -> String {
+    let t = selector.trim();
+    if let Some(rest) = t.strip_prefix("text=") {
+        let label = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+        return format!(
+            "(function(){{var want={want}.replace(/\\s+/g,' ').trim().toLowerCase();\
+             var all=document.querySelectorAll('body *'),eq=null,has=null;\
+             for(var i=0;i<all.length;i++){{var e=all[i];\
+             if(!e.getClientRects().length)continue;\
+             var s=(e.innerText||e.textContent||'').replace(/\\s+/g,' ').trim().toLowerCase();\
+             if(!s)continue;\
+             if(s===want){{if(!eq||eq.contains(e))eq=e;}}\
+             else if(s.indexOf(want)>=0){{if(!has||has.contains(e))has=e;}}}}\
+             return eq||has;}})()",
+            want = json!(label)
+        );
+    }
+    format!("document.querySelector({})", json!(t))
+}
+
 /// Python `_bu_click_selector`'s resolve-then-click, verbatim in behavior:
 /// distinguishes no-match from hidden from clicked, because a click that
 /// silently hits nothing is indistinguishable from one that worked.
 fn selector_click_js(selector: &str) -> String {
     format!(
-        "(function(){{var e=document.querySelector({sel});\
+        "(function(){{var e=({sel});\
          if(!e)return 'NOMATCH';\
          e.scrollIntoView({{block:'center'}});\
          var r=e.getBoundingClientRect();\
          if(r.width===0&&r.height===0)return 'NOTVISIBLE';\
          e.click();\
          return 'OK|'+(e.tagName||'')+'|'+((e.textContent||'').trim().slice(0,60));}})()",
-        sel = json!(selector)
+        sel = query_js(selector)
     )
 }
 
@@ -4419,11 +4447,11 @@ pub async fn set_input_files(
     // One probe, returning a verdict rather than a bare boolean, so a wrong
     // element type can say WHAT it found instead of "not found".
     let probe = format!(
-        "(()=>{{const el=document.querySelector({sel});if(!el)return 'NOELEMENT';\
+        "(()=>{{const el=({sel});if(!el)return 'NOELEMENT';\
          if(el.tagName!=='INPUT'||(el.type||'').toLowerCase()!=='file')\
          return 'NOTFILE:'+el.tagName+'/'+(el.type||'');\
          return el.multiple?'OK:multiple':'OK:single';}})()",
-        sel = json!(selector)
+        sel = query_js(selector)
     );
     let verdict = c.eval(&probe, 20).await?;
     let verdict = verdict.as_str().unwrap_or("");
@@ -4460,7 +4488,7 @@ pub async fn set_input_files(
         .call(
             "Runtime.evaluate",
             json!({
-                "expression": format!("document.querySelector({})", json!(selector)),
+                "expression": query_js(selector),
                 "returnByValue": false,
             }),
             ten,
@@ -4494,9 +4522,9 @@ pub async fn set_input_files(
     let attached = c
         .eval(
             &format!(
-                "(()=>{{const el=document.querySelector({sel});\
+                "(()=>{{const el=({sel});\
                  return el&&el.files?Array.from(el.files).map(f=>f.name+':'+f.size):[];}})()",
-                sel = json!(selector)
+                sel = query_js(selector)
             ),
             20,
         )
@@ -7349,5 +7377,26 @@ mod startup_grace_tests {
         let now = 1_000_000i64;
         let legacy = json!({"pid": 9, "started_at": now - 1});
         assert!(!record_is_starting(&legacy, now, STARTUP_GRACE_S));
+    }
+}
+
+
+#[cfg(test)]
+mod query_js_tests {
+    use super::query_js;
+
+    #[test]
+    fn css_selectors_still_go_to_query_selector() {
+        assert_eq!(query_js("a[href=\"x\"]"), "document.querySelector(\"a[href=\\\"x\\\"]\")");
+    }
+
+    #[test]
+    fn playwright_text_selectors_resolve_by_visible_text_not_query_selector() {
+        for sel in ["text=Scheduler", "text=\"Scheduler\"", " text='Scheduler' "] {
+            let js = query_js(sel);
+            assert!(!js.contains("document.querySelector("), "{sel}: {js}");
+            assert!(js.contains("\"Scheduler\""), "{sel}: {js}");
+            assert!(js.contains("innerText"), "{sel}: {js}");
+        }
     }
 }
