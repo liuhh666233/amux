@@ -6517,14 +6517,16 @@ USAGE
 _land_precheck() {
   local remote="$1" branch="$2" tip="$3" me="$4" log="$5" chk top out rc t0 full budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}"
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
-  chk="${AMUX_LAND_PRECHECK:-}"
-  [ -n "$chk" ] || { [ -x "$top/.githooks/land-precheck" ] && chk="$top/.githooks/land-precheck"; }
-  [ -n "$chk" ] || return 0
   git fetch -q "$remote" "$branch" 2>/dev/null || true
+  local _pc_chk _pc_tmp
+  _land_precheck_resolve "$remote/$branch"
+  chk="$_pc_chk"
+  [ -n "$chk" ] || return 0
   git rev-parse -q --verify "$remote/$branch^{commit}" >/dev/null 2>&1 || {
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured: no $remote/$branch" >> "$log"; return 0; }
   t0=$(date +%s); rc=0
   out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="enqueue" perl -e 'alarm shift; exec @ARGV or exit 127' "$budget" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
+  [ -n "$_pc_tmp" ] && rm -rf -- "${_pc_tmp:?}"
   full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-precheck.log"
   mkdir -p "${full%/*}"; printf '%s\n' "$out" > "$full"
   case "$(_land_precheck_verdict "$rc" "$out")" in
@@ -6536,6 +6538,29 @@ _land_precheck() {
   printf '%s\n' "$out" | tail -30 >&2
   echo "amux land: refused before queueing: the repository's land precheck failed on this range (full output $full). Fix the commits and run amux land again." >&2
   return 1
+}
+
+# _land_precheck_resolve <remote/branch>: sets _pc_chk (command to run) and
+# _pc_tmp (a private dir to remove afterwards, or ""). Order: $AMUX_LAND_PRECHECK,
+# then the remote branch's COMMITTED .githooks (extracted whole, so the script's
+# sibling files resolve), then the checkout's own copy. A lane whose branch
+# predates the precheck had no file in its worktree, so the composed-batch check
+# silently never ran on two refused six-lane batches (2026-10-02 08:48Z, 09:17Z).
+_land_precheck_resolve() {
+  local ref="$1" top
+  _pc_chk="${AMUX_LAND_PRECHECK:-}"; _pc_tmp=""
+  [ -n "$_pc_chk" ] && return 0
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if git cat-file -e "$ref:.githooks/land-precheck" 2>/dev/null; then
+    _pc_tmp="$(mktemp -d "${TMPDIR:-/tmp}/amux-precheck.XXXXXX")"
+    if git archive "$ref" .githooks 2>/dev/null | tar -x -C "$_pc_tmp" 2>/dev/null && [ -f "$_pc_tmp/.githooks/land-precheck" ]; then
+      chmod +x "$_pc_tmp/.githooks/land-precheck"
+      _pc_chk="$_pc_tmp/.githooks/land-precheck"; return 0
+    fi
+    rm -rf -- "${_pc_tmp:?}"; _pc_tmp=""
+  fi
+  [ -n "$top" ] && [ -x "$top/.githooks/land-precheck" ] && _pc_chk="$top/.githooks/land-precheck"
+  return 0
 }
 
 # _land_precheck_verdict <rc> <output>: pass | refuse | unmeasured.
@@ -6555,7 +6580,7 @@ _land_precheck_verdict() {
   local killed=0
   case "$rc" in 124|126|127) killed=1 ;; *) [ "$rc" -gt 128 ] 2>/dev/null && killed=1 ;; esac
   case "$rc" in
-    0) echo pass; return ;;
+    0) if printf '%s\n' "$out" | grep -qiE '^land-precheck: .*nothing checked'; then echo unmeasured; else echo pass; fi; return ;;
   esac
   if [ "$killed" = 1 ]; then
       if printf '%s\n' "$out" | grep -qE '✗|(^|[^A-Za-z])FAIL|REFUSED'; then echo refuse
@@ -6574,10 +6599,12 @@ _land_precheck_verdict() {
 _land_precheck_exec() {
   local top chk out rc=0 budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}"
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 2
-  chk="${AMUX_LAND_PRECHECK:-}"
-  [ -n "$chk" ] || { [ -x "$top/.githooks/land-precheck" ] && chk="$top/.githooks/land-precheck"; }
-  [ -n "$chk" ] || return 2
+  local _pc_chk _pc_tmp
+  _land_precheck_resolve "$1"
+  chk="$_pc_chk"
+  [ -n "$chk" ] || { printf 'land-precheck: none found in %s or this checkout\n' "$1"; return 2; }
   out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="batch" perl -e 'alarm shift; exec @ARGV or exit 127' "$budget" $chk "$1" "$(git rev-parse "$2")" 2>&1)" || rc=$?
+  [ -n "$_pc_tmp" ] && rm -rf -- "${_pc_tmp:?}"
   printf '%s\n' "$out"
   case "$(_land_precheck_verdict "$rc" "$out")" in pass) return 0 ;; unmeasured) return 2 ;; *) return 1 ;; esac
 }
@@ -6912,7 +6939,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.14"
+LAND_BEHAVIOR_VERSION="2026-10-02.15"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7587,6 +7614,7 @@ p.communicate(msg.encode())
         continue
       fi
       [ "$_pc_rc" = 0 ] && _land_log "composed batch passed the land precheck in $(( $(date +%s) - _pc_t0 ))s"
+      [ "$_pc_rc" = 2 ] && _land_log "composed batch precheck unmeasured after $(( $(date +%s) - _pc_t0 ))s ($(printf '%s\n' "$_pc_out" | grep -E '^land-precheck:' | tail -1 | cut -c1-120)); pushing the batch to the gate"
     fi
     # `|| rc=$?`, not `; rc=$?`: this CLI runs under set -e, and a rejected
     # push in a bare assignment would exit the script before the retry.
