@@ -6470,6 +6470,64 @@ USAGE
 }
 
 # _land_status: the queue as land will serve it, the holder, and an estimate.
+# MO-4102: is this --priority push entitled to jump the queue? Prints the
+# refusal and returns 1 when not. A range that cannot be measured is allowed and
+# logged as unmeasured rather than refused on a guess.
+_land_priority_check() {
+  local remote="$1" branch="$2" tip="$3" reason="$4" me="$5" log="$6" files hit="" pat
+  if [ -z "$reason" ]; then
+    echo "amux land: --priority needs --reason <text>: it jumps every ordinary waiter, so the log has to say why" >&2
+    return 1
+  fi
+  git fetch -q "$remote" "$branch" 2>/dev/null || true
+  if ! files="$(git diff --name-only "$remote/$branch...$tip" 2>/dev/null)"; then
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority range unmeasured (no $remote/$branch...$tip); allowed; reason: $reason" >> "$log"
+    return 0
+  fi
+  local f
+  while IFS= read -r f; do
+    for pat in ${AMUX_LAND_PRIORITY_PATHS:-.githooks/ scripts/ci/ .github/workflows/ scripts/graft-push.sh}; do
+      case "$f" in "$pat"*) hit="$f"; break 2 ;; esac
+    done
+  done <<< "$files"
+  if [ -n "$hit" ]; then
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority allowed: range touches gate path $hit; reason: $reason" >> "$log"
+    return 0
+  fi
+  if printf '%s' "$reason" | grep -qiE -- "${AMUX_LAND_PRIORITY_GRANT_RE:-grant}"; then
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority allowed by grant; reason: $reason" >> "$log"
+    return 0
+  fi
+  printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority refused: range touches no gate path and the reason names no grant; reason: $reason" >> "$log"
+  echo "amux land: --priority refused: this range touches no gate path (${AMUX_LAND_PRIORITY_PATHS:-.githooks/ scripts/ci/ .github/workflows/ scripts/graft-push.sh}) and --reason names no grant. Queue it without --priority, or ask the orchestrator for a grant and name it in --reason." >&2
+  return 1
+}
+
+# MO-4102: move <lane>'s priority ticket(s) for this checkout's remote back
+# into ordinary order. Leaves a marker the waiter acts on; a waiter on land code
+# older than the marker cannot see it, and that is said.
+_land_demote() {
+  local lane="$1" url key q t n=0 old=0 me
+  [ -n "$lane" ] || die "usage: amux land --demote <lane>"
+  git rev-parse --git-dir >/dev/null 2>&1 || die "amux land --demote: run it inside the repository's checkout"
+  url="$(git remote get-url origin 2>/dev/null)" || die "amux land --demote: no remote origin"
+  key="$(printf '%s %s' "$url" main | shasum | cut -c1-16)"
+  q="$HOME/.amux/locks/land-$key.q"
+  me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}"
+  for t in "$q"/000*; do
+    [ -e "$t" ] || continue
+    [ "$(head -1 "$t" 2>/dev/null)" = "$lane" ] || continue
+    printf '%s\n' "$me" > "$q/.demote-${t##*-}"
+    n=$((n + 1))
+    [ "$(sed -n 5p "$t" 2>/dev/null)" \< "2026-10-02.1" ] && old=$((old + 1))
+  done
+  printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] demote $lane: $n priority ticket(s) marked" >> "$HOME/.amux/logs/land.log"
+  if [ "$n" = 0 ]; then echo "amux land: $lane has no priority ticket in this queue"; return 1; fi
+  echo "amux land: marked $n priority ticket(s) of $lane; each moves to ordinary order on its waiter's next poll"
+  [ "$old" -gt 0 ] && echo "amux land: $old of them run land code older than 2026-10-02.1 and will not see the marker; cancel and requeue those instead" >&2
+  return 0
+}
+
 _land_status() {
   local remote=origin branch=main url key lock q me since n=0 t who mine="" med
   url="$(git remote get-url "$remote" 2>/dev/null)" || die "amux land --status: run it inside the repository's checkout"
@@ -6593,7 +6651,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-01.1"
+LAND_BEHAVIOR_VERSION="2026-10-02.1"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -6628,8 +6686,15 @@ cmd_land() {
   # --priority queues ahead of every ordinary waiter (priority waiters keep
   # their own arrival order). A priority ticket is never batched by another
   # holder; as the holder it batches ordinary waiters like any other. For a push that makes every push behind it
-  # cheaper, e.g. a faster gate (gs12-gates, 2026-10-01). Logged; the
-  # orchestrator, not each lane, should decide who uses it.
+  # cheaper, e.g. a faster gate (gs12-gates, 2026-10-01). It needs
+  # --reason <text>, written to the ticket and land.log, and is refused when
+  # the pushed range touches no gate path (AMUX_LAND_PRIORITY_PATHS, default
+  # .githooks/ scripts/ci/ .github/workflows/ scripts/graft-push.sh) unless the
+  # reason names a grant (AMUX_LAND_PRIORITY_GRANT_RE, default "grant"): seven
+  # lanes queued ordinary work with it in one afternoon and two ordinary
+  # waiters sat 109 and 114 min (mixpeek-override, MO-4102).
+  # `amux land --demote <lane>` moves that lane's priority ticket back into
+  # ordinary order at its arrival time; the waiter does the rename itself.
   #
   # --detach queues and returns at once: land runs in its own session (macOS
   # has no setsid(1); python's os.setsid does it), output goes to a log under
@@ -6651,7 +6716,7 @@ cmd_land() {
   #
   # Every wait, takeover, batch and outcome is a line in ~/.amux/logs/land.log;
   # a refused push keeps its full output under ~/.amux/logs/land/.
-  local remote=origin branch=main tries=8 max_hold=3600 batch=1 priority=0 batch_max="${AMUX_LAND_BATCH_MAX:-6}" detach=0 land_sha=""
+  local remote=origin branch=main tries=8 max_hold=3600 batch=1 priority=0 batch_max="${AMUX_LAND_BATCH_MAX:-6}" detach=0 land_sha="" prio_reason=""
   local fwd_args=()
   local orig_args=(${1+"$@"})
   while [ $# -gt 0 ]; do
@@ -6662,13 +6727,15 @@ cmd_land() {
       --max-hold) max_hold="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --no-batch) batch=0; fwd_args+=("$1"); shift ;;
       --priority) priority=1; fwd_args+=("$1"); shift ;;
+      --reason) prio_reason="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
+      --demote) shift; _land_demote "${1:-}"; return $? ;;
       --batch-max) batch_max="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --detach) detach=1; shift ;;
       --sha) land_sha="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --cancel) shift; _land_cancel "${1:-}"; return $? ;;
       --status) _land_status; return $? ;;
       -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
-      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | amux land --cancel" ;;
+      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority --reason <text>] [--detach] [--sha <commit>] | amux land --cancel | --demote <lane>" ;;
     esac
   done
   if [ -n "$land_sha" ]; then
@@ -6697,6 +6764,9 @@ cmd_land() {
   me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}"
   common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
   mkdir -p "$HOME/.amux/locks" "$HOME/.amux/logs"
+  if [ "$priority" = 1 ]; then
+    _land_priority_check "$remote" "$branch" "${land_sha:-HEAD}" "$prio_reason" "$me" "$log" || return 2
+  fi
   if [ "$detach" = 1 ]; then
     local dlog dpid _f _here _there
     # One session landing from several checkouts is legal, but --cancel and
@@ -6809,12 +6879,12 @@ p.communicate(msg.encode())
   else
     tname="$(printf '%012d' "$(date +%s)")-$$"
   fi
-  _land_ticket() { printf '%s\n%s\n%s\n%s\n%s\n' "$me" "${land_sha:-$(git rev-parse HEAD)}" "$common" "$batchable" "$LAND_BEHAVIOR_VERSION" > "${q:?}/${tname:?}"; }
+  _land_ticket() { printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$me" "${land_sha:-$(git rev-parse HEAD)}" "$common" "$batchable" "$LAND_BEHAVIOR_VERSION" "$prio_reason" > "${q:?}/${tname:?}"; }
   _land_ticket
   if [ "$priority" = 1 ]; then
     local _ord=0 _f
     for _f in "$q"/*; do [ -e "$_f" ] || continue; case "${_f##*/}" in 000*) ;; *) _ord=$((_ord + 1)) ;; esac; done
-    _land_log "queued with --priority ahead of $_ord ordinary waiter(s)"
+    _land_log "queued with --priority ahead of $_ord ordinary waiter(s); reason: $prio_reason"
   fi
   # Expanded NOW: these are locals, gone by the time an EXIT trap runs, and a
   # `${x:?}` guard on an unset name fails the exit status (rc 1 on success).
@@ -6882,6 +6952,22 @@ p.communicate(msg.encode())
       kill -0 "${t##*-}" 2>/dev/null || { _land_log "dropped the ticket of a waiter that exited ($(head -1 "$t" 2>/dev/null || echo ?), pid ${t##*-})"; rm -f -- "${t:?}"; }
     done
     head="$(ls "$q" | sort | head -1)"
+    # DEMOTE (MO-4102): `amux land --demote <lane>` leaves "$q/.demote-<pid>";
+    # the waiter moves ITS OWN priority ticket back into ordinary order at its
+    # arrival time, the same self-rename aging does in the other direction.
+    if [ -e "${q:?}/.demote-$$" ] && [ "${tname:0:3}" = "000" ]; then
+      local demoted _arr
+      _arr=$(( $(date +%s) / 1000000000 * 1000000000 + 10#${tname:3:9} ))
+      demoted="$(printf '%012d' "$_arr")-$$"
+      if mv -- "${q:?}/${tname:?}" "${q:?}/${demoted:?}" 2>/dev/null; then
+        _land_log "demoted by $(cat "${q:?}/.demote-$$" 2>/dev/null || echo ?): ticket back in ordinary order at its arrival time"
+        tname="$demoted"
+        # shellcheck disable=SC2064  # expanded now on purpose: locals are gone when the trap runs
+        trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
+        head="$(ls "$q" | sort | head -1)"
+      fi
+      rm -f -- "${q:?}/.demote-$$"
+    fi
     # AGING (gs12-retrievers, 2026-10-01: the first ordinary ticket waited
     # 4h20m while four --priority tickets passed it). Past
     # AMUX_LAND_PRIORITY_AGING_S (default 7200) an ordinary waiter renames ITS
@@ -7012,6 +7098,11 @@ p.communicate(msg.encode())
   }
 
   local i out rc full verdicts lanes solo=0
+  # A --priority holder lands alone again (mixpeek-override, 2026-10-02: the
+  # granted one-line Fast Checks fix batched six lanes, 23 min into the gate,
+  # and any one of them could refuse it). AMUX_LAND_PRIORITY_BATCH=1 restores
+  # MO-4077's batching for a holder that wants it.
+  [ "$priority" = 1 ] && [ "${AMUX_LAND_PRIORITY_BATCH:-0}" != 1 ] && solo=1
   for i in $(seq 1 "$tries"); do
     # --max-hold bounds ONE attempt, not the whole hold. A batch, its refusal
     # and the solo re-push ran past 3600s on 2026-10-01 and a waiter took over
@@ -7070,9 +7161,9 @@ p.communicate(msg.encode())
     # a batch carries other lanes' risk. Measured 2026-10-01: gs12-gates'
     # priority push batched three lanes at 15:05Z, a planes schema test in one
     # of them refused the batch at 15:54Z, and the priority push started over.
-    # A --priority holder batches again (mixpeek-override, MO-4077: with the
-    # faster gate a refused batch costs one short gate, not 50 minutes);
-    # priority TICKETS are still never taken into another holder's batch.
+    # MO-4077 made a --priority holder batch again; 2026-10-02 reverted that
+    # to the default above (AMUX_LAND_PRIORITY_BATCH=1 opts back in).
+    # Priority TICKETS are never taken into another holder's batch.
     [ "$solo" = 1 ] || _land_stack "$stack_tip"
     lanes="$(printf '%s' "$stack_in" | awk 'NF {printf "%s%s", sep, $2; sep=", "}')"
     [ -z "$lanes" ] || _land_log "batching ${lanes} behind this push (one gate run)"
