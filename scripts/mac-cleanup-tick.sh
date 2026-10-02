@@ -53,6 +53,23 @@ set -uo pipefail
 PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 export PATH
 
+# Every AMUX_CLEANUP_* knob below is configurable in amux's GLOBAL scope (the
+# Scope tab, ~/.amux/amux.env), DESKT-72: a value set there applies to every
+# tick, scheduled or fallback, without editing SCHED-465's command. An explicit
+# environment value (the schedule's own, a test's) still wins.
+scope_cleanup_knobs() { # <scope file>
+  local f=$1 line k v
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in AMUX_CLEANUP_[A-Z0-9_]*=*) ;; *) continue ;; esac
+    k=${line%%=*}; v=${line#*=}
+    v=${v#\"}; v=${v%\"}; v=${v#\'}; v=${v%\'}
+    [ -n "${!k+x}" ] && continue
+    export "$k=$v"
+  done < "$f"
+}
+scope_cleanup_knobs "${AMUX_CLEANUP_SCOPE_FILE:-${AMUX_HOME:-$HOME/.amux}/amux.env}"
+
 DRY=0
 for a in "$@"; do
   case "$a" in

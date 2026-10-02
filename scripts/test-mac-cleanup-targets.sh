@@ -19,6 +19,7 @@ fails=0
 [ -x "$TICK" ] || { echo "FAIL: $TICK missing or not executable, no cell below ran"; exit 1; }
 check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1: expected '$2', got '$3'"; fails=$((fails+1)); fi; }
 yn() { if "$@"; then echo yes; else echo no; fi; }
+export AMUX_CLEANUP_SCOPE_FILE=/dev/null   # the live global scope must not configure a test (DESKT-72)
 AMUX_CLEANUP_LIB_ONLY=1 . "$TICK"
 export AMUX_CLEANUP_STATE_DIR="$FIX/assess-state" AMUX_CLEANUP_ESCALATE_CMD="true" AMUX_CLEANUP_HISTORY_CMD="true" AMUX_CLEANUP_CARD_CMD="true" AMUX_CLEANUP_VM_LIST_CMD="true"   # never page a real lane from a test (DESKT-57)
 DEFAULT_KEEP=$TARGET_KEEP; DEFAULT_ROOTS=$TARGET_ROOTS; DEFAULT_VM_PRUNE=$VM_PRUNE_CMD; DEFAULT_VM_STOP=$VM_STOP_CMD      # what the scheduler actually runs with, before this file overrides the knobs
@@ -146,11 +147,15 @@ check "control: within budget it is reaped"            "no"  "$(yn test -e "$R/p
 # margin is a full second either side). Only the first may be walked.
 fresh_root budw
 mk_target "$R/one/target" old; mk_target "$R/two/target" old
-orig_dir_idle=$(declare -f dir_idle)
+orig_dir_idle=$(declare -f dir_idle); orig_find_w=$(declare -f find_cargo_targets)
+# The scan is stubbed so only the WALK phase spends the budget: on a loaded Mac
+# (load 100+) the real fixture scan alone could use up a 3s budget, and the cell
+# then measured the scan instead of the walk guard.
+find_cargo_targets() { printf '%s\n' "$R/one/target" "$R/two/target"; TARGET_SCAN_COMPLETE=yes; TARGET_ROOTS_SCANNED=1; }
 dir_idle() { echo x >> "$FIX/walks"; sleep 6; return 0; }
 rm -f "$FIX/walks"; : > "$FIX/walks"; TARGET_BUDGET_S=3; run 0
 check "the second candidate is not even walked once the budget is spent" "1" "$(grep -c x "$FIX/walks" | tr -d ' ')"
-eval "$orig_dir_idle"
+eval "$orig_dir_idle"; eval "$orig_find_w"
 # Delete phase: the walk is instant but sizing (du) takes 3s, budget 2s. The delete loop must stop by itself.
 fresh_root budd
 mk_target "$R/proj/target" old
@@ -294,6 +299,17 @@ check "the summary counts kept busy and unmeasured" "yes" "$(grep -q 'stopped 1,
 check "dry run stops nothing" "0" "$(grep -c . "$FIX/stops" | tr -d ' ')"
 check "and names what it would stop" "yes" "$(grep -q 'would stop idle colima VM idle' "$FIX/out.txt" && echo yes || echo no)"
 check "the default stop is a stop, never a delete" "yes" "$(printf '%s' "$DEFAULT_VM_STOP" | grep -q '^colima stop -p PROFILE$' && echo yes || echo no)"
+
+echo "12e. thresholds come from amux's global scope, and an explicit env value wins (DESKT-72)"
+printf 'OTHER=1\nAMUX_CLEANUP_TARGET_TIGHT_FREE_GB="400"\nAMUX_CLEANUP_VM_IDLE_MIN=90\n' > "$FIX/scope.env"
+got=$(env -u AMUX_CLEANUP_TARGET_TIGHT_FREE_GB -u AMUX_CLEANUP_VM_IDLE_MIN AMUX_CLEANUP_SCOPE_FILE="$FIX/scope.env" TICK_PATH="$TICK" \
+      bash -c 'AMUX_CLEANUP_LIB_ONLY=1 . "$TICK_PATH"; printf "%s %s" "$TARGET_TIGHT_FREE_GB" "$VM_IDLE_MIN"')
+check "a scope value configures the tick (quotes stripped)" "400 90" "$got"
+got=$(AMUX_CLEANUP_TARGET_TIGHT_FREE_GB=123 AMUX_CLEANUP_SCOPE_FILE="$FIX/scope.env" TICK_PATH="$TICK" \
+      bash -c 'AMUX_CLEANUP_LIB_ONLY=1 . "$TICK_PATH"; printf "%s" "$TARGET_TIGHT_FREE_GB"')
+check "an explicit environment value beats the scope" "123" "$got"
+got=$(env -u AMUX_CLEANUP_TARGET_TIGHT_FREE_GB AMUX_CLEANUP_SCOPE_FILE="$FIX/scope.env" TICK_PATH="$TICK" bash -c 'AMUX_CLEANUP_LIB_ONLY=1 . "$TICK_PATH"; printf "%s" "${OTHER:-unset}"')
+check "keys outside AMUX_CLEANUP_ are not imported" "unset" "$got"
 
 echo "13. the defaults the scheduler runs with"
 check "the amux shared target is protected by default"  "yes" "$(printf '%s' "$DEFAULT_KEEP" | grep -Eq "\.amux/rust-build-target(:|\$)" && echo yes || echo no)"

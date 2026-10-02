@@ -158,6 +158,77 @@ pub(crate) fn workspace_isolation_exports(name: &str) -> String {
     out
 }
 
+/// SHARED DOCKER VM (DESKT-72). One scoped knob, AMUX_DOCKER_VM=<colima
+/// profile>, at worker, group or global scope, default unset. When set, the
+/// worker's shell gets DOCKER_CONTEXT=colima-<profile>, so every `docker` it
+/// runs talks to that VM, and a shim directory first on PATH whose `colima` and
+/// `limactl` refuse to create or start any other VM (scripts/shims/
+/// docker-vm-shim.sh). AMUX_DOCKER_VM_ENFORCE=0 keeps the routing and drops the
+/// refusal.
+///
+/// Measured 2026-10-01: eight goal-spec lanes had each started a private VM
+/// (16 to 32G apiece); with five running the Mac hit load 116, memory pressure 2
+/// and 10G of free disk. A brief line reached only the lanes that read that
+/// brief; this reaches every worker of every provider the scope covers.
+pub(crate) const DOCKER_VM_SHIM: &str = include_str!("../../../../scripts/shims/docker-vm-shim.sh");
+
+pub(crate) fn docker_vm_shim_dir() -> PathBuf {
+    home().join("shims").join("docker-vm")
+}
+
+/// Write the shim as `colima` and `limactl` when the installed bytes differ.
+/// Atomic (rename), because a running shell may be executing the old copy.
+pub(crate) fn install_docker_vm_shims(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for name in ["colima", "limactl"] {
+        let dst = dir.join(name);
+        if std::fs::read_to_string(&dst).ok().as_deref() == Some(DOCKER_VM_SHIM) {
+            continue;
+        }
+        let tmp = dir.join(format!(".{name}.tmp.{}", std::process::id()));
+        std::fs::write(&tmp, DOCKER_VM_SHIM)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&tmp, &dst)?;
+    }
+    Ok(())
+}
+
+/// A colima profile name amux will put into a shell export: letters, digits,
+/// `-`, `_` and `.`, at most 64 characters.
+pub(crate) fn valid_docker_vm(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+}
+
+/// The shell exports the shared-VM knob adds to a worker's launch, or "".
+pub(crate) fn docker_vm_exports(name: &str) -> String {
+    let Some(vm) = scoped_setting_in(&home(), name, "AMUX_DOCKER_VM") else {
+        return String::new();
+    };
+    if !valid_docker_vm(&vm) {
+        tracing::warn!(session = name, vm = %vm, measured = true, n_considered = 1,
+            verdict = "docker_vm_invalid",
+            "AMUX_DOCKER_VM is not a valid colima profile name; the worker keeps its default Docker context");
+        return String::new();
+    }
+    let dir = docker_vm_shim_dir();
+    let mut out = format!(
+        "export AMUX_DOCKER_VM={vm}; export DOCKER_CONTEXT=colima-{vm}; export AMUX_DOCKER_VM_DERIVED=1; "
+    );
+    match install_docker_vm_shims(&dir) {
+        Ok(()) => out.push_str(&format!("export PATH={}:\"$PATH\"; ", sh_quote(&dir.to_string_lossy()))),
+        Err(e) => tracing::warn!(session = name, error = %e, dir = %dir.display(),
+            verdict = "docker_vm_shim_install_failed",
+            "AMUX_DOCKER_VM is set but the colima/limactl shims could not be installed; Docker is routed, private VMs are not refused"),
+    }
+    tracing::info!(session = name, vm = %vm, measured = true, n_considered = 1,
+        verdict = "docker_vm_shared", "worker routed to the shared colima VM (AMUX_DOCKER_VM)");
+    out
+}
+
 /// What a SURVIVING tmux shell needs on restart to match a fresh start: undo
 /// the values an earlier workspace-isolation start exported (so turning the
 /// switch off works too), re-source the scope layers, then re-apply the
@@ -169,14 +240,18 @@ pub(crate) fn surviving_shell_scope_rc(name: &str) -> String {
     let kc = home().join("kube").join(format!("{name}.config"));
     let mut rc = format!(
         "case \"${{TMPDIR:-}}\" in {}*) export TMPDIR=\"$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp/)\";; esac; \
-         [ \"${{KUBECONFIG:-}}\" = {} ] && unset KUBECONFIG; unset AMUX_PUSH_STRATEGY; ",
+         [ \"${{KUBECONFIG:-}}\" = {} ] && unset KUBECONFIG; unset AMUX_PUSH_STRATEGY; \
+         if [ \"${{AMUX_DOCKER_VM_DERIVED:-}}\" = 1 ]; then unset DOCKER_CONTEXT AMUX_DOCKER_VM AMUX_DOCKER_VM_DERIVED; \
+         PATH=\"$(printf '%s' \"$PATH\" | tr ':' '\\n' | grep -vxF {} | paste -sd: -)\"; fi; ",
         sh_quote(&tmpd.to_string_lossy()),
-        sh_quote(&kc.to_string_lossy())
+        sh_quote(&kc.to_string_lossy()),
+        sh_quote(&docker_vm_shim_dir().to_string_lossy())
     );
     for f in scope_env_layers(&home(), name) {
         rc.push_str(&format!("set -a; source {} 2>/dev/null; set +a; ", sh_quote(&f.to_string_lossy())));
     }
     rc.push_str(&workspace_isolation_exports(name));
+    rc.push_str(&docker_vm_exports(name));
     rc
 }
 
@@ -246,6 +321,7 @@ pub(crate) fn headless_turn_prelude(name: &str, provider: &str, work_dir: &str) 
         ));
     }
     rc.push_str(&workspace_isolation_exports(name));
+    rc.push_str(&docker_vm_exports(name));
     let local_cli_dir = home().join("bin");
     if local_cli_dir.join("amux").is_file() {
         rc.push_str(&format!(
@@ -15032,6 +15108,7 @@ pub(crate) async fn start_session(
         ));
     }
     shell_rc.push_str(&workspace_isolation_exports(name));
+    shell_rc.push_str(&docker_vm_exports(name));
     // Profiles often prepend ~/.local/bin again. An isolated server with its
     // own installed CLI must put that CLI first AFTER profile/scope sourcing;
     // otherwise its workers silently call the unrelated main-server binary.
@@ -52023,5 +52100,112 @@ mod agents_grace_tests {
         // The composer emptied: clear the record.
         assert_eq!(d(None, true, "raise to 6", 1000, 1700, 600), (None, Some((String::new(), 0))));
         assert_eq!(d(None, false, "", 0, 1700, 600), (None, None));
+    }
+}
+
+#[cfg(test)]
+mod docker_vm_tests {
+    use super::*;
+
+    /// DESKT-72: unset changes nothing; group scope routes Docker and installs
+    /// the shims; worker scope overrides; an invalid name is refused; a
+    /// surviving shell drops a derived context when the knob goes away.
+    #[test]
+    fn the_shared_docker_vm_knob_routes_docker_and_installs_the_shims() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(home.path());
+        std::fs::create_dir_all(home.path().join("sessions")).unwrap();
+        std::fs::create_dir_all(home.path().join("env")).unwrap();
+        std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\nCC_TAGS=\"fleet\"\n").unwrap();
+        assert_eq!(docker_vm_exports("lane"), "", "unset is a no-op");
+
+        std::fs::write(home.path().join("env").join("fleet.env"), "AMUX_DOCKER_VM=goal-shared\n").unwrap();
+        let ex = docker_vm_exports("lane");
+        assert!(ex.contains("export DOCKER_CONTEXT=colima-goal-shared;"), "{ex}");
+        assert!(ex.contains("export AMUX_DOCKER_VM=goal-shared;"), "{ex}");
+        let dir = docker_vm_shim_dir();
+        assert!(ex.contains(&format!("export PATH={}:", sh_quote(&dir.to_string_lossy()))), "{ex}");
+        for name in ["colima", "limactl"] {
+            let f = dir.join(name);
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), DOCKER_VM_SHIM, "{name} shim installed");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o111, 0o111, "{name} executable");
+            }
+        }
+
+        std::fs::write(home.path().join("sessions").join("lane.env"),
+            "CC_DIR=\"/tmp\"\nCC_TAGS=\"fleet\"\nAMUX_DOCKER_VM=own-vm\n").unwrap();
+        assert!(docker_vm_exports("lane").contains("DOCKER_CONTEXT=colima-own-vm;"), "worker scope wins");
+
+        std::fs::write(home.path().join("sessions").join("lane.env"),
+            "CC_DIR=\"/tmp\"\nAMUX_DOCKER_VM=bad;rm -rf x\n").unwrap();
+        assert_eq!(docker_vm_exports("lane"), "", "a name that is not a profile is never exported");
+        assert!(!valid_docker_vm(""));
+        assert!(valid_docker_vm("goal-shared.v2_1"));
+
+        // A surviving shell that had a derived context loses it when the knob is
+        // unset, and the shim leaves PATH; a context the owner set by hand stays.
+        std::fs::write(home.path().join("sessions").join("lane.env"), "CC_DIR=\"/tmp\"\n").unwrap();
+        std::fs::remove_file(home.path().join("env").join("fleet.env")).unwrap();
+        let run = |derived: &str| -> String {
+            let out = std::process::Command::new("bash").arg("-c")
+                .arg(format!("{} printf '%s|%s' \"${{DOCKER_CONTEXT:-none}}\" \"$PATH\"", surviving_shell_scope_rc("lane")))
+                .env("DOCKER_CONTEXT", "colima-goal-shared")
+                .env("AMUX_DOCKER_VM_DERIVED", derived)
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let off = run("1");
+        assert!(off.starts_with("none|"), "derived context survived: {off}");
+        assert!(!off.contains(&dir.display().to_string()), "shim dir survived on PATH: {off}");
+        assert!(run("").starts_with("colima-goal-shared|"), "an owner-set context is left alone");
+    }
+
+    /// The shim itself, driven through bash with a fake real `colima` and
+    /// `limactl` behind it on PATH.
+    #[test]
+    fn the_shim_refuses_other_vms_and_passes_everything_else_through() {
+        let t = tempfile::tempdir().unwrap();
+        let shims = t.path().join("shims");
+        let real = t.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        install_docker_vm_shims(&shims).unwrap();
+        for name in ["colima", "limactl"] {
+            let f = real.join(name);
+            std::fs::write(&f, format!("#!/bin/bash\necho REAL-{name} \"$@\"\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let run = |cmd: &str, vm: &str, enforce: &str| -> (i32, String, String) {
+            let o = std::process::Command::new("bash").arg("-c").arg(cmd)
+                .env("PATH", format!("{}:{}:/usr/bin:/bin", shims.display(), real.display()))
+                .env("AMUX_DOCKER_VM", vm).env("AMUX_DOCKER_VM_ENFORCE", enforce)
+                .env("AMUX_HOME", t.path()).env("AMUX_SESSION", "lane")
+                .output().unwrap();
+            (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+        };
+        let (rc, _, err) = run("colima start -p gs12-mine --cpu 8", "goal-shared", "1");
+        assert_eq!(rc, 64, "a private VM is refused");
+        assert!(err.contains("colima profile 'goal-shared'") && err.contains("AMUX_DOCKER_VM_ENFORCE=0"), "{err}");
+        assert_eq!(run("colima start gs12-mine", "goal-shared", "1").0, 64, "positional profile refused");
+        assert_eq!(run("colima start --profile=x", "goal-shared", "1").0, 64, "--profile= refused");
+        assert_eq!(run("colima start", "goal-shared", "1").0, 64, "the default profile is not the shared one");
+        assert_eq!(run("limactl create --name=colima-mine t.yaml", "goal-shared", "1").0, 64);
+        let (rc, out, _) = run("colima start -p goal-shared --cpu 12", "goal-shared", "1");
+        assert_eq!((rc, out.trim()), (0, "REAL-colima start -p goal-shared --cpu 12"), "the shared VM starts");
+        assert!(run("limactl start colima-goal-shared", "goal-shared", "1").1.starts_with("REAL-limactl"));
+        assert!(run("colima status -p gs12-mine", "goal-shared", "1").1.starts_with("REAL-colima status"), "non-create verbs pass");
+        assert!(run("colima stop -p gs12-mine", "goal-shared", "1").1.starts_with("REAL-colima stop"), "stopping a private VM is allowed");
+        assert!(run("colima start -p gs12-mine", "goal-shared", "0").1.starts_with("REAL-colima start"), "ENFORCE=0 opts out");
+        assert!(run("colima start -p gs12-mine", "", "1").1.starts_with("REAL-colima start"), "no knob, no refusal");
+        let log = std::fs::read_to_string(t.path().join("logs").join("docker-vm-refusals.log")).unwrap();
+        assert_eq!(log.lines().count(), 5, "each refusal is logged: {log}");
+        assert!(log.contains("session=lane"), "{log}");
     }
 }
