@@ -14,7 +14,7 @@ git config user.email t@t; git config user.name t
 echo a > f; git add f; git commit -qm base; git push -q origin HEAD:main 2>/dev/null
 mkdir -p .git/hooks; printf '#!/bin/sh\nsleep 120\n' > .git/hooks/pre-push; chmod +x .git/hooks/pre-push
 echo b > f; git commit -qm "lane change" -- f
-AMUX_LAND_NOTIFY=0 AMUX_WORKER=lch-holder bash "$AM" land --no-batch >/dev/null 2>&1 &
+AMUX_LAND_NOTIFY=0 AMUX_WORKER=lch-holder bash "$AM" land --no-batch > "$T/holder.out" 2>&1 &
 key=""; for _ in $(seq 1 40); do
   for d in "$HOME"/.amux/locks/land-*; do [ "$(cat "$d/who" 2>/dev/null)" = lch-holder ] && key="$d"; done
   [ -n "$key" ] && pgrep -f 'sleep 120' >/dev/null && break; sleep 0.5
@@ -32,6 +32,9 @@ kill -0 "$hp" 2>/dev/null && { echo "FAIL holder still running"; fail=1; } || ec
 [ -d "$key" ] && { echo "FAIL lock not released"; fail=1; } || echo "ok   lock released"
 git fetch -q origin main; [ "$(git show origin/main:f)" = a ] && echo "ok   nothing pushed" || { echo "FAIL something was pushed"; fail=1; }
 grep -q "orch cancelled lch-holder's HOLD .*reason: main is red" "$HOME/.amux/logs/land.log" && echo "ok   land.log names both lanes and the reason" || { echo "FAIL log line"; fail=1; }
+grep -q "this hold was cancelled by orch at .*: main is red on the tree guards" "$T/holder.out" \
+  && echo "ok   the holder's own output names the canceller and the reason" \
+  || { echo "FAIL holder output: $(tail -2 "$T/holder.out")"; fail=1; }
 pkill -f 'sleep 120' 2>/dev/null; wait 2>/dev/null
 rm -rf -- "${T:?}"
 exit $fail
