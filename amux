@@ -6562,6 +6562,25 @@ _land_demote() {
   return 0
 }
 
+# _land_pid_cwd <pid> [pgid]: a land process's working directory WITHOUT
+# depending on lsof being on PATH (gs12-gates, 2026-10-02: a lane whose PATH
+# lacks /usr/sbin got exit 127 with no output from --adopt under set -e).
+# The detached record (named by the wrapper pid, which is the waiter's pgid)
+# carries the checkout on line 3; lsof by full path is the fallback. Never
+# fails: prints nothing when neither source knows.
+_land_pid_cwd() {
+  local pid="$1" pgid="${2:-}" d="$HOME/.amux/locks/detached" r="" l=""
+  for r in "$d/$pid" ${pgid:+"$d/$pgid"}; do
+    [ -f "$r" ] && sed -n 3p "$r" 2>/dev/null | grep . && return 0
+  done
+  for l in "$(command -v lsof 2>/dev/null || true)" /usr/sbin/lsof /usr/bin/lsof; do
+    [ -n "$l" ] && [ -x "$l" ] || continue
+    "$l" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true
+    return 0
+  done
+  return 0
+}
+
 # `amux land --adopt [pid|--all]` (promised to mixpeek-override, 2026-10-01):
 # move this lane's waiters that run OLDER land code onto the installed code
 # without losing their place. The old waiter is frozen (SIGSTOP keeps its pid
@@ -6570,50 +6589,59 @@ _land_demote() {
 # process group killed. If the rename does not happen within 60s the old
 # waiter is resumed as it was. A waiter that holds the lock is never adopted.
 _land_adopt() {
-  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" url key q lock t pid pgid cwd sha nb n=0 k new
+  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" url key q lock t pid pgid cwd sha nb n=0 k got mine=0 mk
   git rev-parse --git-dir >/dev/null 2>&1 || die "amux land --adopt: run it inside the repository's checkout"
   url="$(git remote get-url origin 2>/dev/null)" || die "amux land --adopt: no remote origin"
   key="$(printf '%s %s' "$url" main | shasum | cut -c1-16)"
   lock="$HOME/.amux/locks/land-$key"; q="$lock.q"
   for t in "$q"/*; do
     [ -e "$t" ] || continue
-    [ "$(sed -n 1p "$t" 2>/dev/null)" = "$me" ] || continue
+    [ "$(sed -n 1p "$t" 2>/dev/null || true)" = "$me" ] || continue
     pid="${t##*-}"
     [ -z "$want" ] || [ "$want" = "--all" ] || [ "$want" = "$pid" ] || continue
-    [ "$(sed -n 5p "$t" 2>/dev/null)" = "$LAND_BEHAVIOR_VERSION" ] && continue
-    kill -0 "$pid" 2>/dev/null || continue
-    if [ "$(cat "$lock/pid" 2>/dev/null)" = "$pid" ]; then
+    mine=$((mine + 1))
+    if [ "$(sed -n 5p "$t" 2>/dev/null || true)" = "$LAND_BEHAVIOR_VERSION" ]; then
+      echo "amux land: ticket ${t##*/} already runs $LAND_BEHAVIOR_VERSION; nothing to adopt"; continue
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "amux land: ticket ${t##*/}: its waiter (pid $pid) is gone; skipped"; continue
+    fi
+    if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$pid" ]; then
       echo "amux land: pid $pid holds the lock; it finishes on its own code (not adopted)"; continue
     fi
-    sha="$(sed -n 2p "$t")"; nb=""; [ "$(sed -n 4p "$t")" = 1 ] || nb="--no-batch"
-    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
-    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    sha="$(sed -n 2p "$t")"; nb=""; [ "$(sed -n 4p "$t" || true)" = 1 ] || nb="--no-batch"
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [ -n "$pgid" ] || pgid="$pid"
+    cwd="$(_land_pid_cwd "$pid" "$pgid")"
     [ -n "$cwd" ] && [ -d "$cwd" ] || cwd="$(git rev-parse --show-toplevel)"
+    mk="$q/.adopt-$pid"; rm -f -- "$mk"
     kill -STOP -- "-$pgid" 2>/dev/null || kill -STOP "$pid" 2>/dev/null || { echo "amux land: cannot pause pid $pid; skipped"; continue; }
     # Whatever happens next, never leave the old waiter frozen.
     # shellcheck disable=SC2064  # expanded now on purpose
     trap "kill -CONT -- '-$pgid' 2>/dev/null || kill -CONT '$pid' 2>/dev/null || true" EXIT INT TERM
     ( cd "$cwd" && AMUX_LAND_ADOPT="${t##*/}" AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED=1 bash "$0" land --sha "$sha" --detach $nb >/dev/null 2>&1 ) || true
-    new=""
+    got=""
     for k in $(seq 1 60); do
-      new="$(ls "$q" 2>/dev/null | grep -E "^$(basename "${t%-*}")-" | grep -v -- "-$pid\$" | head -1 || true)"
-      [ -n "$new" ] && break
+      [ -f "$mk" ] && { got="$(cat "$mk" 2>/dev/null || true)"; [ -n "$got" ] && break; }
       sleep 1
     done
-    if [ -n "$new" ]; then
+    rm -f -- "$mk"
+    if [ -n "$got" ] && [ "$got" != gone ] && [ "$(sed -n 1p "$q/$got" 2>/dev/null || true)" = "$me" ]; then
       kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-      rm -f -- "$HOME/.amux/locks/detached/$pid"
-      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] adopted pid $pid's ticket at its place as ${new} (pid ${new##*-}, $LAND_BEHAVIOR_VERSION)" >> "$HOME/.amux/logs/land.log"
-      echo "amux land: adopted pid $pid -> pid ${new##*-} at the same queue place, on $LAND_BEHAVIOR_VERSION"
+      rm -f -- "$HOME/.amux/locks/detached/$pid" "$HOME/.amux/locks/detached/$pgid"
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] adopted pid $pid's ticket at its place as $got (pid ${got##*-}, $LAND_BEHAVIOR_VERSION)" >> "$HOME/.amux/logs/land.log"
+      echo "amux land: adopted pid $pid -> pid ${got##*-} (ticket $got) at the same queue place, on $LAND_BEHAVIOR_VERSION"
       n=$((n + 1))
     else
       kill -CONT -- "-$pgid" 2>/dev/null || kill -CONT "$pid" 2>/dev/null || true
-      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] adopt of pid $pid failed: no new waiter took its ticket in 60s; resumed the old one" >> "$HOME/.amux/logs/land.log"
-      echo "amux land: adopt of pid $pid failed; the old waiter was resumed unchanged" >&2
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] adopt of pid $pid failed (${got:-no answer in 60s}); resumed the old waiter" >> "$HOME/.amux/logs/land.log"
+      echo "amux land: adopt of pid $pid failed (${got:-no answer in 60s}); the old waiter was resumed unchanged" >&2
     fi
     trap - EXIT INT TERM
   done
-  [ "$n" -gt 0 ] || echo "amux land: no waiter of $me on older land code in this queue"
+  if [ "$mine" = 0 ]; then
+    echo "amux land: no ticket of $me in this repository's queue ($q). Tickets are keyed by the lane name on their first line (AMUX_WORKER/AMUX_SESSION) and by the origin URL; see amux land --status"
+  fi
   return 0
 }
 
@@ -6687,7 +6715,7 @@ _land_cancel() {
       # checkout from the process's own cwd instead of guessing.
       if [ -z "$where" ] && kill -0 "$pid" 2>/dev/null; then
         local _pcwd
-        _pcwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+        _pcwd="$(_land_pid_cwd "$pid")"
         [ -n "$_pcwd" ] && where="$(git -C "$_pcwd" rev-parse --show-toplevel 2>/dev/null || echo "$_pcwd")"
       fi
       [ "$where" = "$here" ] || continue
@@ -6710,7 +6738,7 @@ _land_cancel() {
       [ "$pid" != "$$" ] && [ "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] || continue
       case "$cmd" in *"amux land"*) ;; *) continue ;; esac
       case "$cmd" in *--cancel*|*--status*|*--help*) continue ;; esac
-      pcwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+      pcwd="$(_land_pid_cwd "$pid" "$pgid")"
       [ -n "$pcwd" ] || continue
       ptop="$(git -C "$pcwd" rev-parse --show-toplevel 2>/dev/null || echo "$pcwd")"
       [ "$ptop" = "$here" ] || continue
@@ -6740,7 +6768,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.3"
+LAND_BEHAVIOR_VERSION="2026-10-02.5"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -6785,6 +6813,11 @@ cmd_land() {
   # `amux land --demote <lane>` moves that lane's priority ticket back into
   # ordinary order at its arrival time; the waiter does the rename itself.
   #
+  # `amux land --adopt [pid|--all]`, run in the lane's checkout, moves the
+  # lane's waiters that run OLDER land code onto the installed code at the
+  # same queue place (same ticket name, new pid). A lock holder is never
+  # adopted, and a failed hand-off resumes the old waiter unchanged.
+  #
   # --detach queues and returns at once: land runs in its own session (macOS
   # has no setsid(1); python's os.setsid does it), output goes to a log under
   # ~/.amux/logs/land/, and the lane gets a message when it lands or stops
@@ -6825,7 +6858,7 @@ cmd_land() {
       --cancel) shift; _land_cancel "${1:-}"; return $? ;;
       --status) _land_status; return $? ;;
       -h|--help) sed -n '/^cmd_land()/,/^  local remote/p' "$0" | grep '^  #' | sed 's/^  # \{0,1\}//'; return 0 ;;
-      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority --reason <text>] [--detach] [--sha <commit>] | amux land --cancel | --demote <lane>" ;;
+      *) die "usage: amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority --reason <text>] [--detach] [--sha <commit>] | amux land --cancel [pid|--all] | --status | --demote <lane> | --adopt [pid|--all]" ;;
     esac
   done
   if [ -n "$land_sha" ]; then
@@ -6978,7 +7011,14 @@ p.communicate(msg.encode())
     # arrival time, so its place) and only swapping the pid suffix.
     local _old="${AMUX_LAND_ADOPT}"
     tname="${_old%-*}-$$"
-    mv -- "${q:?}/${_old:?}" "${q:?}/${tname:?}" 2>/dev/null || die "amux land --adopt: ticket $_old is gone; nothing adopted"
+    # The adopting command waits for THIS marker, never for a name match: a
+    # same-second ticket of another lane shares the prefix (gs12-tiering,
+    # 2026-10-02: adopt reported another lane's pid and its own was dropped).
+    if ! mv -- "${q:?}/${_old:?}" "${q:?}/${tname:?}" 2>/dev/null; then
+      echo gone > "${q:?}/.adopt-${_old##*-}"
+      die "amux land --adopt: ticket $_old is gone; nothing adopted"
+    fi
+    echo "$tname" > "${q:?}/.adopt-${_old##*-}"
     _land_log "adopted ticket ${_old} (land code $(sed -n 5p "${q:?}/${tname:?}" 2>/dev/null || echo ?)) at its place, now on $LAND_BEHAVIOR_VERSION"
   fi
   _land_ticket
