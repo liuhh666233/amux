@@ -7,7 +7,7 @@
 # days later as "unknown command" and filed it as a failed rung (gs12-spend,
 # mixpeek-override, 2026-10-02). A whole-file write is silent, so pin the
 # verbs here: each needs its dispatch entry, its function, and a usage that runs.
-set -uo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 FAILED=0; CELLS=0
 cell() { # <label> <command...>
