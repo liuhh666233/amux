@@ -31268,13 +31268,26 @@ function _locHeatDraw(d) {
   }
   _locHeatLayer.addTo(_map);
 }
-function _locExport(format) {
+// Through fetch, not a plain link: fetch carries the owner bearer the
+// dashboard's auth wrapper adds, which a link navigation would not.
+async function _locExport(format) {
   const {from, to} = _locWindow();
-  const a = document.createElement('a');
-  a.href = API + '/api/map/location/export?from=' + from + '&to=' + to + '&format=' + encodeURIComponent(format);
-  a.download = '';
-  document.body.appendChild(a); a.click(); a.remove();
   showToast('Exporting raw points as ' + format.toUpperCase());
+  try {
+    const r = await fetch(API + '/api/map/location/export?from=' + from + '&to=' + to + '&format=' + encodeURIComponent(format));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    const m = /filename="([^"]+)"/.exec(r.headers.get('content-disposition') || '');
+    const rows = r.headers.get('x-amux-rows');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = m ? m[1] : 'amux-location.' + format;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    showToast('Exported ' + (rows || '0') + ' raw point' + (rows === '1' ? '' : 's') + (r.headers.get('x-amux-truncated') === '1' ? ' (truncated)' : ''));
+  } catch (e) {
+    showToast('Export failed: ' + (e.message || e));
+  }
 }
 // Native bridge (iPhone app only). The app answers by calling
 // window.__amuxNativeLocation(status) with {enabled, authorization, motion,

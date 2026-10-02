@@ -128,7 +128,8 @@ test('Map > Location history shows stats, a heatmap layer and raw export links',
   await page.route('**/api/map/location/stats**', async route => { statsAsked = route.request().url(); await route.fulfill({json: STATS}); });
   await page.route('**/api/map/location/heatmap**', route => route.fulfill({json: {ok: true, measured: true, n_considered: 900, cell_deg: 0.00045,
     n_cells: 3, truncated: false, cells: [[40.7411, -73.9897, 600], [40.75, -73.99, 250], [40.9, -73.9, 50]]}}));
-  await page.route('**/api/map/location/export**', route => route.fulfill({body: 'id,ts\n', contentType: 'text/csv'}));
+  await page.route('**/api/map/location/export**', route => route.fulfill({body: 'id,ts\na,1\nb,2\n', contentType: 'text/csv',
+    headers: {'content-disposition': 'attachment; filename="amux-location-1-2.csv"', 'x-amux-rows': '2', 'x-amux-truncated': '0'}}));
   await page.addInitScript(() => { localStorage.setItem('amux_walkthrough_done', '1'); localStorage.setItem('amux_map_tab', 'history'); });
   await page.goto('/');
   await page.waitForFunction(() => typeof (window as any)._mapSidebarTab === 'function');
@@ -159,6 +160,8 @@ test('Map > Location history shows stats, a heatmap layer and raw export links',
   const eu = new URL((await exported).url());
   expect(eu.searchParams.get('format')).toBe('csv');
   expect(Number(eu.searchParams.get('to')) - Number(eu.searchParams.get('from'))).toBeGreaterThanOrEqual(23 * 3600);
+  // It went through fetch (which carries the owner bearer) and says how many rows.
+  await expect(page.getByText('Exported 2 raw points')).toBeVisible();
 });
 
 test('Map > Location history shows the iPhone recording detail and delivered vs stored', async ({ page }) => {
