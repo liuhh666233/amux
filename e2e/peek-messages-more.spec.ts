@@ -22,11 +22,10 @@ test('Messages tab: Ask and Export sit in the row on wide screens and in a ⋯ m
     }
   });
   const phone = (page.viewportSize()?.width || 1200) <= 600;
-  const wide = page.locator('#peek-messages-panel .pm-wide');
   const more = page.locator('#peek-msgs-more');
   if (phone) {
     await expect(more).toBeVisible();
-    await expect(wide.first()).toBeHidden();
+    await expect(page.locator('#peek-ask-toggle')).toBeHidden();
     await expect(page.locator('#peek-msgs-date-jump')).toBeHidden();
     const search = await page.locator('#peek-messages-search').boundingBox();
     expect(search!.width).toBeGreaterThanOrEqual(150);
@@ -38,7 +37,9 @@ test('Messages tab: Ask and Export sit in the row on wide screens and in a ⋯ m
     await expect(page.locator('#peek-ask-panel')).toBeVisible();
     await expect(more).not.toHaveAttribute('open', '');
   } else {
-    await expect(wide.first()).toBeVisible();
+    // Not wide.first(): that is now the date input, which the amux date
+    // picker replaces with its own button, so the input itself is hidden.
+    await expect(page.locator('#peek-ask-toggle')).toBeVisible();
     await expect(more).toBeHidden();
   }
 });
