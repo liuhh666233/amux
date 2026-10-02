@@ -877,6 +877,13 @@ pub fn apply_all(conn: &mut Connection) -> anyhow::Result<()> {
         }
     }
     report_renumbered_migrations(conn);
+    // Tables ensured at their point of use (not in a numbered migration) are
+    // ensured here too, so the schema is complete after the FIRST boot. Lazily,
+    // task_attempts appeared only once a runtime job first touched it, so a
+    // re-open changed the table set and the nightly "migrations apply to a
+    // populated database" gate failed (AMUX-5374). IF NOT EXISTS keeps the
+    // version-collision protection attempts.rs documents.
+    crate::db::attempts::ensure_table(conn)?;
     Ok(())
 }
 

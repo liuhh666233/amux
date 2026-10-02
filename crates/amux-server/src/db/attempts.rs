@@ -384,3 +384,17 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod schema_at_boot {
+    /// AMUX-5374: the table must exist straight after migrations, not only once
+    /// a runtime job first touches it, or a re-open changes the table set.
+    #[test]
+    fn task_attempts_exists_after_apply_all() {
+        let conn = crate::db::migrate::test_memdb();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task_attempts'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "task_attempts must be created by apply_all");
+    }
+}
