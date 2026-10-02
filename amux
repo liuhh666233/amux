@@ -6764,7 +6764,7 @@ cmd_land() {
   me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}"
   common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
   mkdir -p "$HOME/.amux/locks" "$HOME/.amux/logs"
-  if [ "$priority" = 1 ]; then
+  if [ "$priority" = 1 ] && [ "${AMUX_LAND_PRIORITY_CHECKED:-}" != 1 ]; then
     _land_priority_check "$remote" "$branch" "${land_sha:-HEAD}" "$prio_reason" "$me" "$log" || return 2
   fi
   if [ "$detach" = 1 ]; then
@@ -6791,7 +6791,7 @@ cmd_land() {
     mkdir -p "${dlog%/*}"
     # The runner re-runs land without --detach, then tells the lane how it
     # ended: the last land.log lines are the outcome, the log the detail.
-    AMUX_LAND_ME="$me" AMUX_LAND_DLOG="$dlog" AMUX_LAND_SELF="$0" python3 -c '
+    AMUX_LAND_PRIORITY_CHECKED="$priority" AMUX_LAND_ME="$me" AMUX_LAND_DLOG="$dlog" AMUX_LAND_SELF="$0" python3 -c '
 import os, sys, subprocess
 os.setsid()
 me, dlog, amux = os.environ["AMUX_LAND_ME"], os.environ["AMUX_LAND_DLOG"], os.environ["AMUX_LAND_SELF"]
@@ -7182,12 +7182,21 @@ p.communicate(msg.encode())
     # afternoon. gh's own stored login answers when the variables are unset,
     # and git's credential helper already ignores them.
     rc=0; out="$(env -u GH_TOKEN -u GITHUB_TOKEN AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
+    # Keep the whole hook output for EVERY attempt, landed or refused
+    # (gs12-spend, 2026-10-01: the deciding line sits above the ERROR list, so
+    # a tail lost it; gs12-gates, 2026-10-02: a batch landed a stale
+    # openapi.json the spec leg refuses on that tree, and with no output kept
+    # nobody could read which branch the hook took).
+    full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-a$i.log"
+    mkdir -p "${full%/*}"
+    find "${full%/*}" -name '*.log' -mtime +14 -delete 2>/dev/null || true
+    printf '%s\n' "$out" > "$full"
     if [ $rc -eq 0 ]; then
       if [ -n "$lanes" ]; then
         _land_tell "landed $(git rev-parse --short "$stack_tip") on $branch, batched by $me"
-        _land_log "landed $(git rev-parse --short "$stack_tip") on $branch (attempt $i), with ${lanes}"
+        _land_log "landed $(git rev-parse --short "$stack_tip") on $branch (attempt $i), with ${lanes}. Hook output: $full"
       else
-        _land_log "landed $(git rev-parse --short "$stack_tip") on $branch (attempt $i)"
+        _land_log "landed $(git rev-parse --short "$stack_tip") on $branch (attempt $i). Hook output: $full"
       fi
       printf '%s\n' "$out" | tail -3
       return 0
@@ -7196,13 +7205,6 @@ p.communicate(msg.encode())
       _land_log "lost a race to a push outside land (attempt $i); refetching"
       continue
     fi
-    # Keep the whole hook output (gs12-spend, 2026-10-01): the deciding line
-    # ("✗ FAILED — 2 selected test(s) ...") sits above the ERROR list, so a
-    # tail lost it and two lanes re-ran the full hook by hand to find it.
-    full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$.log"
-    mkdir -p "${full%/*}"
-    find "${full%/*}" -name '*.log' -mtime +14 -delete 2>/dev/null || true
-    printf '%s\n' "$out" > "$full"
     verdicts="$(printf '%s\n' "$out" | grep -E '✗|FAILED|BLOCKED|REFUSED|refus|^error:|^fatal:' | head -15)"
     if [ -n "$lanes" ]; then
       # A refused batch blames nobody: push this lane alone, and the batched
