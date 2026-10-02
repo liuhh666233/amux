@@ -167,7 +167,11 @@ export default defineConfig({
   reporter: process.env.AMUX_E2E_EVIDENCE_DIR
     ? [['line'], ['./ci-evidence-reporter.mjs']] : undefined,
   // Real providers and peer coordination require the dedicated lifecycle lab.
-  testIgnore: ['**/lifecycle/live-*.spec.ts'],
+  // *.test.mjs are node:test suites. Playwright's default match loaded them,
+  // printed their `not ok` lines and counted nothing, so three of them were
+  // red for a week inside green shards. They run as their own gated step
+  // ("Dashboard client unit tests" in rust.yml).
+  testIgnore: ['**/lifecycle/live-*.spec.ts', '**/*.test.mjs'],
   timeout: 30_000,
   retries: 0,
   use: {

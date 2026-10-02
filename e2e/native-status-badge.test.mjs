@@ -33,7 +33,7 @@ test('the Enter chip sends the suggestion if one is showing, else presses Enter'
 });
 for (const isolated of [true,false]) test(`empty Send on a${isolated?'n isolated':' normal'} lane asks the server for the suggestion before any bare Enter`,async()=>{
  const run=async reply=>{
-  const calls=[];const ctx=vm.createContext({sessions:[{name:'raw',isolated}],API:'',APP_VER:'t',_gridPanes:{},
+  const calls=[];const ctx=vm.createContext({sessions:[{name:'raw',isolated}],API:'',APP_VER:'t',_gridPanes:{},_workerRenderer:()=>'terminal',
    showSendingIndicator(){},showToast:m=>calls.push('toast:'+m),amuxTrack(){},_refreshPeekSoon(){},setTimeout(){},
    peekQuickKeys:async k=>{calls.push('peek:'+k);return {accepted:true,effect:'unverified'};},
    doKeys:async(n,k)=>{calls.push(n+':'+k);return {accepted:true,effect:'unverified'};},

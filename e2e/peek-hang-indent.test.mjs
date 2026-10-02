@@ -5,7 +5,11 @@ import { test } from 'node:test';
 const app = readFileSync(new URL('../crates/amux-dashboard/static/app.js', import.meta.url), 'utf8');
 const i = app.indexOf('function _hangIndent('); let d = 0, end = 0;
 for (let k = app.indexOf('{', i); k < app.length; k++) { if (app[k] === '{') d++; else if (app[k] === '}' && --d === 0) { end = k + 1; break; } }
-const hang = new Function(app.slice(i, end) + '\nreturn _hangIndent;')();
+// The function reads module-level constants declared just above it; carry
+// them along, or every call throws (this file failed silently from 892e1cae:
+// Playwright loads it but does not count node:test results).
+const consts = (app.slice(Math.max(0, i - 400), i).match(/^const _[A-Z_]+ = .*;$/gm) || []).join('\n');
+const hang = new Function(consts + '\n' + app.slice(i, end) + '\nreturn _hangIndent;')();
 test('a list item hangs by its marker width', () => {
   const out = hang('  - <b>Group field:</b> the New worker dialog has an optional field');
   assert.match(out, /^<span class="pk-hang" style="--h:4ch">  - <b>Group field:<\/b>/);
@@ -19,6 +23,11 @@ test('plain lines, blank lines and box blocks are untouched', () => {
   assert.equal(hang('   '), '   ');
   const box = '<div class="peek-box">│ a │\n  - inside│</div>';
   assert.equal(hang(box), box);
+});
+test('a reply block\'s first and last lines hang inside their markup', () => {
+  const open = '<div class="ptc"><div class="ptc-body">  - first reply line';
+  assert.match(hang(open), /<div class="ptc-body"><span class="pk-hang" style="--h:4ch">  - first reply line<\/span>$/);
+  assert.match(hang('  - last reply line</div></div>'), /^<span class="pk-hang" style="--h:4ch">  - last reply line<\/span><\/div><\/div>$/);
 });
 test('the peek pipeline applies it last', () => {
   assert.match(app, /return _hangIndent\(wrapBoxBlocks\(/);

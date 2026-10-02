@@ -8,7 +8,7 @@ const code = source.slice(source.indexOf('const _peekRequests ='), source.indexO
 function fixture() {
   const calls = [], beacons = [], timers = new Map();
   let clock = 10000, timer = 0, generation = 1;
-  const body = {style:{setProperty(){}}, querySelector:()=>null, scrollTop:0, scrollHeight:100, innerHTML:''};
+  const body = {style:{setProperty(){}}, classList:{contains:()=>false}, querySelector:()=>null, scrollTop:0, scrollHeight:100, innerHTML:''};
   const status = {textContent:''};
   const ctx = vm.createContext({
     Promise, Map, JSON, AbortController, console:{error(){}}, Date, Math,
@@ -18,6 +18,8 @@ function fixture() {
     _peekAgents:{selected:null}, _peekAgentsLoad(){}, _peekLoadPlan(){}, _peekPlanLast:10000,
     _peekIdentity:name=>({name,generation}), _peekIdentityCurrent:id=>id.name===ctx.peekSession && id.generation===generation,
     _peekIdentityDiscard(){}, _peekHasSelection:()=>false, _peekPollBeacon:(action,name,extra)=>beacons.push({action,name,...extra}),
+    _peekChatTarget:()=>null, _peekChatPaintSkips:0, _workerRenderer:()=>'terminal',   // terminal workers, Chat tab closed
+    _PEEK_CACHE_KEY:name=>'peek_'+name, _peekVisibleCols:()=>120,   // helpers defined outside the extracted slice
     _peekGeoHold:0, _peekLastFullMs:0, _peekLastFullAttemptMs:0, _peekEtag:null, _peekLiveEtag:null,
     _peekHistoryRaw:'', _peekHistoryHTML:'', _lastPeekRaw:'', _lastLiveHTML:'', lastPeekHTML:'',
     _peekEarlier:{}, _peekEarlierHTML:()=>'', _trimPeekLiveOverlap:(_history,live)=>live,

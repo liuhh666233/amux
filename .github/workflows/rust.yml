@@ -329,6 +329,10 @@ jobs:
         run: node --test tests/dashboard-outage-recovery.mjs
       - name: No assignment to an undeclared client-side global (AF-940)
         run: node --test tests/spa-no-undeclared-global-assignment.test.mjs
+      - name: Dashboard client unit tests (e2e/*.test.mjs)
+        # These node:test suites used to ride inside Playwright, which loaded
+        # them and counted none of their results (AMUX-5373).
+        run: node --test e2e/*.test.mjs
       # The CI checkout IS committed HEAD, so serve-head's worktree hop is
       # pure duplicate work here — and worse: without these env vars the
       # prebuild below went to ./target while serve-head defaulted to
