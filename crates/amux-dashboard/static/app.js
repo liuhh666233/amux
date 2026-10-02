@@ -4040,9 +4040,14 @@ async function _queueOp(url, options) {
     } catch (e) {}
   }
   const entry = { id: options._outboxId || crypto.randomUUID(), url, options: { method: options.method, headers: options.headers, body }, timestamp: Date.now(), state: 'pending', not_attempted:true };
+  if (options._queueError) Object.assign(entry, {error:options._queueError, not_attempted:false, attempted_at:Date.now()});
   try {
     await _mutateQueue(current => {
-      if (current.some(q => q.id === entry.id)) return;
+      const existing = current.find(q => q.id === entry.id);
+      // A board edit is queued BEFORE it is sent, so a refusal arrives for an
+      // entry that already exists. Record it there; returning early left the
+      // entry bare and the pill read "Live" until a retry failed.
+      if (existing) { if (options._queueError) Object.assign(existing, {error:entry.error, not_attempted:false, attempted_at:entry.attempted_at}); return; }
       const pendingStop = _pendingStop(current, url, options);
       if (pendingStop) {
         _outboxDiagnostic('stop_intent_coalesced', {target:url.split('/').at(-2), queue_count:current.length});
@@ -4382,7 +4387,10 @@ async function _outboxFetch(input, init) {
   return _boundedMutationFetch(input, init).then(async r => {
     if (r.status >= 500 || [401, 408, 429].includes(r.status)) {
       _writeError = 'Server did not save the change (' + r.status + ')';
-      if (await _queueOp(url, init || {})) {
+      // Queued WITH the refusal: the server already saw and refused it, so it
+      // is neither untried nor quiet. Queued bare, the pill read "Live" until
+      // the first retry failed (outage-recovery "pool timeout", 2 CI runs).
+      if (await _queueOp(url, {...(init || {}), _queueError:_writeError})) {
         _interactionFail(receipt.id, null, true);
         return _outboxAccepted();
       }
@@ -13664,7 +13672,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1218';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1219';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}

@@ -64,6 +64,11 @@ test(`${failure.reason} retains gate and title intent across reload then retries
   await expect.poll(async () => (await queue(page)).length).toBe(1);
   const persisted = (await queue(page))[0];
   expect(JSON.parse(persisted.options.body).gate).toEqual(['Verify the durable write']);
+  if (failure.status === 500) {
+    // Queued WITH the refusal, so the pill counts it before any retry runs.
+    expect(persisted.error).toContain('Server did not save the change (500)');
+    expect(persisted.not_attempted).toBe(false);
+  }
   await page.reload();
   expect((await queue(page))[0].id).toBe(persisted.id);
   await openCard(page, card.id);
