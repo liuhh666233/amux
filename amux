@@ -6589,7 +6589,7 @@ _land_pid_cwd() {
 # process group killed. If the rename does not happen within 60s the old
 # waiter is resumed as it was. A waiter that holds the lock is never adopted.
 _land_adopt() {
-  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" url key q lock t pid pgid cwd sha nb n=0 k got mine=0 mk
+  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" url key q lock t pid pgid cwd sha nb n=0 got mine=0 mk
   git rev-parse --git-dir >/dev/null 2>&1 || die "amux land --adopt: run it inside the repository's checkout"
   url="$(git remote get-url origin 2>/dev/null)" || die "amux land --adopt: no remote origin"
   key="$(printf '%s %s' "$url" main | shasum | cut -c1-16)"
