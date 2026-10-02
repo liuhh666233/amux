@@ -6892,7 +6892,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.12"
+LAND_BEHAVIOR_VERSION="2026-10-02.13"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7018,7 +7018,12 @@ cmd_land() {
   if [ "$priority" = 1 ] && [ "${AMUX_LAND_PRIORITY_CHECKED:-}" != 1 ]; then
     _land_priority_check "$remote" "$branch" "${land_sha:-HEAD}" "$prio_reason" "$me" "$log" || return 2
   fi
-  if [ "${AMUX_LAND_PRECHECKED:-}" != 1 ]; then
+  # --detach runs the precheck in the DETACHED process, never here: at load it
+  # takes 2-6 min, which overran the caller's tool timeout and got the
+  # detaching call itself killed (gs12-spend, 2026-10-02 09:05Z, a --detach
+  # call SIGTERMed at 237 s). A refusal still reaches the lane in the
+  # completion message ("refused before queueing").
+  if [ "${AMUX_LAND_PRECHECKED:-}" != 1 ] && [ "$detach" != 1 ]; then
     _land_precheck "$remote" "$branch" "${land_sha:-HEAD}" "$me" "$log" || return 3
   fi
   if [ "$detach" = 1 ]; then
@@ -7045,7 +7050,7 @@ cmd_land() {
     mkdir -p "${dlog%/*}"
     # The runner re-runs land without --detach, then tells the lane how it
     # ended: the last land.log lines are the outcome, the log the detail.
-    AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED="$priority" AMUX_LAND_ME="$me" AMUX_LAND_DLOG="$dlog" AMUX_LAND_SELF="$0" python3 -c '
+    AMUX_LAND_PRIORITY_CHECKED="$priority" AMUX_LAND_ME="$me" AMUX_LAND_DLOG="$dlog" AMUX_LAND_SELF="$0" python3 -c '
 import os, sys, subprocess
 os.setsid()
 me, dlog, amux = os.environ["AMUX_LAND_ME"], os.environ["AMUX_LAND_DLOG"], os.environ["AMUX_LAND_SELF"]
