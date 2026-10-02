@@ -261,6 +261,11 @@ CLAUDE_TMP_IDLE_H=${AMUX_CLEANUP_CLAUDE_TMP_IDLE_H:-48}
 CLAUDE_TMP_TIGHT_IDLE_H=${AMUX_CLEANUP_CLAUDE_TMP_TIGHT_IDLE_H:-24}
 CLAUDE_TMP_QUOTA_GB=${AMUX_CLEANUP_CLAUDE_TMP_QUOTA_GB:-20}
 CLAUDE_TMP_ENTRY_IDLE_H=${AMUX_CLEANUP_CLAUDE_TMP_ENTRY_IDLE_H:-6}
+# An entry under this size is never removed by the quota rule. Without it the first
+# live run (2026-10-02) removed 194 small scratch files (scripts, logs, card JSON)
+# from three live sessions while chasing a quota their size could not affect;
+# the 10 removals that mattered were all over 1G.
+CLAUDE_TMP_ENTRY_MIN_MB=${AMUX_CLEANUP_CLAUDE_TMP_ENTRY_MIN_MB:-256}
 CLAUDE_TMP_WALK_S=${AMUX_CLEANUP_CLAUDE_TMP_WALK_S:-45}   # 15s measured too short: a 16G idle session walks in 8-10s unloaded, longer under load
 CLAUDE_TMP_BUDGET_S=${AMUX_CLEANUP_CLAUDE_TMP_BUDGET_S:-150}
 # Not the desktop lane: it is ISOLATED, and amux refuses automated sends into an
@@ -905,6 +910,7 @@ reap_claude_tmp() { # <root> <idle_hours> <dry:0|1>
       sort -rn "$ents" -o "$ents"
       while IFS=$'\t' read -r ekb e; do
         [ "$total" -gt "$quota_kb" ] || break
+        if [ "$ekb" -lt $(( CLAUDE_TMP_ENTRY_MIN_MB * 1024 )) ]; then break; fi   # sorted biggest first: everything after is smaller
         if [ -f "$e/.git" ]; then n_qkept=$((n_qkept+1)); continue; fi
         rc=0; any_recent "$CLAUDE_TMP_ENTRY_IDLE_H" "$CLAUDE_TMP_WALK_S" "$e" || rc=$?
         if [ "$rc" != 1 ]; then n_qkept=$((n_qkept+1)); continue; fi

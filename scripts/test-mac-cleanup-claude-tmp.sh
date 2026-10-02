@@ -45,7 +45,7 @@ build() {
   touch "$R/proj/livef/scratchpad/x"
   printf 'cat 1 ethan cwd DIR %s\n' "$R/proj/open/scratchpad/x" > "$FIX/lsof"
   LSOF_CMD="cat $FIX/lsof"
-  CLAUDE_TMP_QUOTA_KB=0
+  CLAUDE_TMP_QUOTA_KB=0; CLAUDE_TMP_ENTRY_MIN_MB=0   # cells 4-6 use megabyte fixtures; cell 7 tests the floor
 }
 
 echo "1. a dead session dir is removed and ledgered; every live signal keeps one"
@@ -108,6 +108,16 @@ out=$(reap_claude_tmp "$R" 48 0)
 eval "$(declare -f real_du_kb | sed 's/^real_du_kb/du_kb/')"
 check "the idle entry of an unsummable session is removed" gone "$(has "$S/old-big")"
 check "its recent entry stays"                       present "$(has "$S/fresh")"
+
+echo "7. the quota rule never removes a small entry, however far over quota"
+build
+S="$R/proj/livet/scratchpad"; mb "$S/fresh-big/a.tar" 6; mb "$S/old-note.py" 1; mb "$S/old-big/a.tar" 3
+age "$S/old-note.py" "$S/old-big"; touch "$P/proj/livet.jsonl"
+CLAUDE_TMP_QUOTA_KB=$(( 1 * 1024 )); CLAUDE_TMP_ENTRY_MIN_MB=2
+out=$(reap_claude_tmp "$R" 48 0)
+check "an idle entry over the size floor is removed" gone    "$(has "$S/old-big")"
+check "an idle entry under the size floor stays"     present "$(has "$S/old-note.py")"
+check "the session is still named OVER QUOTA"        yes     "$(printf '%s' "$out" | grep -q "OVER QUOTA .*$R/proj/livet" && echo yes || echo no)"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "PASS: mac-cleanup-claude-tmp — all checks passed"; exit 0; fi
