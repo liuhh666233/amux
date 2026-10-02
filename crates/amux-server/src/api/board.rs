@@ -869,12 +869,41 @@ async fn ready_frontier(
     Json(crate::api::measured::measured(body, n_considered)).into_response()
 }
 
+/// Query keys `/api/board/changes` does not implement, comma-joined. Keys
+/// starting with `_` are cache busters and pass.
+fn unknown_changes_params(q: &std::collections::HashMap<String, String>) -> Option<String> {
+    let mut bad: Vec<&str> = q
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !matches!(*k, "since_seq" | "limit") && !k.starts_with('_'))
+        .collect();
+    if bad.is_empty() {
+        return None;
+    }
+    bad.sort_unstable();
+    Some(bad.join(","))
+}
+
 /// CDC catch-up: returns board_change_log rows after a given seq.
 /// Clients call this after an SSE reconnect to replay missed mutations.
 async fn board_changes(
     State(state): State<AppState>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    // A filter this endpoint does not implement used to be ignored, so
+    // `?session=X&since_h=5` returned the oldest 5000 rows fleet-wide and read
+    // as an answer (amux-helper, 2026-10-01). Refuse it by name instead.
+    if let Some(bad) = unknown_changes_params(&q) {
+        tracing::warn!(verdict = "board_changes_unknown_param", params = %bad, "refused");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("unsupported parameter(s) {bad}: /api/board/changes accepts since_seq and limit only"),
+                "accepted": ["since_seq", "limit"],
+            })),
+        )
+            .into_response();
+    }
     let since_seq: i64 = q.get("since_seq").and_then(|v| v.parse().ok()).unwrap_or(0);
     let limit: usize = q
         .get("limit")
@@ -19200,5 +19229,25 @@ mod fold_receipt_tests {
         assert!(!recent_fold_receipt(&state, "gs12-obs", "MO-4000"), "a different fold target is announced");
         assert!(!recent_fold_receipt(&state, "gs12-data", "MO-3964"), "a receipt 20 minutes ago is outside the window");
         assert!(!recent_fold_receipt(&state, "gs12-mvs", "MO-3964"), "another lane gets its own first receipt");
+    }
+}
+
+#[cfg(test)]
+mod changes_param_tests {
+    use super::unknown_changes_params;
+    use std::collections::HashMap;
+
+    fn q(keys: &[&str]) -> HashMap<String, String> {
+        keys.iter().map(|k| (k.to_string(), "1".to_string())).collect()
+    }
+
+    #[test]
+    fn a_filter_the_feed_does_not_implement_is_named_not_ignored() {
+        assert_eq!(unknown_changes_params(&q(&["since_seq", "limit"])), None);
+        assert_eq!(unknown_changes_params(&q(&["since_seq", "_"])), None);
+        assert_eq!(
+            unknown_changes_params(&q(&["session", "since_h", "limit"])).as_deref(),
+            Some("session,since_h")
+        );
     }
 }
