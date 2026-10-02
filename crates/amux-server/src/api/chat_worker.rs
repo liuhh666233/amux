@@ -1008,6 +1008,32 @@ pub(crate) async fn companion_prompt(state: &AppState, worker: &str, fresh: bool
         })
         .await
         .ok();
+    // Recent activity log: last N prompts/messages the worker received, with
+    // timestamps and origin, so the companion knows what the worker was told.
+    let w2 = worker.to_string();
+    let activity_log: Vec<(f64, String, String, String)> = state
+        .store
+        .read_async(move |c| {
+            let mut st = c.prepare(
+                "SELECT ts, COALESCE(type,''), COALESCE(origin,''), COALESCE(SUBSTR(text,1,200),'') \
+                 FROM cmd_history WHERE session=?1 ORDER BY ts DESC LIMIT 15",
+            )?;
+            let rows = st
+                .query_map([&w2], |r| {
+                    Ok((
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })?
+                .flatten()
+                .collect::<Vec<_>>();
+            Ok(rows)
+        })
+        .await
+        .unwrap_or_default();
+
     let git = |args: &[&str]| {
         let mut a: Vec<String> = vec!["-C".into(), dir.clone()];
         a.extend(args.iter().map(|s| s.to_string()));
@@ -1064,6 +1090,16 @@ pub(crate) async fn companion_prompt(state: &AppState, worker: &str, fresh: bool
             out.push_str(&format!(", last commit {l}"));
         }
         out.push('\n');
+    }
+    if !activity_log.is_empty() {
+        out.push_str("- recent log (newest first):\n");
+        for (ts, typ, origin, text) in &activity_log {
+            let when = chrono::DateTime::from_timestamp(*ts as i64, 0)
+                .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                .unwrap_or_default();
+            let who = if origin.is_empty() { typ.as_str() } else { origin.as_str() };
+            out.push_str(&format!("  {when} [{who}] {}\n", clip(text, 200)));
+        }
     }
     if !last.trim().is_empty() {
         out.push_str(&format!("- its last reply (may be cut): {}\n", clip(last.trim(), 1500)));
