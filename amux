@@ -6677,6 +6677,16 @@ _land_adopt() {
     [ -z "$want" ] || [ "$want" = "--all" ] || [ "$want" = "$pid" ] || continue
     mine=$((mine + 1))
     if [ "$(sed -n 5p "$t" 2>/dev/null || true)" = "$LAND_BEHAVIOR_VERSION" ]; then
+      # Current code: nothing to adopt, but --batch still applies. The waiter
+      # holds the flag in memory (and re-execs with its original --no-batch on
+      # a self-upgrade), so it takes a marker and flips ITSELF (gs12-mvs,
+      # 2026-10-02: --batch was refused on a self-upgraded ticket).
+      if [ "$force_batch" = 1 ] && [ "$(sed -n 4p "$t" || true)" != 1 ]; then
+        printf '%s\n' "$me" > "$q/.batch-$pid"
+        echo "amux land: ticket ${t##*/} runs $LAND_BEHAVIOR_VERSION; marked batchable, the waiter switches on its next poll"
+        printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] marked $who's ticket ${t##*/} batchable" >> "$HOME/.amux/logs/land.log"
+        mine=$((mine + 1)); continue
+      fi
       echo "amux land: ticket ${t##*/} already runs $LAND_BEHAVIOR_VERSION; nothing to adopt"; continue
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -6749,7 +6759,12 @@ _land_status() {
     [ "${t:0:3}" = "000" ] && tag="priority "
     since_t=$((10#${t%%-*}))
     [ "$tag" = "priority " ] && since_t=$(( $(date +%s) / 1000000000 * 1000000000 + 10#${t:3:9} ))
-    printf '%3d  %-24s %s%s\n' "$n" "$who" "$tag" "waiting $(( ($(date +%s) - since_t) / 60 )) min"
+    # Batch flag and land code beside each ticket (gs12-compute, 2026-10-02:
+    # --status could not answer "is my ticket batchable now?").
+    local bflag="" bver
+    case "$(sed -n 4p "$q/$t" 2>/dev/null || true)" in 1) ;; 0r) bflag=", solo after refusals" ;; *) bflag=", no-batch" ;; esac
+    bver="$(sed -n 5p "$q/$t" 2>/dev/null || true)"
+    printf '%3d  %-24s %s%s\n' "$n" "$who" "$tag" "waiting $(( ($(date +%s) - since_t) / 60 )) min (pid ${t##*-}, land ${bver:-?}$bflag)"
     [ "$who" = "$me" ] && [ -z "$mine" ] && mine=$n
   done
   [ "$n" -gt 0 ] || echo "queue: empty"
@@ -6847,7 +6862,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.9"
+LAND_BEHAVIOR_VERSION="2026-10-02.10"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7210,8 +7225,19 @@ p.communicate(msg.encode())
       if [ -n "$_newv" ] && [ "$_newv" != "$LAND_BEHAVIOR_VERSION" ] && [ -e "${q:?}/${tname:?}" ]; then
         _land_log "land code $_newv is installed (this waiter runs $LAND_BEHAVIOR_VERSION); re-executing at its place"
         trap - EXIT INT TERM
+        # Made batchable after starting with --no-batch: carry that across the
+        # exec, which replays the original arguments.
+        [ "$batchable" = 1 ] && [ "$batch" != 1 ] && printf 'self-upgrade\n' > "${q:?}/.batch-$$"
         AMUX_LAND_ADOPT="$tname" AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED=1 exec bash "$0" land ${orig_args[@]+"${orig_args[@]}"}
       fi
+    fi
+    # BATCH marker (`amux land --adopt --batch` on a current ticket).
+    if [ -e "${q:?}/.batch-$$" ]; then
+      if [ "$batchable" != 1 ]; then
+        batchable=1; _land_ticket
+        _land_log "made batchable by $(cat "${q:?}/.batch-$$" 2>/dev/null || echo ?) (--adopt --batch)"
+      fi
+      rm -f -- "${q:?}/.batch-$$"
     fi
     # DEMOTE (MO-4102): `amux land --demote <lane>` leaves "$q/.demote-<pid>";
     # the waiter moves ITS OWN priority ticket back into ordinary order at its
