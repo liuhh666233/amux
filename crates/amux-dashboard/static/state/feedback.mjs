@@ -335,7 +335,14 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
     }, SPEAK_MS);
   }
   interactions.subscribe(receipt => {
-    if (receipt.phase === 'accepted') {
+    // A write the page made on its own is nobody's press. Bound to the armed
+    // button, the startup peek-tab seed locked a button that made no request
+    // and swallowed half of four quick presses (press-feedback "navigation ...
+    // quick repeat presses all run", iOS, run 36978904635).
+    if (receipt.phase === 'accepted' && receipt.origin?.actor === 'system') {
+      if (armed && !armed.bound) diagnostic({verdict:'press_bind_skipped_background', measured:true,
+        n_considered:1, action:armed.element.dataset.action, path:receipt.request?.path});
+    } else if (receipt.phase === 'accepted') {
       if (source) {
         bind(source, receipt);
         if (armed?.element === source) armed.bound = true;

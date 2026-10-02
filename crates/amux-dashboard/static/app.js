@@ -4173,7 +4173,10 @@ function _interactionAccept(url, init = {}) {
   const command = AmuxState.commandFor(method, path);
   const label = source && (source.getAttribute('aria-label') || source.title || source.innerText)?.trim();
   if (label && label.length <= 80) command.label = label;
-  return _interactions.accept({interactionId, command, request:{method,path}});
+  // A write the page makes on its own (a startup seed, not a press) says so,
+  // and the press layer never binds it to whichever button was tapped last.
+  const origin = init._background ? {actor:'system', surface:'dashboard'} : undefined;
+  return _interactions.accept({interactionId, command, request:{method,path}, origin});
 }
 function _interactionSet(id, patch) { return _interactions.update(id, patch); }
 function _interactionRequestOptions(receipt, init) {
@@ -8373,10 +8376,10 @@ const _PEEK_TAB_PREF_KEY = 'peek_tab_layout';
 function _peekTabLayoutValue() {
   return JSON.stringify({ hidden: [...peekHiddenTabs], tab_order: peekTabOrder });
 }
-function _persistPeekTabPrefs() {
+function _persistPeekTabPrefs(background = false) {
   clearTimeout(_peekTabPrefsSaveTimer);
   _peekTabPrefsSaveTimer = setTimeout(() => {
-    fetch(API + '/api/prefs', { method:'POST', headers:{'Content-Type':'application/json'},
+    fetch(API + '/api/prefs', { method:'POST', headers:{'Content-Type':'application/json'}, _background:background,
       body:JSON.stringify({key:_PEEK_TAB_PREF_KEY, value:_peekTabLayoutValue()}) }).catch(() => {});
   }, 80);
 }
@@ -8388,7 +8391,7 @@ async function _loadPeekTabPrefs() {
     // A user action made while this request was in flight wins. Never roll it
     // back with a late startup response.
     if (_peekTabPrefsDirty) return;
-    if (!value) { _persistPeekTabPrefs(); return; }
+    if (!value) { _persistPeekTabPrefs(true); return; }   // seeding at startup, not a press
     const saved = JSON.parse(value);
     const all = PEEK_TABS.map(t => t.id);
     if (!saved || !Array.isArray(saved.hidden) || !Array.isArray(saved.tab_order)) return;
@@ -13657,7 +13660,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1216';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1217';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}

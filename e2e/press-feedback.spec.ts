@@ -256,3 +256,33 @@ test('Settings: its loading reads show progress but the toggle stays pressable',
   await btn.click({timeout: 1500});
   await expect(page.locator('#settings-menu')).toBeHidden();
 });
+
+// A write the page makes on its own is nobody's press (run 36978904635: the
+// startup peek-tab seed bound to a tapped button, locked it, and two of four
+// quick presses were swallowed). Deterministic version of that race.
+test('a background write accepted between presses never locks the pressed button', async ({page}) => {
+  await boot(page);
+  await routeWrites(page, '**/api/press-test-bg', async route => {
+    await new Promise(r => setTimeout(r, 1500));
+    await route.fulfill({json: {ok: true}});
+  });
+  await page.evaluate(() => {
+    (window as any).__pressNav = 0;
+    const b = document.createElement('button');
+    b.id = 'press-nav'; b.textContent = 'Next';
+    b.dataset.interactionKind = 'command.pressNav';
+    b.onclick = () => { (window as any).__pressNav++; };
+    document.body.appendChild(b);
+  });
+  const nav = page.locator('#press-nav');
+  await nav.click();
+  // Fired, not awaited: the press must stay usable WHILE the write is in flight.
+  await page.evaluate(() => { void fetch('/api/press-test-bg', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: '{}', _background: true} as any); });
+  await expect.poll(() => page.evaluate(() => (window as any).__amuxState.interactions.recent(5)
+    .some((r: any) => r.request?.path === '/api/press-test-bg' && r.phase !== 'applied'))).toBe(true);
+  await expect(nav).toBeEnabled();
+  for (let i = 0; i < 3; i++) await nav.click({timeout: 1500});
+  expect(await page.evaluate(() => (window as any).__pressNav)).toBe(4);
+  await expect(nav).not.toHaveClass(/press-busy/);
+});
