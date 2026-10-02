@@ -491,6 +491,10 @@ pub fn owner_presence_term(text: &str) -> Option<&'static str> {
     OWNER_PRESENCE_TERMS.iter().copied().find(|p| t.contains(p))
 }
 
+/// Separates an ask (before) from its context (after), e.g. a card's desc.
+/// require_terms must be stated in the ask itself; overlap counts both.
+pub const CONTEXT_MARK: char = '\u{1e}';
+
 pub fn match_ask(
     approvals: &[StandingApproval],
     text: &str,
@@ -515,6 +519,12 @@ pub fn match_ask(
         };
     }
     let ask_toks = tokens(text);
+    // For learned approvals the precondition must be claimed in the ASK, not
+    // found in its context (see the require_terms check below).
+    let core_toks = match text.split_once(CONTEXT_MARK) {
+        Some((core, _)) => tokens(core),
+        None => ask_toks.clone(),
+    };
     let cats = infer_categories(text);
     let declared = declared_category
         .map(|c| c.trim().to_ascii_lowercase())
@@ -542,7 +552,15 @@ pub fn match_ask(
             // precondition is a specific claim; a prefix of it is not one.
             let req_ok = a.require_terms.iter().any(|r| {
                 let r = stem(r.trim());
-                ask_toks.contains(&r)
+                // A LEARNED approval (source "card:<id>") is the owner's answer to
+                // ONE question, so its precondition must be in the ask itself; a
+                // written rule may find it in the card's context (SA-2's "prior
+                // state preserved" lives in the escalation's desc).
+                if a.source.starts_with("card:") {
+                    core_toks.contains(&r)
+                } else {
+                    ask_toks.contains(&r)
+                }
             });
             if !req_ok {
                 near.push(format!("{}: precondition not stated", a.label()));
@@ -2135,5 +2153,39 @@ pub(crate) mod tests {
         std::env::set_var(KILL_SWITCH_KEY, "0");
         assert!(evaluate(&state, "alert", "x", MVS_ESCALATION, None, "", true).await.is_none());
         std::env::remove_var(KILL_SWITCH_KEY);
+    }
+}
+
+#[cfg(test)]
+mod context_mark_tests {
+    use super::*;
+
+    #[test]
+    fn a_precondition_found_only_in_context_does_not_satisfy_require_terms() {
+        let sa5 = StandingApproval {
+            id: 5,
+            title: "Approved AMH-18: may amux-meta-helper proceed: leaked credentials, a production key, a Studio test suite red on main".into(),
+            allowed: "May amux-meta-helper proceed with this".into(),
+            category: "decision".into(),
+            require_terms: vec!["specifically".into(), "anthropic".into(), "attention".into()],
+            scope: "global".into(),
+            limits: String::new(),
+            max_per_day: None,
+            max_amount_usd: None,
+            granted_by: "ethan".into(),
+            granted_at: 1_790_000_000,
+            source: "card:AMH-18".into(),
+            expires_at: None,
+            revoked: false,
+            revoked_at: None,
+            revoked_by: None,
+        };
+        let ask = "Atlas API key access list\nWill you sign ethan@mixpeek.com into Google so the Atlas key's IP access list can be edited (password, test, main, live, report)?\nEvery Atlas call";
+        let with_ctx = format!("{ask}{CONTEXT_MARK}Worth your attention specifically: a production Anthropic key leaked; test suite red on main.");
+        let v = match_ask(std::slice::from_ref(&sa5), &with_ctx, Some("decision"), "gs12-model", &[], 1_800_000_000, &|_| 0);
+        assert!(v.applied().is_none(), "require_terms only in the context must not apply SA-5: {v:?}");
+        let stated = format!("{ask} Worth your attention specifically.{CONTEXT_MARK}");
+        let v2 = match_ask(&[sa5], &stated, Some("decision"), "gs12-model", &[], 1_800_000_000, &|_| 0);
+        assert!(!matches!(v2, MatchVerdict::NoMatch { ref reason } if reason.contains("precondition")), "stated in the ask, the precondition holds: {v2:?}");
     }
 }

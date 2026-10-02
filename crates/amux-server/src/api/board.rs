@@ -4976,18 +4976,25 @@ const VALID_STATUSES: [&str; 11] = [
 // ---- POST /api/board -----------------------------------------------------
 
 /// Everything a needsyou ask says, for standing-approval matching: the card's
-/// title and desc (from the body, else the stored card) plus the typed-ask
-/// fields.
+/// title and the typed-ask fields, then (after [`sa::CONTEXT_MARK`]) the desc.
+///
+/// The desc is CONTEXT ONLY. It is the card's whole history, so it eventually
+/// holds any approval's precondition words: SA-5, learned from one AMH-18
+/// question and gated on "specifically, anthropic, attention", matched GM-25's
+/// Google sign-in ask through its desc and refused to park it (gs12-model,
+/// 2026-10-02). `match_ask` reads an approval's require_terms from the ask
+/// itself (before the mark) and word overlap from all of it.
 fn needsyou_ask_text(map: &serde_json::Map<String, Value>, stored: Option<[&str; 4]>) -> String {
     let pick = |k: &str, fallback: &str| body_str(map, k).unwrap_or_else(|| fallback.to_string());
     let [t, d, q, u] = stored.unwrap_or(["", "", "", ""]);
-    [
+    format!(
+        "{}\n{}\n{}\n{}{}",
         pick("title", t),
-        pick("desc", d),
         pick("ask_question", q),
         pick("ask_unblocks", u),
-    ]
-    .join("\n")
+        super::standing_approvals::CONTEXT_MARK,
+        pick("desc", d)
+    )
 }
 
 /// STANDING APPROVALS ON THE NEEDSYOU DOOR (AMUX-5270), both doors.
@@ -5009,6 +5016,7 @@ async fn standing_approval_refusal(
     ask: &str,
     ask_type: Option<&str>,
     decline: Option<String>,
+    body_fields: Vec<String>,
 ) -> Option<Response> {
     use super::standing_approvals as sa;
     if let Some(why) = decline.filter(|w| !w.trim().is_empty()) {
@@ -5037,6 +5045,10 @@ async fn standing_approval_refusal(
                 "do": v.instruction(),
                 "if_it_does_not_cover_this": "retry with standing_approval_decline: \"<why this approval does not cover the ask>\" (logged)",
             },
+            // Nothing in a refused request is written, desc_append included.
+            // gs12-model's evidence note vanished this way (2026-10-02); say it.
+            "not_applied": body_fields,
+            "note": "nothing in this request was applied; resend the other fields (e.g. desc_append) on their own",
         }),
     ))
 }
@@ -5766,6 +5778,7 @@ pub async fn create_item(
             &ask,
             body_str(&map, "ask_type").as_deref(),
             body_str(&map, "standing_approval_decline"),
+            map.keys().cloned().collect(),
         )
         .await
         {
@@ -10669,6 +10682,7 @@ pub async fn patch_item(
                     &ask,
                     declared.as_deref(),
                     body_str(&map, "standing_approval_decline"),
+                    map.keys().cloned().collect(),
                 )
                 .await
                 {
