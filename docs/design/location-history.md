@@ -41,41 +41,61 @@ classifier then improves every past day for free, and nothing has to be
 migrated when the rules change (ethos rule: the feature gets better as the
 inputs do, instead of freezing an old guess into rows).
 
+## Raw capture first (Ethan, 2026-10-01 22:35)
+
+"The point of location history is to be able to plot out everywhere I've been
+and routes and do fun analytics/statistics, so it needs to have raw granular
+data capture." So the phone keeps **every fix Core Location delivers**, the
+server stores every one of them unchanged, and all cleaning (accuracy limits,
+stale fixes, thinning for the map) happens at query time. Analytics can always
+go back to the raw rows and be recomputed with better rules.
+
 ## iPhone: how it records
 
-Apple's current guidance for continuous history with reasonable battery:
+- **Every fix is stored.** No thinning on the phone and no dropping of
+  low-accuracy or stale fixes. Each point keeps all `CLLocation` fields:
+  latitude, longitude, altitude, ellipsoidal altitude, horizontal and vertical
+  accuracy, speed and speed accuracy, course and course accuracy, floor,
+  timestamp, and `sourceInformation` (simulated by software, produced by an
+  accessory). It also records `age_s` (how old the fix was when it arrived)
+  and `source` (live updates, manager, significant change).
+- **Two modes, a switch in Settings** (default **Full detail**):
+  - **Full detail.** iOS 17+: `CLLocationUpdate.liveUpdates(.otherNavigation)`
+    held by a `CLBackgroundActivitySession` (and a `CLServiceSession` on iOS
+    18). That configuration is navigation-grade accuracy with no distance
+    filter, so a moving phone delivers about one fix a second. When you are
+    still, iOS 18 marks updates `stationary` and stops sending new fixes, which
+    costs no data because nothing moved. iOS 16: `CLLocationManager` with
+    `kCLLocationAccuracyBestForNavigation`, `distanceFilter =
+    kCLDistanceFilterNone`, background updates on.
+  - **Battery saver.** No continuous updates. Only significant-location
+    changes (roughly every 500 m or 5 minutes) and visits. Good enough for
+    "where was I", not for routes.
+  - Both modes keep visits and significant-change monitoring, the two services
+    that relaunch an app iOS has terminated.
+- **Motion, as its own raw stream.** Every `CMMotionActivity` transition is
+  stored separately (time, stationary, walking, running, cycling, automotive,
+  unknown, confidence), and each point also carries the activity current when
+  it arrived.
+- **Delivered equals stored.** The app counts fixes delivered by Core Location
+  and fixes written to the buffer; the two must be equal, and both are shown in
+  Settings and sent with the status so a gap is visible.
+- **Buffer and upload:** points go to a JSON-lines file in Application Support
+  before any upload, leave it only when the server confirmed them, and upload
+  1000 at a time (every 60 s, at 1000 waiting, on backgrounding, on visit
+  wake-ups). Ingest is idempotent by point id.
 
-- **iOS 17 and later:** `CLLocationUpdate.liveUpdates()` held open by a
-  `CLBackgroundActivitySession`, so updates keep arriving with the app in the
-  background. Live updates slow down by themselves when you are stationary
-  (`stationary`, iOS 18), which is most of the battery saving.
-- **iOS 16:** `CLLocationManager` standard updates with
-  `allowsBackgroundLocationUpdates`, `showsBackgroundLocationIndicator`,
-  `pausesLocationUpdatesAutomatically = false`, best accuracy, and
-  `activityType` following the current motion (fitness, automotive, other).
-- **Both:** `startMonitoringVisits()` and
-  `startMonitoringSignificantLocationChanges()`. These are the two services
-  that relaunch an app iOS has terminated, so tracking comes back by itself
-  after the system kills the app (not after a manual swipe-away force quit;
-  iOS does not allow that).
-- **Motion:** `CMMotionActivityManager` gives walking, running, cycling,
-  automotive or stationary with a confidence. Every point carries the raw
-  activity and confidence, so classification can be redone later.
-- **Accuracy:** full accuracy is requested. If the user has reduced
-  accuracy on, the app asks for temporary full accuracy with a purpose string.
-  Points worse than 100 m horizontal accuracy, older than 30 s or with an
-  invalid accuracy are dropped.
-- **Thinning:** a fix is kept when it moved at least 10 m and 2 s from the last
-  kept point, when 30 s have passed, or when the activity changed. Walking then
-  records a point every few metres; driving about one every two seconds.
-- **Buffer:** kept points are appended to a JSON-lines file in Application
-  Support, before any upload is attempted. Upload sends up to 500 at a time.
-  The server ingest is idempotent by point id, so a retry after a lost response
-  never duplicates. A point leaves the buffer only after the server confirmed
-  it. No network means points wait; nothing is dropped.
-- **Uploads:** every 60 s while tracking, when 200 points are pending, when the
-  app goes to the background (inside a background task), and on each
-  visit or significant-change wake-up.
+### Battery, honestly
+
+Not measured on a device yet; these are estimates from how iOS behaves.
+
+- **Full detail:** while moving, roughly what a navigation app costs: about
+  5 to 10% of battery per hour of continuous movement. While still, close to
+  nothing, because iOS stops delivering fixes. A typical day with 1 to 2 hours
+  of travel: about 10 to 20% extra.
+- **Battery saver:** about 1 to 2% a day.
+
+The Settings screen states this next to the switch.
 
 ### Permissions and controls
 
@@ -85,74 +105,107 @@ Apple's current guidance for continuous history with reasonable battery:
   - `NSMotionUsageDescription`,
   - `NSLocationTemporaryUsageDescriptionDictionary` (key `history`).
 - `UIBackgroundModes` gains `location`.
-- Flow: turning tracking on asks When In Use, then Always (iOS asks for Always
-  as a second step), then Motion.
-- Controls: the native Settings sheet has a Location history section (switch,
-  permission state, last upload, points waiting, Upload now). The dashboard tab
-  shows the same status and switch on the iPhone through a `amuxLocation` web
-  view bridge; in a desktop browser it shows the history only.
+- Flow: turning recording on asks When In Use, then Always, then Motion.
+- Controls: Settings > Location history (on/off, Full detail or Battery saver,
+  permission state, fixes delivered and stored, waiting to upload, last
+  upload, Upload now). The dashboard tab shows the same status through the
+  `amuxLocation` web view bridge on the iPhone.
 
 ## Server
 
-Migration `location_history` (append-only):
+Raw tables are **append-only and never thinned**. Migrations 0099 and 0100:
 
 ```
-location_points(id TEXT PK, device, ts REAL, lat, lon, alt, h_acc, v_acc,
-                speed, course, activity, activity_conf, source, received REAL)
-  index on ts
-location_visits(id TEXT PK, device, arrival REAL, departure REAL, lat, lon,
-                h_acc, received REAL)
-  index on arrival
+location_points(id PK, device, ts, lat, lon, alt, ell_alt, h_acc, v_acc,
+                speed, speed_acc, course, course_acc, floor, simulated,
+                accessory, age_s, activity, activity_conf, source, received)
+  indexes: (ts), (device, ts)
+location_motion(id PK, device, ts, stationary, walking, running, cycling,
+                automotive, unknown, confidence, received)
+  indexes: (ts), (device, ts)
+location_visits(id PK, device, arrival, departure, lat, lon, h_acc, received)
+  index: (arrival)
 ```
 
 All timestamps are epoch seconds (declared in `TIMESTAMP_COLUMNS`).
 
+### Size
+
+A raw row is about 250 bytes including both indexes. At one fix a second:
+
+| Activity | Fixes per hour | Storage per hour |
+|---|---|---|
+| Driving | 3,600 | about 0.9 MB |
+| Walking | 3,600 | about 0.9 MB |
+| Still | near 0 | near 0 |
+
+A day with 3 hours of movement is about 11,000 fixes, roughly 2.7 MB; a year
+of that is about 1 GB. A one-day query reads about 11,000 rows through the
+`(ts)` index, which SQLite does in tens of milliseconds.
+
+### Cleaned view (query time only)
+
+The map, timeline and stats read a cleaned view of the raw rows: fixes with
+invalid or worse-than-100 m accuracy, fixes older than 30 s on arrival, and
+simulated fixes are left out (unless `include_simulated=1`). Raw export
+ignores the cleaning.
+
+### Routes
+
 | Route | What it does |
 |---|---|
-| `POST /api/map/location/points` | Batch ingest `{device, points:[...]}`. Idempotent by id. Answers accepted, duplicate and rejected counts, with a reason for each rejection. |
-| `POST /api/map/location/visits` | Batch ingest of iOS visits, idempotent by id. |
-| `GET /api/map/location/timeline?from=&to=` | Points (downsampled for the map) plus the computed segments, with `measured` and `n_considered`. |
-| `GET /api/map/location/segments/{id}?from=&to=` | One stop or trip by its stable id: the read API other features use. |
-| `GET /api/map/location/summary` | Totals, first and last point, devices, last ingest. |
-| `DELETE /api/map/location/points?from=&to=&confirm=delete` | Delete a time range. |
+| `POST /api/map/location/points` | Raw batch ingest, idempotent by id. Rejects only what cannot be a fix at all (missing id, impossible coordinates or time). |
+| `POST /api/map/location/motion` | Raw Core Motion transitions, idempotent by id. |
+| `POST /api/map/location/visits` | iOS visits. |
+| `GET /api/map/location/timeline?from=&to=` | Stops and trips over the cleaned view, with `measured`, `n_considered` and `n_raw`. |
+| `GET /api/map/location/segments/{id}` | One stop or trip by stable id. |
+| `GET /api/map/location/stats?from=&to=&bucket=day\|week\|month` | Analytics (below). |
+| `GET /api/map/location/heatmap?from=&to=` | Everywhere ever been, as counted grid cells. |
+| `GET /api/map/location/export?from=&to=&format=geojson\|gpx\|csv` | The raw points, every field. |
+| `GET /api/map/location/summary` | Totals, first and last point, devices. |
+| `GET /api/map/location/points?from=&to=` | Raw points as JSON. |
+| `DELETE /api/map/location/points/range?from=&to=&confirm=delete` | Delete a range. |
 
-Authentication:
-- **Owner only for writes.** Ingest and delete need the owner bearer, like
-  every other phone request. When the server has an owner token configured, the
-  loopback shortcut does not count for these writes, so a worker on the same
-  machine cannot invent history.
-- **Reads:** they follow normal dashboard auth, so the owner's own agents can
-  look up where Ethan was, which is the point of associating things with
-  places. A Chat delegate job is already limited to GETs.
+Authentication: writes need the owner bearer (the loopback shortcut does not
+count); reads follow dashboard auth.
 
 ### Segmenting
 
-- **Stops:** points that stay within 100 m of their running centroid for 5
-  minutes or more make a stop. iOS visits are merged in as stops too.
-- **Trips:** everything between two stops is a trip.
-- **Trip mode:** the activity that covers the most time on the trip, with
-  `unknown` fixes filled in from speed (under 2.5 m/s walking, under 7 m/s
-  cycling, otherwise driving).
-- **Train is inferred and says so.** A driving trip whose path is nearly
-  straight (90% or more), whose average speed is between 8 and 45 m/s, and which
-  stops for 20 to 180 s along the way is labelled `train` with
-  `mode_confidence: "inferred"`. The phone cannot tell a train from a car;
-  this is a guess and the label says so.
-- **Stable ids:** `stop_<first point id>` and `trip_<first point id>`. They stay
-  the same as more points arrive, except for a segment still in progress.
+- **Stops:** fixes within 100 m of an anchor for 5 minutes or more, trimmed of
+  moving fixes at either end, merged with iOS visits.
+- **Trips:** runs of fixes between stops.
+- **Mode:** time-weighted motion activity, with speed as fallback. **Train is
+  inferred and says so** (straight, 8 to 45 m/s, station-like dwells).
+- **Stable ids:** `stop_<first point id>`, `trip_<first point id>`.
+
+### Analytics (first set)
+
+All over the cleaned view, every answer with `measured` and `n_considered`:
+
+- distance and moving time per mode per day, week or month;
+- top places by time spent (stops grouped into about 150 m places);
+- new places: places first visited inside the range;
+- longest trip;
+- average speed per mode;
+- heatmap of everywhere ever been (grid cells about 50 m wide, with counts).
+
+The place grouping is deliberately simple (a fixed grid) and lives in one
+function, so a better clustering can replace it without touching storage.
 
 ## Dashboard: Map > Location history
 
-- A day picker (with previous and next day), and a range picker.
-- A polyline coloured by mode, with start and end markers.
-- A timeline of stops and trips (times, duration, distance, mode). Tapping a
-  row zooms the map to it.
-- On the iPhone app, a tracking switch and status from the native bridge.
+- **Day:** day picker, a line per trip coloured by mode, stops, start and end
+  markers, a timeline of stops and trips; tapping a row zooms to it.
+- **Stats:** period (week, month, year, all time), distance and time per mode,
+  top places, new places, longest trip, average speeds.
+- **Heatmap:** a layer of everywhere ever been.
+- **Export:** raw GeoJSON, GPX or CSV for the day or range.
+- On the iPhone app: recording switch, Full detail or Battery saver, and the
+  delivered/stored counts.
 - Mobile first: 44 px targets, works at 375 px, both themes.
 - **One leak to know about:** the Map's base tiles come from OpenStreetMap, as
-  they already do for pins. Viewing a day therefore tells the tile server
-  which map squares you looked at, though not your points or times. A
-  self-hosted tile server would close that if it ever matters.
+  they already do for pins. Viewing a day tells the tile server which map
+  squares you looked at, not your points or times.
 
 ## Ethan: App Store
 
