@@ -6926,6 +6926,10 @@ _land_pick_tree() {
           if [ "$rc" = 0 ]; then
             printf '%s %s %s\n' "$(date -u +%FT%TZ)" "${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" \
               "regenerable conflict in $(git rev-parse --short "$c") resolved to the onto side for: $(printf '%s ' $paths)(the push hook must re-render them)" >> "$HOME/.amux/logs/land.log"
+            # Tell the holder this attempt kept main's copy of generated
+            # files, so _land_regenerate re-renders them before the push.
+            # $$ is the land process's pid inside this command substitution.
+            : > "${TMPDIR:-/tmp}/amux-land-regen.$$"
           fi
         fi
       fi
@@ -6933,6 +6937,82 @@ _land_pick_tree() {
   fi
   [ "$rc" = 0 ] || return 1
   printf '%s\n' "${out%%$'\n'*}"
+}
+
+# _land_regenerate <tip>: re-render repo-declared regenerable paths on <tip>
+# and print the commit to push (a new one on top of <tip>, or <tip> itself).
+# rc 1 when the command fails: a push would carry a stale render.
+#
+# gs12-data, 2026-10-02: a regenerable replay keeps main's copy of generated
+# files, but the lane's range changed one of their INPUTS (poetry.lock feeds
+# zero-base's digest), so the push carried a stale render and the hook refused
+# it, four times in one day. The repository declares the command and the input
+# paths it reads:
+#   git config amux.landRegenerate '"$AMUX_LAND_REPO"/server/.venv/bin/python research/cicd/zero-base/zb/generate.py'
+#   git config --add amux.landRegenerateInput research/cicd/zero-base
+#   git config --add amux.landRegenerateInput server/poetry.lock
+# The command runs in a scratch extract of <tip> holding only the inputs (the
+# whole Mixpeek tree is 4.2 GB; zero-base's inputs are 33 MB), with
+# AMUX_LAND_REPO set to this checkout for its venv, under
+# AMUX_LAND_REGENERATE_TIMEOUT_S (default 300). Files it leaves that match an
+# amux.landRegenerable glob replace <tip>'s copies; matching files it removed
+# are deleted.
+_land_regenerate() {
+  local tip="$1" cmd inputs globs tmp idx rc=0 out t0 tree new n=0 p g hit
+  local budget="${AMUX_LAND_REGENERATE_TIMEOUT_S:-300}"
+  cmd="$(git config --get amux.landRegenerate 2>/dev/null || true)"
+  [ -n "$cmd" ] || { printf '%s\n' "$tip"; return 0; }
+  globs="$(git config --get-all amux.landRegenerable 2>/dev/null || true)"
+  inputs="$(git config --get-all amux.landRegenerateInput 2>/dev/null || true)"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/amux-land-regen.XXXXXX")"
+  # shellcheck disable=SC2086  # one pathspec per line on purpose
+  if ! git archive "$tip" ${inputs:+-- $inputs} | tar -x -C "$tmp" 2>/dev/null; then
+    rm -rf -- "${tmp:?}"
+    _land_log "regenerate: could not extract $(git rev-parse --short "$tip") (inputs: ${inputs:-whole tree}); nothing pushed"
+    return 1
+  fi
+  _matches() {
+    local q="$1" gg
+    # shellcheck disable=SC2053  # $gg is a glob on purpose
+    while read -r gg; do [ -n "$gg" ] && [[ "$q" == $gg ]] && return 0; done <<< "$globs"
+    return 1
+  }
+  local before after
+  before="$(cd "$tmp" && find . -type f | sed 's|^\./||' | while read -r p; do _matches "$p" && printf '%s\n' "$p"; done | sort)"
+  t0=$(date +%s)
+  local top; top="$(git rev-parse --show-toplevel)"
+  out="$(cd "$tmp" && AMUX_LAND_REPO="$top" perl -e "$_LAND_PC_TIMEOUT_PL" "$budget" bash -c "$cmd" 2>&1)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    local log; log="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}-$$-regenerate.log"
+    mkdir -p "${log%/*}"; printf '%s\n' "$out" > "$log"
+    rm -rf -- "${tmp:?}"
+    _land_log "regenerate failed (rc $rc after $(( $(date +%s) - t0 ))s: $cmd); nothing pushed, a stale render would be refused. Output: $log"
+    return 1
+  fi
+  after="$(cd "$tmp" && find . -type f | sed 's|^\./||' | while read -r p; do _matches "$p" && printf '%s\n' "$p"; done | sort)"
+  idx="$(mktemp "${TMPDIR:-/tmp}/amux-land-regen-idx.XXXXXX")"
+  GIT_INDEX_FILE="$idx" git read-tree "$tip"
+  while read -r p; do
+    [ -n "$p" ] || continue
+    local blob; blob="$(git hash-object -w "$tmp/$p")"
+    GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "$( [ -x "$tmp/$p" ] && echo 100755 || echo 100644 ),$blob,$p"
+  done <<< "$after"
+  while read -r p; do
+    [ -n "$p" ] || continue
+    printf '%s\n' "$after" | grep -qxF -- "$p" || GIT_INDEX_FILE="$idx" git update-index --force-remove -- "$p"
+  done <<< "$before"
+  tree="$(GIT_INDEX_FILE="$idx" git write-tree)"
+  rm -f -- "${idx:?}"; rm -rf -- "${tmp:?}"
+  if [ "$tree" = "$(git rev-parse "$tip^{tree}")" ]; then
+    _land_log "regenerate ran in $(( $(date +%s) - t0 ))s and changed nothing on $(git rev-parse --short "$tip")"
+    printf '%s\n' "$tip"; return 0
+  fi
+  n="$(git diff --name-only "$tip" "$tree" | wc -l | tr -d ' ')"
+  new="$(git commit-tree "$tree" -p "$tip" -m "amux land: regenerate $n derived file(s) after a regenerable replay
+
+Command: $cmd")" || return 1
+  _land_log "regenerate ran in $(( $(date +%s) - t0 ))s and re-rendered $n file(s) as $(git rev-parse --short "$new") on top of $(git rev-parse --short "$tip")"
+  printf '%s\n' "$new"
 }
 
 # MO-4102: is this --priority push entitled to jump the queue? Prints the
@@ -7266,7 +7346,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.23"
+LAND_BEHAVIOR_VERSION="2026-10-02.24"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7972,6 +8052,7 @@ $f"
       exec bash "$0" land ${orig_args[@]+"${orig_args[@]}"}
     fi
     date +%s > "$lock/since"
+    rm -f "${TMPDIR:-/tmp}/amux-land-regen.$$"
     git fetch -q "$remote" "$branch" || { _land_log "fetch failed (attempt $i)"; sleep 5; continue; }
     # A dirty tree cannot be rebased, and a lane often keeps working while its
     # land waits hours (gs12-templates, 2026-10-01). Land HEAD by replay then,
@@ -8032,6 +8113,14 @@ $f"
     [ "$solo" = 1 ] || _land_stack "$stack_tip"
     lanes="$(printf '%s' "$stack_in" | awk 'NF {printf "%s%s", sep, $2; sep=", "}')"
     [ -z "$lanes" ] || _land_log "batching ${lanes} behind this push (one gate run)"
+    # A regenerable replay kept main's generated files; re-render them from
+    # the pushed tree when the repository declares how (amux.landRegenerate).
+    if [ -f "${TMPDIR:-/tmp}/amux-land-regen.$$" ]; then
+      rm -f "${TMPDIR:-/tmp}/amux-land-regen.$$"
+      local _rg
+      _rg="$(_land_regenerate "$stack_tip")" || return 2
+      stack_tip="$_rg"
+    fi
     # A batch can fail only once COMPOSED (the ops registry goes stale from two
     # lanes' changes that each pass alone; six batches refused that way on
     # 2026-10-01/02 after a full gate each). Run the repository's precheck on

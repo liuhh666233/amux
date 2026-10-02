@@ -508,6 +508,11 @@ jobs:
         run: |
           set -uo pipefail
           bash scripts/test-cli-verbs-present.sh
+      - name: a regenerable replay re-renders derived files before the push
+        run: |
+          set -uo pipefail
+          git config --global user.email ci@amux.test; git config --global user.name ci
+          bash scripts/test-land-regenerate.sh && NO_REGEN=1 bash scripts/test-land-regenerate.sh
       - name: a lane resumes its own conversation, never whichever peer ran here last
         run: |
           set -uo pipefail
