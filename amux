@@ -6832,7 +6832,49 @@ _land_pick_tree() {
   else
     syn="$onto"
   fi
-  out="$(git merge-tree --write-tree "$syn" "$c" 2>/dev/null)" || rc=$?
+  out="$(git merge-tree --write-tree --name-only "$syn" "$c" 2>/dev/null)" || rc=$?
+  if [ "$rc" = 1 ] && [ -n "$parent" ]; then
+    # REGENERABLE PATHS (gs12-data, 2026-10-02: three stops on zero-base's
+    # generated files whose only difference was the "# source-digest:" line).
+    # When every conflicted path matches a repo-declared glob
+    # (`git config --add amux.landRegenerable <glob>`), drop the commit's own
+    # change to those paths, keep the onto side, and replay the rest; the
+    # repository's push hook re-renders them from the pushed tree.
+    local globs paths p g ok=1 idx tree2 c2
+    globs="$(git config --get-all amux.landRegenerable 2>/dev/null || true)"
+    paths="$(printf '%s\n' "$out" | sed -n '2,/^$/p' | sed '/^$/d')"
+    if [ -n "$globs" ] && [ -n "$paths" ]; then
+      while read -r p; do
+        local hit=0
+        # shellcheck disable=SC2053  # $g is a glob on purpose
+        while read -r g; do [ -n "$g" ] && [[ "$p" == $g ]] && { hit=1; break; }; done <<< "$globs"
+        [ "$hit" = 1 ] || { ok=0; break; }
+      done <<< "$paths"
+      if [ "$ok" = 1 ]; then
+        idx="$(mktemp "${TMPDIR:-/tmp}/amux-land-idx.XXXXXX")"
+        if GIT_INDEX_FILE="$idx" git read-tree "$c" 2>/dev/null; then
+          while read -r p; do
+            if git cat-file -e "$parent:$p" 2>/dev/null; then
+              GIT_INDEX_FILE="$idx" git update-index --cacheinfo "$(git ls-tree "$parent" -- "$p" | awk '{print $1","$3}'),$p" 2>/dev/null || ok=0
+            else
+              GIT_INDEX_FILE="$idx" git update-index --force-remove -- "$p" 2>/dev/null || ok=0
+            fi
+          done <<< "$paths"
+          tree2="$(GIT_INDEX_FILE="$idx" git write-tree 2>/dev/null || true)"
+        else
+          ok=0
+        fi
+        rm -f -- "${idx:?}"
+        if [ "$ok" = 1 ] && [ -n "$tree2" ] && c2="$(git commit-tree "$tree2" -p "$parent" -m "amux land: $c without regenerable paths" 2>/dev/null)"; then
+          rc=0; out="$(git merge-tree --write-tree --name-only "$syn" "$c2" 2>/dev/null)" || rc=$?
+          if [ "$rc" = 0 ]; then
+            printf '%s %s %s\n' "$(date -u +%FT%TZ)" "${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" \
+              "regenerable conflict in $(git rev-parse --short "$c") resolved to the onto side for: $(printf '%s ' $paths)(the push hook must re-render them)" >> "$HOME/.amux/logs/land.log"
+          fi
+        fi
+      fi
+    fi
+  fi
   [ "$rc" = 0 ] || return 1
   printf '%s\n' "${out%%$'\n'*}"
 }
@@ -7146,7 +7188,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.20"
+LAND_BEHAVIOR_VERSION="2026-10-02.21"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7361,7 +7403,18 @@ p.communicate(msg.encode())
     local mine; mine="${land_sha:-$(git rev-parse HEAD)}"
     git fetch -q "$remote" "$branch" 2>/dev/null || return 0
     local out; out="$(git merge-tree --write-tree --name-only "$remote/$branch" "$mine" 2>/dev/null)" && return 0
-    printf '%s\n' "$out" | sed -n '2,/^$/p' | sed '/^$/d' | head -10 | tr '\n' ' '
+    # Paths the repo declares regenerable (amux.landRegenerable) are not
+    # conflicts: the replay keeps the onto side and the push hook re-renders
+    # them (gs12-data, 2026-10-02: three "nothing queued" stops on zero-base
+    # generated files differing only in their source-digest line).
+    local globs p g hit
+    globs="$(git config --get-all amux.landRegenerable 2>/dev/null || true)"
+    printf '%s\n' "$out" | sed -n '2,/^$/p' | sed '/^$/d' | while read -r p; do
+      hit=0
+      # shellcheck disable=SC2053  # $g is a glob on purpose
+      [ -n "$globs" ] && while read -r g; do [ -n "$g" ] && [[ "$p" == $g ]] && { hit=1; break; }; done <<< "$globs"
+      [ "$hit" = 1 ] || printf '%s\n' "$p"
+    done | head -10 | tr '\n' ' '
   }
   local _cf
   _cf="$(_land_conflicts)"
@@ -7786,7 +7839,7 @@ $f"
     done <<< "$stack_in"
   }
 
-  local i out rc full verdicts lanes solo=0 batch_skip=" " stack_map="" named
+  local i out rc full verdicts lanes solo=0 _force_replay=0 batch_skip=" " stack_map="" named
   # A --priority holder lands alone again (mixpeek-override, 2026-10-02: the
   # granted one-line Fast Checks fix batched six lanes, 23 min into the gate,
   # and any one of them could refuse it). AMUX_LAND_PRIORITY_BATCH=1 restores
@@ -7811,7 +7864,9 @@ $f"
     # never touching the tree; a clean tree still rebases so HEAD is the
     # pushed commit and the hook takes its fast path.
     local _replay_head=""
-    if [ -z "$land_sha" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    if [ -z "$land_sha" ] && [ "${_force_replay:-0}" = 1 ]; then
+      _replay_head="$(git rev-parse HEAD)"
+    elif [ -z "$land_sha" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
       _replay_head="$(git rev-parse HEAD)"
       _land_log "checkout has uncommitted changes; landing HEAD $(git rev-parse --short HEAD) by replay without touching the tree"
     fi
@@ -7841,6 +7896,13 @@ $f"
     else
       if ! git rebase -q "$remote/$branch"; then
         git rebase --abort 2>/dev/null
+        # With regenerable paths declared, a rebase conflict may be one the
+        # replay can resolve; retry this attempt by replay before giving up.
+        if [ "${_force_replay:-0}" != 1 ] && [ -n "$(git config --get-all amux.landRegenerable 2>/dev/null || true)" ]; then
+          _force_replay=1
+          _land_log "rebase onto $remote/$branch conflicted; retrying by replay (regenerable paths are declared)"
+          continue
+        fi
         _land_log "rebase onto $remote/$branch conflicted; nothing pushed"
         return 2
       fi
