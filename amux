@@ -6988,7 +6988,11 @@ _land_regenerate() {
   local before after
   before="$(cd "$tmp" && find . -type f | sed 's|^\./||' | while read -r p; do _matches "$p" && printf '%s\n' "$p"; done | sort)"
   t0=$(date +%s)
-  local top; top="$(git rev-parse --show-toplevel)"
+  # The PRIMARY checkout, not this worktree: a lane landing from
+  # .worktrees/<lane> has no server/.venv, so "$AMUX_LAND_REPO"/server/.venv
+  # failed with rc 127 for gs12-compute at 23:26Z on 2026-10-02. The common
+  # git dir's parent is the primary checkout for a plain clone and a worktree.
+  local top; top="$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd)" || top="$(git rev-parse --show-toplevel)"
   local one
   out=""
   while IFS= read -r one; do
@@ -7472,7 +7476,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.31"
+LAND_BEHAVIOR_VERSION="2026-10-02.32"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status

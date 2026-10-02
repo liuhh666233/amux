@@ -22,14 +22,27 @@ git config user.email t@t; git config user.name t
 echo b > in.txt; git commit -qm "lane: change in.txt, no render" -- in.txt
 L="$(git rev-parse HEAD)"
 git config --add amux.landRegenerable 'gen/*'
-git config --add amux.landRegenerate 'sh gen1.sh'
+if [ "$WHEN" = worktree ]; then
+  # The generator's tool exists only in the PRIMARY checkout, untracked (like
+  # server/.venv), and the land runs from a worktree: gs12-compute's lands
+  # failed rc 127 at 23:26Z on 2026-10-02 when AMUX_LAND_REPO was the worktree.
+  mkdir -p tools; cp gen1.sh tools/gen1-untracked.sh
+  git config --add amux.landRegenerate 'sh "$AMUX_LAND_REPO"/tools/gen1-untracked.sh'
+else
+  git config --add amux.landRegenerate 'sh gen1.sh'
+fi
 git config --add amux.landRegenerate 'sh gen2.sh'
 # when=failing: a generator that fails must not stop the land (land .27 stopped
 # every Mixpeek holder at 20:16Z on 2026-10-02); the stack is pushed unrendered.
 [ "$WHEN" = failing ] && git config --add amux.landRegenerate 'cat missing/components.overlay.yaml'
-case "$WHEN" in always|failing) ;; *) git config amux.landRegenerateWhen "$WHEN" ;; esac
+case "$WHEN" in always|failing|worktree) ;; *) git config amux.landRegenerateWhen "$WHEN" ;; esac
 for p in gen1.sh gen2.sh in.txt gen; do git config --add amux.landRegenerateInput "$p"; done
-AMUX_LAND_NOTIFY=0 AMUX_WORKER=lrg2 bash "$AM" land --sha "$L" >/dev/null 2>&1 || echo "land rc=$?"
+if [ "$WHEN" = worktree ]; then
+  git worktree add -q --detach "$T/wt" "$L" 2>/dev/null
+  (cd "$T/wt" && AMUX_LAND_NOTIFY=0 AMUX_WORKER=lrg2 bash "$AM" land --sha "$L" >/dev/null 2>&1) || echo "land rc=$?"
+else
+  AMUX_LAND_NOTIFY=0 AMUX_WORKER=lrg2 bash "$AM" land --sha "$L" >/dev/null 2>&1 || echo "land rc=$?"
+fi
 git fetch -q origin main
 landed=no; [ "$(git show origin/main:in.txt)" = b ] && landed=yes
 stamped="$(git log -1 --format=%B origin/main | sed -n 's/^Amux-Session: //p')"
@@ -40,7 +53,7 @@ if [ "$WHEN" = failing ]; then
   [ "$landed" = yes ] && { echo "ok   failing generator: the lane's commit still landed (pushed unrendered)"; exit 0; }
   echo "FAIL failing generator stopped the land"; exit 1
 fi
-if [ "$WHEN" = always ]; then
+if [ "$WHEN" = always ] || [ "$WHEN" = worktree ]; then
   [ "$stamped" = lrg2 ] || { echo "FAIL the regenerate commit carries no Amux-Session trailer (got '$stamped'); Mixpeek's session-stamp leg refuses it"; exit 1; }
   [ "$one" = "$w1" ] && [ "$two" = "$w2" ] && { echo "ok   always: both chained generators re-rendered on a stack with no conflict"; exit 0; }
   echo "FAIL always: out='$one' (want '$w1') two='$two' (want '$w2')"; exit 1
