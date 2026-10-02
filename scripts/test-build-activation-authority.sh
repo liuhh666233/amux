@@ -66,6 +66,9 @@ git clone -q "$AUTH" "$FOREIGN"
 STALE=$(git -C "$FOREIGN" rev-parse HEAD)
 printf '{"commit":"%s"}\n' "$STALE" > "$HEALTH"
 
+# The adoption cooldown (default 120s) would turn every build after the first
+# into a COOLDOWN skip, since these cases run seconds apart. It is off here so
+# each case reaches the path it names.
 run_builder() {
   HOME="$FAKE_HOME" \
   AMUX_REPO="$1" \
@@ -77,6 +80,7 @@ run_builder() {
   AMUX_RS_HEALTH_URL="file://$HEALTH" \
   AMUX_BUILD_MIN_FREE_GB=0 \
   AMUX_BUILD_DEBUG_CLEAR_ABOVE_GB=999999 \
+  AMUX_RS_BUILD_COOLDOWN=0 \
     bash "$BUILDER" >/dev/null
 }
 
