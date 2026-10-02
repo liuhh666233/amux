@@ -13657,7 +13657,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1213';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1214';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -30321,7 +30321,14 @@ function _mapLoad() {
     });
     if (needsSave) _mapSave();
     _mapTags = data.tags || [];
+    // Whether the sidebar is open is this device's state, not the document's:
+    // a phone starts with the map showing (see _mapInit). Taking the saved
+    // value here without applying it left the setting saying "open" over a
+    // closed sidebar, so the first tap on the open button did nothing.
+    const sidebarHere = _mapSettings.sidebarOpen;
     _mapSettings = Object.assign(_mapSettings, data.settings || {});
+    if (window.innerWidth <= 600 && _mapMobileSidebarInited) _mapSettings.sidebarOpen = sidebarHere;
+    _mapApplySidebarState();
     _mapGoogleKey = (data.settings || {}).googleMapsKey || '';
     _mapServerLoaded = true; // safe to persist now that client mirrors server
     // Cache for offline
@@ -30404,6 +30411,9 @@ function _mapInit() {
   _mapRenderTags();
   _mapRenderPins();
   _mapRenderMarkers();
+  // Location history (AMUX-5458): the tab may have been left open; draw it now
+  // that the map exists.
+  if (typeof _mapTab !== 'undefined' && _mapTab === 'history') _mapSidebarTab('history');
 }
 
 function _mapTagColor(tagId) {
@@ -30944,6 +30954,212 @@ function _mapToggleSidebar() {
   _mapApplySidebarState();
   if (_map) setTimeout(function() { _map.invalidateSize(); }, 310);
 }
+
+// ── Map details: Location history (AMUX-5458, docs/design/location-history.md) ──
+// Where the owner has been, recorded by the amux iPhone app and stored on this
+// server (/api/map/location). Stops and trips are computed by the server; this
+// tab draws one day (or a range) and lists it as a timeline. Inside the iPhone
+// app a native bridge (`amuxLocation`) adds the tracking switch and status.
+let _mapTab = localStorage.getItem('amux_map_tab') === 'history' ? 'history' : 'pins';
+let _locDayStart = null;          // Date at local midnight of the shown day
+let _locRange = null;             // {from, to} epoch seconds when a range is shown
+let _locSegments = [];
+let _locLayer = null;
+let _locHighlight = null;
+let _locLoading = 0;
+const _LOC_MODE = {
+  walking: {label: 'Walking', color: '#3fb950', icon: '\u{1F6B6}'},
+  running: {label: 'Running', color: '#f0883e', icon: '\u{1F3C3}'},
+  cycling: {label: 'Cycling', color: '#58a6ff', icon: '\u{1F6B2}'},
+  driving: {label: 'Driving', color: '#d2a8ff', icon: '\u{1F697}'},
+  train:   {label: 'Train', color: '#f778ba', icon: '\u{1F686}'},
+  unknown: {label: 'Moving', color: '#8b949e', icon: '•'},
+  stop:    {label: 'Stop', color: '#e3b341', icon: '\u{1F4CD}'},
+};
+function _mapSidebarTab(tab) {
+  _mapTab = tab === 'history' ? 'history' : 'pins';
+  try { localStorage.setItem('amux_map_tab', _mapTab); } catch (e) {}
+  const pins = document.getElementById('map-pins-pane');
+  const hist = document.getElementById('map-history-pane');
+  if (!pins || !hist) return;
+  pins.hidden = _mapTab !== 'pins';
+  hist.hidden = _mapTab !== 'history';
+  for (const [id, on] of [['map-tab-pins', _mapTab === 'pins'], ['map-tab-history', _mapTab === 'history']]) {
+    const b = document.getElementById(id);
+    if (b) { b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); }
+  }
+  if (_mapTab === 'history') {
+    _locNative('status');
+    if (!_locDayStart) _locSetDay('');
+    else _locLoad();
+  } else if (_locLayer && _map) {
+    _map.removeLayer(_locLayer); _locLayer = null;
+  }
+}
+function _locDateValue(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function _locSetDay(value) {
+  let d;
+  if (value) { const [y, m, dd] = value.split('-').map(Number); d = new Date(y, m - 1, dd); }
+  else { d = new Date(); d.setHours(0, 0, 0, 0); }
+  _locDayStart = d; _locRange = null;
+  const input = document.getElementById('map-loc-date');
+  if (input) input.value = _locDateValue(d);
+  _locLoad();
+}
+function _locShift(days) {
+  const d = new Date(_locDayStart || new Date());
+  d.setDate(d.getDate() + days); d.setHours(0, 0, 0, 0);
+  _locSetDay(_locDateValue(d));
+}
+function _locApplyRange() {
+  const f = document.getElementById('map-loc-from')?.value, t = document.getElementById('map-loc-to')?.value;
+  if (!f || !t) { showToast('Pick both dates for the range'); return; }
+  const [fy, fm, fd] = f.split('-').map(Number), [ty, tm, td] = t.split('-').map(Number);
+  const from = new Date(fy, fm - 1, fd).getTime() / 1000, to = new Date(ty, tm - 1, td + 1).getTime() / 1000;
+  if (!(to > from)) { showToast('The range must end after it starts'); return; }
+  _locRange = {from, to};
+  _locLoad();
+}
+function _locWindow() {
+  if (_locRange) return _locRange;
+  const start = _locDayStart || new Date(new Date().setHours(0, 0, 0, 0));
+  const end = new Date(start); end.setDate(end.getDate() + 1);
+  return {from: start.getTime() / 1000, to: end.getTime() / 1000};
+}
+function _locFmtDur(s) {
+  s = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return h ? h + ' h ' + m + ' min' : m + ' min';
+}
+function _locFmtDist(m) {
+  if (!m) return '';
+  return m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1) + ' km' : Math.round(m) + ' m';
+}
+function _locFmtTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+}
+async function _locLoad() {
+  const list = document.getElementById('map-loc-list');
+  const summary = document.getElementById('map-loc-summary');
+  if (!list) return;
+  const {from, to} = _locWindow();
+  const ticket = ++_locLoading;
+  if (summary) summary.textContent = 'Loading…';
+  try {
+    const r = await fetch(API + '/api/map/location/timeline?from=' + from + '&to=' + to);
+    const d = await r.json().catch(() => ({}));
+    if (ticket !== _locLoading) return;   // a newer day was asked for
+    if (!r.ok || d.measured !== true) throw new Error(d.why_unmeasured || d.error || ('HTTP ' + r.status));
+    _locSegments = Array.isArray(d.segments) ? d.segments : [];
+    _locRender(d);
+    _locDraw(true);
+  } catch (e) {
+    if (ticket !== _locLoading) return;
+    _locSegments = [];
+    if (summary) summary.textContent = 'Could not load location history: ' + (e.message || e);
+    list.innerHTML = '';
+    _locDraw(false);
+  }
+}
+function _locRender(d) {
+  const list = document.getElementById('map-loc-list');
+  const summary = document.getElementById('map-loc-summary');
+  const trips = _locSegments.filter(s => s.kind === 'trip');
+  const dist = trips.reduce((a, s) => a + (s.distance_m || 0), 0);
+  const moving = trips.reduce((a, s) => a + (s.duration_s || 0), 0);
+  if (summary) summary.textContent = d.n_considered
+    ? d.n_considered + ' points · ' + trips.length + ' trip' + (trips.length === 1 ? '' : 's') + ' · ' + _locFmtDist(dist) + ' · ' + _locFmtDur(moving) + ' moving'
+    : 'No points recorded' + (_locRange ? ' in this range.' : ' this day.');
+  if (!_locSegments.length) {
+    list.innerHTML = '<div class="map-loc-empty">Nothing recorded here yet. Location history comes from the amux iPhone app: open Settings in the app, turn on <b>Location history</b>, and allow location <b>Always</b> and Motion.</div>';
+    return;
+  }
+  list.innerHTML = _locSegments.map((s, i) => {
+    const m = _LOC_MODE[s.kind === 'stop' ? 'stop' : (s.mode || 'unknown')] || _LOC_MODE.unknown;
+    const title = s.kind === 'stop' ? 'Stop' : m.label + (s.mode_confidence === 'inferred' ? ' (inferred)' : '');
+    const meta = _locFmtTime(s.start) + '–' + _locFmtTime(s.end) + ' · ' + _locFmtDur(s.duration_s)
+      + (s.kind === 'trip' && s.distance_m ? ' · ' + _locFmtDist(s.distance_m) : '');
+    return '<button type="button" class="map-loc-row" data-loc-i="' + i + '" onclick="_locFocus(' + i + ')">'
+      + '<span class="map-loc-dot" style="background:' + m.color + '"></span>'
+      + '<span class="map-loc-row-main"><span class="map-loc-row-title">' + m.icon + ' ' + esc(title) + '</span>'
+      + '<span class="map-loc-row-meta">' + esc(meta) + '</span></span></button>';
+  }).join('');
+}
+function _locDraw(fit) {
+  // Never builds the map: _mapInit draws the history itself once the Map view
+  // opens (Leaflet in a hidden container measures 0x0).
+  if (typeof L === 'undefined' || !_map) return;
+  if (_locLayer) { _map.removeLayer(_locLayer); _locLayer = null; }
+  if (_mapTab !== 'history' || !_locSegments.length) return;
+  _locLayer = L.featureGroup().addTo(_map);
+  _locSegments.forEach((s, i) => {
+    if (s.kind === 'trip' && Array.isArray(s.path) && s.path.length > 1) {
+      const m = _LOC_MODE[s.mode] || _LOC_MODE.unknown;
+      L.polyline(s.path, {color: m.color, weight: 5, opacity: 0.85}).on('click', () => _locFocus(i)).addTo(_locLayer);
+    } else if (s.kind === 'stop') {
+      L.circleMarker([s.lat, s.lon], {radius: 7, color: _LOC_MODE.stop.color, fillOpacity: 0.7, weight: 2})
+        .bindTooltip('Stop · ' + _locFmtTime(s.start) + '–' + _locFmtTime(s.end)).on('click', () => _locFocus(i)).addTo(_locLayer);
+    }
+  });
+  const first = _locSegments[0], last = _locSegments[_locSegments.length - 1];
+  const at = (s, end) => s.kind === 'stop' ? [s.lat, s.lon] : (end ? s.to : s.from);
+  if (at(first, false)) L.circleMarker(at(first, false), {radius: 6, color: '#ffffff', fillColor: '#3fb950', fillOpacity: 1, weight: 2}).bindTooltip('Start').addTo(_locLayer);
+  if (at(last, true)) L.circleMarker(at(last, true), {radius: 6, color: '#ffffff', fillColor: '#f85149', fillOpacity: 1, weight: 2}).bindTooltip('End').addTo(_locLayer);
+  if (fit) { try { _map.fitBounds(_locLayer.getBounds(), {padding: [24, 24], maxZoom: 16}); } catch (e) {} }
+}
+function _locFocus(i) {
+  const s = _locSegments[i];
+  if (!s || !_map) return;
+  document.querySelectorAll('.map-loc-row').forEach(r => r.classList.toggle('active', Number(r.dataset.locI) === i));
+  if (_locHighlight) { _map.removeLayer(_locHighlight); _locHighlight = null; }
+  if (s.kind === 'trip' && Array.isArray(s.bbox)) {
+    _map.fitBounds([[s.bbox[0], s.bbox[1]], [s.bbox[2], s.bbox[3]]], {padding: [30, 30], maxZoom: 17});
+    if (Array.isArray(s.path)) _locHighlight = L.polyline(s.path, {color: '#ffffff', weight: 9, opacity: 0.35}).addTo(_map);
+  } else if (s.kind === 'stop') {
+    _map.setView([s.lat, s.lon], Math.max(_map.getZoom(), 16));
+  }
+  // On a phone the sidebar covers the map: get out of the way so the focus is seen.
+  if (window.innerWidth <= 600 && _mapSettings.sidebarOpen) {
+    _mapSettings.sidebarOpen = false;
+    _mapApplySidebarState();
+    setTimeout(function() { if (_map) _map.invalidateSize(); }, 310);
+  }
+}
+// Native bridge (iPhone app only). The app answers by calling
+// window.__amuxNativeLocation(status) with {enabled, authorization, motion,
+// precise, pending, last_upload, last_error}.
+function _locNativeAvailable() {
+  return !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.amuxLocation);
+}
+function _locNative(op) {
+  if (!_locNativeAvailable()) return;
+  try { window.webkit.messageHandlers.amuxLocation.postMessage({op}); } catch (e) {}
+}
+window.__amuxNativeLocation = function(st) {
+  const box = document.getElementById('map-loc-native');
+  if (!box || !st) return;
+  box.hidden = false;
+  const auth = {always: 'Always', whenInUse: 'While using the app only', denied: 'Denied in iOS Settings', restricted: 'Restricted', notDetermined: 'Not asked yet'}[st.authorization] || st.authorization || 'unknown';
+  const last = st.last_upload ? new Date(st.last_upload * 1000).toLocaleString([], {hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric'}) : 'never';
+  box.innerHTML = '<div class="map-loc-native-row"><b>This iPhone</b>'
+    + '<button type="button" class="btn ' + (st.enabled ? '' : 'primary') + '" onclick="_locNative(\'' + (st.enabled ? 'disable' : 'enable') + '\')">'
+    + (st.enabled ? 'Turn off' : 'Turn on') + '</button></div>'
+    + '<div class="map-loc-native-meta">Recording: ' + (st.enabled ? 'on' : 'off') + ' · Location: ' + esc(auth)
+    + (st.precise === false ? ' (approximate: turn on Precise Location)' : '')
+    + ' · Motion: ' + esc(st.motion || 'unknown') + '<br>Waiting to upload: ' + (st.pending || 0) + ' · Last upload: ' + esc(last)
+    + (st.last_error ? '<br>Last error: ' + esc(st.last_error) : '') + '</div>'
+    + (st.enabled && (st.pending || 0) > 0 ? '<button type="button" class="btn" onclick="_locNative(\'upload\')">Upload now</button>' : '');
+};
+setTimeout(() => {
+  for (const [id, on] of [['map-tab-pins', _mapTab === 'pins'], ['map-tab-history', _mapTab === 'history']]) {
+    const b = document.getElementById(id);
+    if (b) { b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); }
+  }
+  const pins = document.getElementById('map-pins-pane'), hist = document.getElementById('map-history-pane');
+  if (pins && hist) { pins.hidden = _mapTab !== 'pins'; hist.hidden = _mapTab !== 'history'; }
+}, 0);
 
 function _mapApplySidebarState() {
   const sidebar = document.getElementById('map-sidebar');

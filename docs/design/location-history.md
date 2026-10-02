@@ -149,6 +149,10 @@ Authentication:
   row zooms the map to it.
 - On the iPhone app, a tracking switch and status from the native bridge.
 - Mobile first: 44 px targets, works at 375 px, both themes.
+- **One leak to know about:** the Map's base tiles come from OpenStreetMap, as
+  they already do for pins. Viewing a day therefore tells the tile server
+  which map squares you looked at, though not your points or times. A
+  self-hosted tile server would close that if it ever matters.
 
 ## Ethan: App Store
 
