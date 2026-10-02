@@ -6970,16 +6970,18 @@ p.communicate(msg.encode())
     fi
     # AGING (gs12-retrievers, 2026-10-01: the first ordinary ticket waited
     # 4h20m while four --priority tickets passed it). Past
-    # AMUX_LAND_PRIORITY_AGING_S (default 7200) an ordinary waiter renames ITS
+    # AMUX_LAND_PRIORITY_AGING_S (default 14400; 7200 until 2026-10-02, when the
+    # orchestrator chose 4 h so a granted gate fix outranks a 2 h waiter but not
+    # a 4 h one) an ordinary waiter renames ITS
     # OWN ticket into the priority range, keeping its arrival time, so plain
     # name order (what every waiter, old or new, serves by) puts it ahead of
     # priority tickets that arrived after it. Only a ticket's own waiter
     # renames it.
-    if [ "${tname:0:3}" != "000" ] && [ $(( $(date +%s) - 10#${tname%%-*} )) -gt "${AMUX_LAND_PRIORITY_AGING_S:-7200}" ]; then
+    if [ "${tname:0:3}" != "000" ] && [ $(( $(date +%s) - 10#${tname%%-*} )) -gt "${AMUX_LAND_PRIORITY_AGING_S:-14400}" ]; then
       local aged
       aged="000$(printf '%09d' $(( 10#${tname%%-*} % 1000000000 )))-$$"
       if mv -- "${q:?}/${tname:?}" "${q:?}/${aged:?}" 2>/dev/null; then
-        _land_log "waited past ${AMUX_LAND_PRIORITY_AGING_S:-7200}s; ticket aged into the priority order at its arrival time"
+        _land_log "waited past ${AMUX_LAND_PRIORITY_AGING_S:-14400}s; ticket aged into the priority order at its arrival time"
         tname="$aged"
         # shellcheck disable=SC2064  # expanded now on purpose: locals are gone when the trap runs
         trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
