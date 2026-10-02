@@ -2151,10 +2151,11 @@
   @media (max-width: 600px) {
     .settings-menu {
       position: fixed;
-      top: var(--mobile-header-bottom, calc(max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)) + 60px));
-      right: 8px; left: auto;
-      max-width: calc(100vw - 16px);
-      max-height: calc(var(--dialog-viewport-height, 100dvh) - var(--mobile-header-bottom, 60px) - 12px - env(safe-area-inset-bottom, 0px));
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      right: auto;
+      max-width: calc(100vw - 32px);
+      max-height: calc(var(--dialog-viewport-height, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 32px);
       z-index: 6000;
     }
   }
