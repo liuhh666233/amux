@@ -6499,6 +6499,13 @@ _land_status() {
     [ "$who" = "$me" ] && [ -z "$mine" ] && mine=$n
   done
   [ "$n" -gt 0 ] || echo "queue: empty"
+  local df dp
+  for df in "$HOME/.amux/locks/detached"/*; do
+    [ -f "$df" ] || continue
+    dp="${df##*/}"
+    [ "$(sed -n 1p "$df")" = "$me" ] && kill -0 "$dp" 2>/dev/null \
+      && echo "your detached land: pid $dp from $(sed -n 3p "$df" || echo '?') (amux land --cancel $dp, or --cancel --all)"
+  done
   if [ -n "$mine" ]; then
     if [ -n "$med" ]; then
       echo "you ($me): position $mine; today's median hold is $med min, batches carry up to ${AMUX_LAND_BATCH_MAX:-6}; expect roughly $(( (mine + 5) / 6 * med ))-$(( mine * med )) min (fewer turns if batched, more if a batch is refused)"
@@ -6514,7 +6521,10 @@ _land_status() {
 # THIS checkout (gs12-restore, 2026-10-01: keyed by session alone, --cancel in
 # one worktree stopped another worktree's land and missed its own).
 _land_cancel() {
-  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" d="$HOME/.amux/locks/detached" f pid who where here n=0
+  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" d="$HOME/.amux/locks/detached" f pid who where here n=0 all=0
+  # --all: every detached land of this session, whatever checkout it came from
+  # (gs12-retrievers, 2026-10-01: three --sha lands, --cancel stopped one).
+  [ "$want" = "--all" ] && { all=1; want=""; }
   here="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
   for f in "$d"/*; do
     [ -f "$f" ] || continue
@@ -6522,6 +6532,8 @@ _land_cancel() {
     [ "$who" = "$me" ] || continue
     if [ -n "$want" ]; then
       [ "$pid" = "$want" ] || continue
+    elif [ "$all" = 1 ]; then
+      :
     else
       # A record from before checkouts were recorded has no line 3 (gs12-cicd,
       # 2026-10-01: such a land was skipped and left queued). Read the
@@ -6545,7 +6557,7 @@ _land_cancel() {
   # hand): find running `amux land` processes whose cwd is this checkout and
   # stop their process groups (gs12-tiering, 2026-10-01: a 16:31Z land was
   # invisible to --cancel and needed SIGKILL by hand).
-  if [ -z "$want" ]; then
+  if [ -z "$want" ] && [ "$all" = 0 ]; then
     local pgid cmd pcwd ptop
     while read -r pid pgid cmd; do
       [ "$pid" != "$$" ] && [ "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] || continue

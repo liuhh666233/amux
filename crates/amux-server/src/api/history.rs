@@ -560,6 +560,31 @@ pub struct ListParams {
     device: Option<String>,
     #[serde(default)]
     place: Option<String>,
+    /// Time window on `ts` (gs12-data, 2026-10-01: every bound was dropped as
+    /// an unknown key, so a past window returned the newest 500 rows). ISO-8601
+    /// or epoch seconds or milliseconds; `from`/`start`/`after` and
+    /// `to`/`end`/`before` are accepted as the same bounds.
+    #[serde(default, alias = "from", alias = "start", alias = "after")]
+    since: Option<String>,
+    #[serde(default, alias = "to", alias = "end", alias = "before")]
+    until: Option<String>,
+}
+
+/// A time bound as epoch milliseconds (cmd_history.ts): ISO-8601 (with or
+/// without seconds, `Z` or an offset), or a number read as seconds when it is
+/// under 1e11 and as milliseconds otherwise.
+pub(crate) fn parse_bound_ms(raw: &str) -> Option<i64> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Ok(n) = t.parse::<f64>() {
+        return Some(if n < 1e11 { (n * 1000.0) as i64 } else { n as i64 });
+    }
+    let fixed = if t.len() == 17 && t.ends_with('Z') { format!("{}:00Z", &t[..16]) } else { t.to_string() };
+    chrono::DateTime::parse_from_rfc3339(&fixed)
+        .ok()
+        .map(|d| d.timestamp_millis())
 }
 
 /// Python-truthy query flag: present with any non-empty value.
@@ -590,6 +615,21 @@ const HISTORY_MAX_LIMIT: i64 = 500;
 
 async fn list_history(State(state): State<AppState>, Query(p): Query<ListParams>) -> Response {
     let store = state.store.clone();
+    // An unreadable bound is refused, never dropped: dropping it is the
+    // defect (the newest page returned as if it were the window asked for).
+    let bound = |v: &Option<String>, name: &str| -> Result<Option<i64>, String> {
+        match v.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => Ok(None),
+            Some(raw) => parse_bound_ms(raw)
+                .map(Some)
+                .ok_or_else(|| format!("{name}={raw:?} is not ISO-8601 or epoch seconds/milliseconds")),
+        }
+    };
+    let refuse = |e: String| {
+        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": e}))).into_response()
+    };
+    let since_ms = match bound(&p.since, "since") { Ok(v) => v, Err(e) => return refuse(e) };
+    let until_ms = match bound(&p.until, "until") { Ok(v) => v, Err(e) => return refuse(e) };
     // CLAMPED OUT HERE, and the request is told. A truncated list that says
     // nothing reads as data rather than as truncation — the same failure
     // `board_contract_filters.rs` records, where a lane auditing its own board
@@ -715,6 +755,14 @@ async fn list_history(State(state): State<AppState>, Query(p): Query<ListParams>
             // The list window. Every predicate lands in SQL, before the LIMIT.
             let mut where_cl: Vec<String> = Vec::new();
             let mut params: Vec<rusqlite::types::Value> = Vec::new();
+            if let Some(ms) = since_ms {
+                where_cl.push("ts>=?".into());
+                params.push(rusqlite::types::Value::Integer(ms));
+            }
+            if let Some(ms) = until_ms {
+                where_cl.push("ts<?".into());
+                params.push(rusqlite::types::Value::Integer(ms));
+            }
             if !session.is_empty() {
                 where_cl.push("session=?".into());
                 params.push(rusqlite::types::Value::Text(session.clone()));
@@ -2479,5 +2527,21 @@ mod tests {
                 .any(|d| d.trim_start().starts_with("SCAN linked")),
             "no full scan of issues per message card: {plan:#?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::parse_bound_ms;
+
+    #[test]
+    fn a_time_bound_reads_iso_and_epoch_seconds_or_milliseconds() {
+        // gs12-data's recipe, 2026-10-01: minutes-only ISO with Z.
+        assert_eq!(parse_bound_ms("2026-09-29T14:40Z"), Some(1_790_692_800_000));
+        assert_eq!(parse_bound_ms("2026-09-29T14:40:00Z"), Some(1_790_692_800_000));
+        assert_eq!(parse_bound_ms("2026-09-29T10:40:00-04:00"), Some(1_790_692_800_000));
+        assert_eq!(parse_bound_ms("1790692800"), Some(1_790_692_800_000), "epoch seconds");
+        assert_eq!(parse_bound_ms("1790692800000"), Some(1_790_692_800_000), "epoch milliseconds");
+        assert_eq!(parse_bound_ms("yesterday"), None, "unreadable is refused, not dropped");
     }
 }

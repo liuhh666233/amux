@@ -406,6 +406,20 @@ fn reserved_for_owner(lower: &str) -> bool {
         .is_match(lower)
 }
 
+/// The first card id in `sentence` whose card is in `needsyou`, if any.
+fn needsyou_card_named(state: &AppState, sentence: &str) -> Option<String> {
+    let conn = state.store.read().ok()?;
+    super::goal_loop::card_ids(sentence).into_iter().find(|id| {
+        conn.query_row(
+            "SELECT status FROM issues WHERE id=?1 AND deleted IS NULL",
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|st| st == "needsyou")
+        .unwrap_or(false)
+    })
+}
+
 /// Classify the final assistant text of a turn.
 pub(crate) fn classify_owner_ask(text: &str) -> OwnerAsk {
     let said = said_text(text);
@@ -1263,6 +1277,16 @@ pub(crate) async fn on_turn_end(state: AppState, name: String, session_id: Strin
                     "turn-end: in-boundary owner ask not steered; this turn's prompt asked the lane to hold or only report");
                 return;
             }
+            // The sentence names a card ALREADY waiting on the owner
+            // (needsyou): it is a status line, not a new ask, and the steer's
+            // own remedy ("put the question on a card") is already done.
+            // 2026-10-01: "AH-296, full scope versus Sunday, is still waiting
+            // for you." was steered to "proceed ... take your recommended one".
+            if let Some(carded) = needsyou_card_named(&state, sentence) {
+                tracing::info!(session = %name, card = %carded, verdict = "owner_ask_already_carded", sentence = %clip(sentence, 160),
+                    "turn-end: owner ask names a card already in needsyou; not steered");
+                return;
+            }
             let qkey = question_key(sentence);
             if !claim_within(&state, &name, "turn_end.owner_ask_steer", &qkey, OWNER_ASK_STEER_WINDOW_S,
                 format!("owner-ask:{name}:{}", turn.uuid),
@@ -1974,6 +1998,29 @@ mod tests {
     #[test]
     fn steer_text_carries_no_em_dash() {
         assert!(!steer_text("Say go and I'll do it.").contains('\u{2014}'));
+    }
+
+    #[test]
+    fn a_sentence_naming_a_needsyou_card_is_not_a_new_ask() {
+        let state = crate::api::standing_approvals::tests::test_state();
+        state
+            .store
+            .write(|conn| {
+                for (id, st) in [("AH-296", "needsyou"), ("AH-297", "todo")] {
+                    conn.execute(
+                        "INSERT INTO issues (id, title, status, created, updated) VALUES (?1, ?1, ?2, 1, 1)",
+                        rusqlite::params![id, st],
+                    )?;
+                }
+                Ok(crate::db::WriteOutcome { applied: false, events: vec![] })
+            })
+            .unwrap();
+        assert_eq!(
+            needsyou_card_named(&state, "AH-296, full scope versus Sunday, is still waiting for you."),
+            Some("AH-296".to_string())
+        );
+        assert_eq!(needsyou_card_named(&state, "AH-297 is ready; want me to start it?"), None,
+            "a card that is not waiting on the owner does not suppress the steer");
     }
 
     #[test]
