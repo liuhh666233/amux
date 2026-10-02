@@ -14,6 +14,7 @@ fails=0
 check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1: expected '$2', got '$3'"; fails=$((fails+1)); fi; }
 has() { if printf '%s' "$1" | grep -q -- "$2"; then echo yes; else echo no; fi; }
 export AMUX_CLEANUP_SCOPE_FILE=/dev/null   # the live global scope must not configure a test (DESKT-72)
+export AMUX_CLEANUP_SESSIONS_CMD=false        # the VM-reference report must not read the live fleet (AMUX-5491)
 AMUX_CLEANUP_LIB_ONLY=1 . "$TICK"
 # No end-to-end cell here may prune a real VM (DESKT-69) or reap real build output.
 export AMUX_CLEANUP_VM_LIST_CMD="true"

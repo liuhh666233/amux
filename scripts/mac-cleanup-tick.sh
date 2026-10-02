@@ -419,6 +419,45 @@ lima_running_names() {
   ps -Ao command= 2>/dev/null | lima_names_from_ps
 }
 
+# Running VMs that nothing in the fleet references. A reference is a session whose
+# name or desc mentions the VM, or an AMUX_DOCKER_VM value in any scope file (the
+# shared VM is named only there, by design). Until 2026-10-02 the session list
+# was fetched only when $AMUX_URL was set; the scheduled shell does not set it,
+# so every running VM, the shared one included, read UNREFERENCED. A list that
+# cannot be read now says so (ethos rule 4) instead of reading as "nobody".
+# Seams: AMUX_CLEANUP_SESSIONS_CMD prints "name desc" lines; AMUX_CLEANUP_SCOPE_ROOT
+# is the ~/.amux holding amux.env, env/*.env and sessions/*.env.
+vm_reference_report() {
+  local vms; vms=$(lima_running_names)
+  [ -n "$vms" ] || return 0
+  local sessions rc
+  if [ -n "${AMUX_CLEANUP_SESSIONS_CMD:-}" ]; then sessions=$(eval "$AMUX_CLEANUP_SESSIONS_CMD" 2>/dev/null); rc=$?
+  else
+    sessions=$(curl -sk --max-time 10 "$(amux url 2>/dev/null || echo https://localhost:8824)/api/sessions" 2>/dev/null \
+      | python3 -c "import json,sys;[print(s.get('name',''),s.get('desc','')) for s in json.load(sys.stdin)]" 2>/dev/null); rc=$?
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$sessions" ]; then
+    echo "mac-cleanup: VM references: unmeasured (session list unreadable), $(printf '%s\n' "$vms" | grep -c .) running VM(s) not judged"
+    return 0
+  fi
+  local root="${AMUX_CLEANUP_SCOPE_ROOT:-${AMUX_HOME:-$HOME/.amux}}" shared
+  shared=$(cat "$root/amux.env" "$root"/env/*.env "$root"/sessions/*.env 2>/dev/null \
+    | sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}AMUX_DOCKER_VM=["'"'"']\{0,1\}\([A-Za-z0-9._-]*\).*/\2/p' | sort -u)
+  local vz_gb
+  vz_gb=$(ps -eo rss=,command= 2>/dev/null | grep 'Virtualization.VirtualMachine' | grep -v grep | awk '{s+=$1}END{printf "%.1f", s/1048576}')
+  local vm short n_un=0 n_ref=0
+  while IFS= read -r vm; do
+    [ -n "$vm" ] || continue
+    short=${vm#colima-}
+    if printf '%s\n' "$shared" | grep -qxF "$short" || printf '%s\n' "$sessions" | grep -qiF "$short"; then
+      n_ref=$((n_ref+1)); continue
+    fi
+    n_un=$((n_un+1))
+    echo "mac-cleanup: UNREFERENCED VM '$vm' running, no fleet session mentions '$short' and no scope sets AMUX_DOCKER_VM=$short — stop with: limactl stop $vm"
+  done <<< "$vms"
+  echo "mac-cleanup: VM references: $n_ref referenced, $n_un unreferenced (all VMs together ${vz_gb:-0}G resident)"
+}
+
 # Report the lima data disks: allocated size (ls -lsk, instant, no du), whether a
 # VM is registered for each, whether it is running. REPORT ONLY. These are other
 # lanes' VM data, so this never deletes: deletion is the owner's call (ethos rule 8).
@@ -1047,33 +1086,7 @@ computer_sandboxes_report
 # resource leak on this box (measured: gs7-e ran 5 days at 96% CPU / 22GB RAM
 # with zero fleet references, 2026-09-27). The tick cannot stop it (ethos rule 8)
 # but it CAN name it loudly rather than burying it in the disk report.
-_running_vms=$(lima_running_names)
-if [ -n "$_running_vms" ]; then
-  _fleet_sessions=""
-  if [ -n "${AMUX_URL:-}" ]; then
-    _fleet_sessions=$(curl -sk --max-time 5 "$AMUX_URL/api/sessions" 2>/dev/null \
-      | python3 -c "import json,sys;[print(s.get('name',''),s.get('desc','')) for s in json.load(sys.stdin)]" 2>/dev/null || true)
-  fi
-  while IFS= read -r _vm; do
-    [ -z "$_vm" ] && continue
-    _vm_short=$(echo "$_vm" | sed 's/^colima-//')
-    _referenced=0
-    if [ -n "$_fleet_sessions" ] && echo "$_fleet_sessions" | grep -qi "$_vm_short"; then
-      _referenced=1
-    fi
-    if [ "$_referenced" = 0 ]; then
-      _vm_pid=$(ps -Ao pid=,command= 2>/dev/null | grep "hostagent.*$_vm/ha.pid" | grep -v grep | awk '{print $1}')
-      _vm_rss=""
-      if [ -n "$_vm_pid" ]; then
-        _vm_rss=$(ps -o rss= -p "$_vm_pid" 2>/dev/null | tr -d ' ')
-      fi
-      # Also check the Virtualization.framework VM process RSS
-      _vz_rss=$(ps -eo rss=,command= 2>/dev/null | grep 'Virtualization.VirtualMachine' | grep -v grep | awk '{sum+=$1}END{print sum+0}')
-      _vz_gb=$(awk -v k="${_vz_rss:-0}" 'BEGIN{printf "%.1f", k/1048576}')
-      echo "mac-cleanup: UNREFERENCED VM '$_vm' running with ${_vz_gb}G resident, no fleet session mentions '$_vm_short' — stop with: limactl stop $_vm (or kill the hostagent)"
-    fi
-  done <<< "$_running_vms"
-fi
+vm_reference_report
 
 # ── act: purge ───────────────────────────────────────────────────────────────
 purged=no

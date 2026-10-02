@@ -54,6 +54,19 @@ echo "4. the report deletes nothing"
 lima_disks_report "$LR" 1 >/dev/null
 check "all three fixture disks still exist" "3" "$(ls "$LR"/_disks/*/datadisk | wc -l | tr -d ' ')"
 
+echo "5. running-VM references: scope-named shared VM, session mention, unreadable list"
+SR="$FIX/scope"; mkdir -p "$SR/env" "$SR/sessions"
+printf 'AMUX_DOCKER_VM="goal-shared"\n' > "$SR/env/gs12-platform.env"
+out=$(AMUX_CLEANUP_LIMA_RUNNING=$'colima-goal-shared\ncolima-gs12-mvs\ncolima-stray' AMUX_CLEANUP_SCOPE_ROOT="$SR" \
+      AMUX_CLEANUP_SESSIONS_CMD="printf 'gs12-mvs MVS lane\namux builds amux\n'" vm_reference_report)
+check "a VM named by AMUX_DOCKER_VM in a scope file is referenced" "no"  "$(printf '%s' "$out" | grep -q "UNREFERENCED VM 'colima-goal-shared'" && echo yes || echo no)"
+check "a VM a session mentions is referenced"                      "no"  "$(printf '%s' "$out" | grep -q "UNREFERENCED VM 'colima-gs12-mvs'" && echo yes || echo no)"
+check "a VM nothing references is named"                           "yes" "$(printf '%s' "$out" | grep -q "UNREFERENCED VM 'colima-stray'" && echo yes || echo no)"
+check "the summary counts both populations"                        "yes" "$(printf '%s' "$out" | grep -q 'VM references: 2 referenced, 1 unreferenced' && echo yes || echo no)"
+out=$(AMUX_CLEANUP_LIMA_RUNNING='colima-stray' AMUX_CLEANUP_SCOPE_ROOT="$SR" AMUX_CLEANUP_SESSIONS_CMD="false" vm_reference_report)
+check "an unreadable session list reads unmeasured, never UNREFERENCED" "unmeasured" \
+  "$(printf '%s' "$out" | grep -q UNREFERENCED && echo accused || { printf '%s' "$out" | grep -q 'VM references: unmeasured' && echo unmeasured || echo silent; })"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "PASS: mac-cleanup-lima — all checks passed"; exit 0; fi
 echo "mac-cleanup-lima: $fails check(s) FAILED"; exit 1
