@@ -65,8 +65,9 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
   // PRESS CONTRACT (AMUX-5417, Ethan 2026-10-01: "audit every button press and
   // make sure theres progress indicators/feedback"). Every press on a control
   // whose handler reaches a request gets, from this one place:
-  //   1. busy: disabled + aria-busy + a bar on its bottom edge while running;
-  //   2. no double-fire: a press on a busy control is swallowed;
+  //   1. busy: aria-busy + a bar on its bottom edge while running, and
+  //      disabled while a WRITE it started is running;
+  //   2. no double-fire: a press on a control with a write in flight is swallowed;
   //   3. an outcome: a green outline, or a red one plus a toast on failure.
   // Handlers stay plain fetch code; docs/ux/button-feedback-audit.md lists them.
   //
@@ -76,8 +77,17 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
   // and those presses got no busy state at all. A press on a command control
   // stays armed for ARM_MS, and the first request accepted in that window binds
   // to it. Reads never create receipts, so a background poll cannot borrow it.
+  //
+  // A READ a press starts shows progress and never locks the control. Opening
+  // Settings fires its loads as reads, and locking on them left the Settings
+  // button disabled until they returned (11.6s under load), so the menu could
+  // not be closed and a quick second tap was swallowed (AMUX-5373, iOS e2e).
+  // A repeated read is harmless; a repeated write is what the lock is for, so
+  // the lock lifts when the press's WRITES settle (Settings also saves its tab,
+  // and that write must not be held open by the slowest of a dozen loads).
   const ARM_MS = 5000, DOUBLE_MS = 700, STUCK_MS = 30000, SPEAK_MS = 600;
   let armed = null;
+  const writes = new Set();   // receipt ids of in-flight writes bound to a press
   const outcome = new WeakMap();   // element -> {worst phase, toastAt baseline, label}
   let lastToastAt = 0;
   const toastEl = document.getElementById('toast');
@@ -98,7 +108,7 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
   document.addEventListener('click', event => {
     const element = event.target.closest(selectors);
     if (!element || element.closest('#interaction-feedback') || !element.isConnected) return;
-    const busy = element.getAttribute('aria-busy') === 'true';
+    const busy = element.getAttribute('aria-busy') === 'true' && element.dataset.pressLocked === 'true';
     // The quick-repeat rule covers only controls this page has SEEN make a
     // request. The static registry over-approximates (navigation that renders
     // can reach a writer), so applying it to every declared control would eat
@@ -214,13 +224,14 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
     }
   }
   function bind(element, receipt) {
-    element.dataset.commandObserved = 'true';
+    const write = !['GET','HEAD'].includes(receipt.request?.method);
+    if (write) { element.dataset.commandObserved = 'true'; writes.add(receipt.id); }
     element.dataset.interactionKind = receipt.command.kind;
     element.dataset.targetId = receipt.command.target.id || receipt.request?.path || element.dataset.targetId;
     element.dataset.interactionId = receipt.id;
     controls.set(receipt.id, element);
     if (!outcome.has(element)) outcome.set(element, {worst:null, since:Date.now(), label:labelOf(element)});
-    pressBusy(element, true);
+    pressBusy(element, true, write);
     // A request that never settles must not leave its button disabled forever.
     setTimeout(() => {
       if (controls.get(receipt.id) !== element) return;
@@ -240,13 +251,19 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
   // (Enter) would lose focus and the phone keyboard if it were disabled.
   const pressable = element => element.tagName === 'BUTTON'
     || (element.tagName === 'INPUT' && /^(button|submit|reset|checkbox|radio)$/i.test(element.type));
-  function pressBusy(element, on) {
+  function unlock(element) {
+    delete element.dataset.pressLocked;
+    if (element.dataset.pressDisabled) { element.disabled = false; delete element.dataset.pressDisabled; }
+  }
+  function pressBusy(element, on, write = true) {
     if (on) {
       element.classList.add('press-busy');
+      if (!write) return;
+      element.dataset.pressLocked = 'true';
       if (pressable(element) && !element.disabled) { element.disabled = true; element.dataset.pressDisabled = 'true'; }
     } else {
       element.classList.remove('press-busy');
-      if (element.dataset.pressDisabled) { element.disabled = false; delete element.dataset.pressDisabled; }
+      unlock(element);
     }
   }
   // Can the user still see this control? A closed dialog is often hidden by
@@ -260,6 +277,8 @@ export function installFeedback(interactions, ui, diagnostic = () => {}) {
   const RANK = {applied:0, reconciled:0, noop:0, queued:1, unknown:2, refused:3, failed:3};
   // Outcome, once every request the press started has settled.
   function settle(element, receipt) {
+    if (writes.delete(receipt.id)
+        && ![...controls].some(([id, el]) => el === element && writes.has(id))) unlock(element);
     const state = outcome.get(element) || {worst:null, since:Date.now(), label:labelOf(element), wrote:false};
     // Did this press CHANGE anything? A press whose every request was a read
     // only opened a view, and that view is its outcome (2026-10-01: the peek

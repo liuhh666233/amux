@@ -236,3 +236,23 @@ test('a press on a container never speaks its whole text as the action name', as
   const text = await page.locator('#toast').textContent();
   expect(text || '').not.toMatch(/Task label|Task queue|card-name/);
 });
+
+// A read a press starts shows progress and never locks the control (AMUX-5373).
+// Opening Settings fires its loads as reads; locking on them kept the Settings
+// button disabled until they returned, so the menu could not be closed.
+test('Settings: its loading reads show progress but the toggle stays pressable', async ({page}) => {
+  await boot(page);
+  await page.route('**/api/**', async route => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    await new Promise(r => setTimeout(r, 4000));
+    await route.fallback();
+  });
+  const btn = page.locator('#settings-btn');
+  await btn.click();
+  await expect(page.locator('#settings-menu')).toBeVisible();
+  // Positive control: the press DID bind a read, or this test proves nothing.
+  await expect(btn).toHaveClass(/press-busy/, {timeout: 1000});
+  await expect(btn).toBeEnabled();
+  await btn.click({timeout: 1500});
+  await expect(page.locator('#settings-menu')).toBeHidden();
+});
