@@ -8036,6 +8036,31 @@ $f"
   return 1
 }
 
+# `amux cdp ...`: rung 2 of the access ladder (Ethan's real Chrome over CDP),
+# from ANY checkout. The helper lives in the amux repo's skills/, which lanes
+# in other repos never see; they probed fixed ports (9222, 9223, 9229) and
+# filed "no CDP port" while Chrome listened on 9333 (2026-10-02: GS-146,
+# GS-159, GS-169, GM-25 sat in needsyou on that). The helper finds the port
+# itself through Chrome's DevToolsActivePort file.
+cmd_cdp() {
+  local script="${AMUX_CDP_SCRIPT:-}" c
+  if [ -z "$script" ]; then
+    for c in "$HOME/Dev/amux/skills/chrome-cdp/scripts/cdp.mjs" "$HOME/.amux/skills/chrome-cdp/scripts/cdp.mjs"; do
+      [ -f "$c" ] && { script="$c"; break; }
+    done
+  fi
+  [ -n "$script" ] || die "amux cdp: the chrome-cdp helper is not on this machine (set AMUX_CDP_SCRIPT to its cdp.mjs)"
+  command -v node >/dev/null 2>&1 || die "amux cdp: node is not installed"
+  if [ $# -eq 0 ]; then
+    node "$script" 2>&1 | sed -n '1,30p'
+    echo
+    echo "Ethan's Chrome carries his live sign-ins. Start with: amux cdp list; then amux cdp open <url>, amux cdp eval <target> <js>, amux cdp shot <target>."
+    echo "Stop at any password, CAPTCHA or 2-step prompt: that rung is Ethan's."
+    return 0
+  fi
+  node "$script" "$@"
+}
+
 cmd_signal() {
   local sub="${1:-help}"; shift 2>/dev/null || true
   local me="${AMUX_WORKER:-${AMUX_SESSION:-}}"
@@ -8157,6 +8182,7 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
     signal)           shift; cmd_signal "$@" ;;
     land)             shift; cmd_land "$@" ;;
     browser|br)      shift; cmd_browser "$@" ;;
+    cdp)              shift; cmd_cdp "$@" ;;
     computer|cu)     shift; cmd_computer "$@" ;;
     delegate)        shift; cmd_delegate "$@" ;;
     delegate-job|dj) shift; cmd_delegate_job "$@" ;;

@@ -22,6 +22,7 @@ cell "amux help computer prints usage"  bash -c 'bash amux help computer 2>&1 | 
 cell "browser: profiles subcommand"     grep -q '^    profiles|ls|list)' amux
 cell "main help names amux computer"    grep -q 'amux computer start|status' amux
 cell "dispatch: order"                  grep -q '^    order)' amux
+cell "dispatch: cdp (access rung 2)"    grep -q '^    cdp)' amux
 cell "dispatch: land"                   grep -q '^    land)' amux
 cell "land --help names --adopt"        bash -c 'bash amux land --help 2>&1 | grep -q -- "--adopt"'
 echo
