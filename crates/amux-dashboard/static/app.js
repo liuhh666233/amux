@@ -6439,8 +6439,12 @@ function updatePeekStatus() {
   const _niRow = document.getElementById('peek-needs-input-row');
   const _niWaiting = s.status === 'waiting' && s.waiting_reason === 'owner';
   if (_niRow) {
-    if (_niWaiting) { _niRow.innerHTML = _needsInputBadge(s, { answer: true }); _niRow.hidden = false; }
-    else { _niRow.innerHTML = ''; _niRow.hidden = true; }
+    // Rewrite only when the chip changes. This runs on every peek poll, and
+    // replacing the button between touch-down and touch-up loses the tap (iOS
+    // e2e, run 36994656525: the click landed and nothing opened).
+    const _niHtml = _niWaiting ? _needsInputBadge(s, { answer: true }) : '';
+    if (_niRow.dataset.markup !== _niHtml) { _niRow.innerHTML = _niHtml; _niRow.dataset.markup = _niHtml; }
+    _niRow.hidden = !_niWaiting;
   }
   if (_niWaiting) badge = badge.replace(_needsInputBadge(s), '<span class="status-badge waiting">needs input</span>');
   if (s.running && s.status === 'idle') badge += _stalledChip(s);
@@ -13660,7 +13664,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1217';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1218';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}

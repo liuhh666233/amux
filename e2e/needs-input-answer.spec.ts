@@ -39,18 +39,9 @@ test('needs-input chip has its own row, is not clipped, and opens the card with 
   // closed so only this route supplies sessions.
   await page.route('**/api/events**', r => r.abort());
   allowUnusedRoute(page, '**/api/events**');
-  await page.route(sessionsList, async r => {
-    if (r.request().method() !== 'GET') return r.fallback();
-    // A refresh still in flight when the test ends must not throw into the
-    // NEXT test ("route.fetch: Test ended").
-    try {
-      const headers = { ...r.request().headers() };
-      delete headers['if-none-match'];   // a 304 has no list to add the worker to
-      const res = await r.fetch({ headers });
-      const list = await res.json().catch(() => []);
-      await r.fulfill({ status: 200, json: [...(Array.isArray(list) ? list.filter((x: any) => x.name !== worker.name) : []), worker] });
-    } catch { /* test over */ }
-  });
+  // The fleet is just this worker: forwarding to the real server made the
+  // forced refresh below wait on a loaded host for 30s.
+  await page.route(sessionsList, r => r.request().method() === 'GET' ? r.fulfill({ json: [worker] }) : r.fallback());
   allowUnusedRoute(page, sessionsList);
   await boot(page);
   await page.evaluate(({ card, worker }) => {
@@ -86,6 +77,19 @@ test('needs-input chip has its own row, is not clipped, and opens the card with 
   await page.evaluate(() => (globalThis as any).updatePeekStatus());
   expect(await page.evaluate(() => (globalThis as any).eval('sessions').some((x: any) => x.name === 'ni-worker'))).toBe(true);
   await expect(page.locator('#peek-title-row')).toContainText('needs input');
+  // A status update must not rebuild the chip: polls run constantly, and a
+  // button replaced mid-tap swallows the tap.
+  // Measured inside one synchronous call, so a background poll that really
+  // changed the chip cannot be mistaken for (or hide) a needless rebuild.
+  expect(await page.evaluate(() => {
+    const row = document.getElementById('peek-needs-input-row')!;
+    const seen = new MutationObserver(() => {});
+    seen.observe(row, {childList: true, subtree: true});
+    (globalThis as any).updatePeekStatus();
+    const rebuilt = seen.takeRecords().length;
+    seen.disconnect();
+    return rebuilt;
+  })).toBe(0);
   // Tap: the card opens with the answer box focused.
   await chip.click();
   await expect(page.locator('#board-detail-overlay')).toHaveClass(/active/);
