@@ -127,6 +127,7 @@ struct SettingsView: View {
         List {
             serversSection
             addSection
+            LocationSettingsSection()
             resetSection
         }
         .onAppear { serverManager.checkAllServers() }

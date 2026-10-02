@@ -40,6 +40,9 @@ targets:
     sources:
       - path: AmuxApp/Sources
       - path: AmuxApp/Assets.xcassets
+      # Location history uploads through the same owner-authenticated client
+      # the share extension uses (AMUX-5458).
+      - path: AmuxShare/Sources/AmuxClient.swift
     info:
       path: AmuxApp/Info.plist
       properties:
@@ -64,6 +67,15 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSFaceIDUsageDescription: "Used to protect access to your amux dashboard"
+        # Location history (AMUX-5458): off until turned on in Settings. Points go
+        # only to the user's own amux server.
+        NSLocationWhenInUseUsageDescription: "amux records your location history (where you go, and whether you walk, cycle, drive or ride a train) and saves it on your own amux server, so you can see it on the Map."
+        NSLocationAlwaysAndWhenInUseUsageDescription: "Allow Always so amux can keep your location history while the app is closed. Points are saved only on your own amux server."
+        NSMotionUsageDescription: "amux uses motion activity to label your location history as walking, cycling, driving or train. It stays with your history on your own amux server."
+        NSLocationTemporaryUsageDescriptionDictionary:
+          history: "Location history needs precise location to show the streets and paths you took."
+        UIBackgroundModes:
+          - location
         ITSAppUsesNonExemptEncryption: false
         CFBundleIconName: AppIcon
     entitlements:
@@ -101,6 +113,7 @@ targets:
     sources:
       - path: AmuxAppTests
       - path: AmuxShare/Sources/AmuxClient.swift
+      - path: AmuxApp/Sources/LocationHistory.swift
 
   # UI tests that drive the SYSTEM SHARE SHEET from another app (AMUX-4990).
   #

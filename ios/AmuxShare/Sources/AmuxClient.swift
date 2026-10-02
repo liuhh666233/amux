@@ -212,6 +212,21 @@ enum AmuxClient {
         return data
     }
 
+    /// POST a JSON body to an amux API path as the owner, returning the decoded
+    /// object. The app's location history upload uses this (AMUX-5458): the same
+    /// per-process bootstrap and one retry on a 401 as every other call here.
+    static func postJSON(path: String, body: [String: Any], server: URL) async throws -> [String: Any] {
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        let data = try await authedData({
+            var req = URLRequest(url: server.appendingPathComponent(path), timeoutInterval: 30)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = payload
+            return req
+        }, server: server)
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
     /// Workers a human would plausibly share to, newest activity first.
     static func workers(server: URL) async throws -> [Worker] {
         let data = try await authedData({

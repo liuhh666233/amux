@@ -4,6 +4,10 @@ import SwiftUI
 struct AmuxApp: App {
     @StateObject private var serverManager = ServerManager()
 
+    init() {
+        LocationRecorder.shared.resumeIfEnabled()
+    }
+
     var body: some Scene {
         WindowGroup {
             Group {

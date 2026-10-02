@@ -68,6 +68,9 @@ struct WebView: UIViewRepresentable {
             })();
             """, injectionTime: .atDocumentStart, forMainFrameOnly: false)
         config.userContentController.add(context.coordinator, name: "consoleLog")
+        // Map > Location history talks to the native recorder through this
+        // bridge (AMUX-5458): status, enable, disable, upload.
+        config.userContentController.add(context.coordinator, name: "amuxLocation")
         config.userContentController.addUserScript(script)
 
         context.coordinator.requestedURL = url
@@ -115,6 +118,20 @@ struct WebView: UIViewRepresentable {
 
         init(_ parent: WebView) {
             self.parent = parent
+            super.init()
+            NotificationCenter.default.addObserver(forName: LocationRecorder.statusChanged,
+                                                   object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.pushLocationStatus() }
+            }
+        }
+
+        /// Hand the recorder's status to the dashboard's Location history tab.
+        @MainActor
+        func pushLocationStatus() {
+            guard let webView,
+                  let data = try? JSONSerialization.data(withJSONObject: LocationRecorder.shared.status),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window.__amuxNativeLocation && window.__amuxNativeLocation(\(json))")
         }
 
         // MARK: - Load watchdog
@@ -171,6 +188,20 @@ struct WebView: UIViewRepresentable {
 
         // JS console → os_log bridge
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "amuxLocation" {
+                let op = (message.body as? [String: Any])?["op"] as? String ?? "status"
+                Task { @MainActor in
+                    let recorder = LocationRecorder.shared
+                    switch op {
+                    case "enable": recorder.setEnabled(true)
+                    case "disable": recorder.setEnabled(false)
+                    case "upload": await recorder.upload()
+                    default: break
+                    }
+                    self.pushLocationStatus()
+                }
+                return
+            }
             guard let body = message.body as? [String: String],
                   let level = body["level"], let msg = body["message"] else { return }
             switch level {
