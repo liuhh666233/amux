@@ -7133,7 +7133,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.17"
+LAND_BEHAVIOR_VERSION="2026-10-02.18"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7702,6 +7702,46 @@ p.communicate(msg.encode())
       done
       [ -n "$hit" ] && printf '%s ' "$tk"
     done <<< "$stack_map"
+    _land_file_named_waiters "$1"
+  }
+  # _land_file_named_waiters <verdict lines>: tickets whose ORIGINAL commits
+  # touch a file a failure line names ("FAIL (committed content): <file> has
+  # ruff lint violations"). Only when EVERY named file belongs to some waiter:
+  # a file no waiter touches (drift already on main, or the holder's own) fails
+  # every composition, so dropping waiters for it would be wrong and the holder
+  # goes alone as before. mixpeek-override, 2026-10-02 11:37Z: a batch of 11
+  # refused on files owned by two lanes landed 1 ticket instead of 8.
+  _land_file_named_waiters() {
+    local paths line tk c f owned="" all=1 owners=""
+    paths="$(printf '%s\n' "$1" | grep -oE '(\.?[A-Za-z0-9_@+-]+/)+\.?[A-Za-z0-9_@+.-]+' | grep -E '\.' | sort -u)"
+    [ -n "$paths" ] || return 0
+    while read -r line; do
+      [ -n "$line" ] || continue
+      tk="${line%% *}"
+      local files="" i=0
+      for c in ${line#* }; do
+        i=$((i + 1)); [ $((i % 2)) = 0 ] || continue   # pairs are "replayed original"
+        files="$files
+$(git diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null || true)"
+      done
+      while read -r f; do
+        [ -n "$f" ] || continue
+        if printf '%s\n' "$files" | grep -qxF -- "$f"; then
+          owned="$owned
+$f"
+          case " $owners " in *" $tk "*) ;; *) owners="$owners $tk" ;; esac
+        fi
+      done <<< "$paths"
+    done <<< "$stack_map"
+    while read -r f; do
+      [ -n "$f" ] || continue
+      printf '%s\n' "$owned" | grep -qxF -- "$f" || { all=0; break; }
+    done <<< "$paths"
+    if [ "$all" = 1 ] && [ -n "$owners" ]; then
+      printf '%s ' $owners
+    elif [ -n "$owners" ]; then
+      _land_log "a refusal names files of waiters ($owners) and files no waiter touches; not dropping anyone on a partial match"
+    fi
   }
   # _land_tell <message>: write the outcome to every batched waiter; a landed
   # waiter's ticket is removed so the next holder does not batch it again.
