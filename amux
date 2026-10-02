@@ -7341,6 +7341,24 @@ _land_cancel_for() {
   return 1
 }
 
+# _land_pid_owner <pid> <pgid>: the lane a running land belongs to, from land's
+# own records only (the detached record for its wrapper, its queue ticket, or
+# the lock it holds); empty when none names it. macOS ps cannot show another
+# process's environment, so AMUX_WORKER is not readable from outside.
+_land_pid_owner() {
+  local pid="$1" pg="$2" f lk
+  for f in "$HOME/.amux/locks/detached/$pg" "$HOME/.amux/locks/detached/$pid"; do
+    [ -f "$f" ] && { sed -n 1p "$f"; return 0; }
+  done
+  for f in "$HOME"/.amux/locks/land-*.q/*-"$pid"; do
+    [ -f "$f" ] && { sed -n 1p "$f"; return 0; }
+  done
+  for lk in "$HOME"/.amux/locks/land-*; do
+    [ -f "$lk/pid" ] && [ "$(cat "$lk/pid" 2>/dev/null)" = "$pid" ] && { cat "$lk/who" 2>/dev/null; return 0; }
+  done
+  return 0
+}
+
 # _land_cancel [pid]: stop a detached `amux land` (whole process group: the
 # wrapper, the land, its git push and hook). With a pid, that one (it must be
 # this session's). Without, every detached land of this session started from
@@ -7393,6 +7411,19 @@ _land_cancel() {
       [ -n "$pcwd" ] || continue
       ptop="$(git -C "$pcwd" rev-parse --show-toplevel 2>/dev/null || echo "$pcwd")"
       [ "$ptop" = "$here" ] || continue
+      # A SHARED checkout runs every lane's lands from the same cwd, so the cwd
+      # says nothing about whose land it is: gtm-videos' --cancel stopped
+      # mixpeek-override's two detached lands (plan v42 and the minimal-spend
+      # amendment) at 20:14Z on 2026-10-02 and nobody was told for 2 h 40 min.
+      # Stop it only when land's own records say it is ours; a land with no
+      # owner on record is listed and left alone.
+      local powner
+      powner="$(_land_pid_owner "$pid" "$pgid")"
+      if [ "$powner" != "$me" ]; then
+        echo "amux land: land pid $pid (process group $pgid) in $here belongs to ${powner:-an owner nobody recorded}; not cancelled" >&2
+        printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "left land pid $pid (pgid $pgid, $here) alone: owner ${powner:-unrecorded}, not $me" >> "$HOME/.amux/logs/land.log"
+        continue
+      fi
       kill -TERM -- "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
       sleep 3
       kill -0 "$pid" 2>/dev/null && { kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; }
@@ -7441,7 +7472,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.30"
+LAND_BEHAVIOR_VERSION="2026-10-02.31"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
