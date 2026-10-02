@@ -649,7 +649,26 @@ fn sse_message_invalidation_refreshes_each_visible_message_surface() {
     let start = app
         .find("if (key === 'messages')")
         .expect("SSE invalidation must recognize committed Messages writes");
-    let body = &app[start..start + 1100.min(app.len() - start)];
+    // The whole `{ ... }` block, by brace depth. A fixed 1100-char window broke
+    // when e53c57d5 added the uncertain-receipt recheck inside the block and
+    // pushed _loadCmdHistoryFromServer() past the cut, a red on a correct file.
+    let open = start + app[start..].find('{').expect("block opens");
+    let mut depth = 0usize;
+    let mut end = app.len();
+    for (i, ch) in app[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &app[start..end];
     for needle in [
         "_messagesLoad(true)",
         "_peekMessagesLoad()",
