@@ -13672,7 +13672,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1224';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1225';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -16322,7 +16322,7 @@ const _NON_HUMAN_PROMPT_MARKS = [
   ['Another Claude session sent a message:', 'session'],
   ['<cross-session-message', 'session'],   // same delivery, tag-first shape
   ['[UNVERIFIED INJECTION:', 'unstamped'], // raw-tmux fallback when server was unreachable
-  ['[Request interrupted by user]', 'amux'], // Claude Code system chrome
+  ['[Request interrupted by user', 'amux'], // Claude Code system chrome, incl. "... for tool use]"
   ['[amux auto-pickup]', 'amux'],
   ['[amux staged-guard]', 'amux'],
   ['[amux]', 'amux'],               // idle nudges, advance nudges, digests
@@ -16345,6 +16345,18 @@ const _NON_HUMAN_PROMPT_MARKS = [
   ['[capture]', 'amux'],
 ];
 
+// TEXT THE PROVIDER ITSELF SUBMITS AS A PROMPT (2026-10-02 audit). Claude Code
+// auto-resumes after a usage-limit reset, continues an owner-set /goal, prints a
+// skill's header and the queued-message hint; none is typed by a person. The
+// server recorded 12 of its 21 "typed into the pane" rows (delivery=pane,
+// kind human) from the usage-limit text alone, so a matching ledger row is
+// WRONG evidence here. These are checked before the rows for that reason.
+const _PROVIDER_PROMPT_MARKS = [
+  'Your claude.ai usage limit has reset',
+  'Goal check-in:',
+  'Base directory for this skill:',
+  'Press up to edit queued messages',
+];
 // Normalize terminal wrapping without losing provenance. A different worker's
 // "continue" must never classify this worker's command.
 function _peekGeminiPrompts() {
@@ -16404,6 +16416,7 @@ async function _peekExtendKindHints(sess) {
 function _classifyPromptKind(promptText) {
   const clean = _peekPromptNormalized(promptText);
   if (!clean) return 'unknown';
+  if (_PROVIDER_PROMPT_MARKS.some(mark => clean.startsWith(mark))) return 'amux';
   // The Messages tab is a fetched snapshot; cmdHistoryAdd is the immediate
   // record of a prompt submitted while this terminal is open. Using the
   // snapshot EXCLUSIVELY made every new prompt "Unclassified" until Messages
@@ -16447,6 +16460,12 @@ function _classifyPromptKind(promptText) {
   if (/^[ \t\u00a0]*[❯›>]?[ \t\u00a0]*\[\d{1,2}:\d{2}(?:\s*[AP]M)?\]\s/i.test(String(promptText || ''))) {
     return 'human';
   }
+  // An attachment the owner uploaded. Files under ~/.amux/uploads are written
+  // only by the dashboard composer and the iPhone share sheet; a peer or the
+  // harness quoting one carries its own marker and matched above. Before
+  // f42b06ff a share wrote no history row, so "add these to my cal
+  // @/Users/ethan/.amux/uploads/..." had no other signal and read Unclassified.
+  if (/(?:^|\s)@\/\S*\/\.amux\/uploads\//.test(clean)) return 'human';
   // No row, no marker, no stamp: absence from a loaded history window is not
   // evidence of human authorship, and this is the case that genuinely cannot
   // be told.
@@ -17410,11 +17429,24 @@ function _peekFilterSummary() {
   const content = _peekMsgNavContent === 'any' ? '' : _PEEK_CONTENT_LABELS[_peekMsgNavContent];
   return [source, content].filter(Boolean).join(' · ') || 'All messages';
 }
+// A board reference is PREFIX-NUMBER where the prefix is one this board uses.
+// The old /[A-Z]{2,8}-\d+/ missed real prefixes with digits (BE1-, AG4GM-) and
+// matched UTF-8, SHA-256 and GPT-4. Before the board has loaded, any shape
+// with a letter in the prefix counts, so the filter still answers.
+function _peekHasBoardRef(text) {
+  const prefixes = new Set((typeof boardItems !== 'undefined' && Array.isArray(boardItems) ? boardItems : [])
+    .map(item => String(item?.id || '').replace(/-\d+$/, '')).filter(Boolean));
+  for (const m of String(text || '').matchAll(/\b([A-Z0-9]{2,8})-(\d{1,6})\b/g)) {
+    if (!/[A-Z]/.test(m[1])) continue;
+    if (!prefixes.size || prefixes.has(m[1])) return true;
+  }
+  return false;
+}
 // Both navigation and Find select message blocks with the same predicate.
 // Content filters inspect actual references, never guesses about task intent.
 function _peekPromptMatchesFilters(el) {
   if (!el || (_peekMsgNavKind !== 'all' && el.dataset.msgKind !== _peekMsgNavKind)) return false;
-  if (_peekMsgNavContent === 'board') return /\b[A-Z]{2,8}-\d{1,6}\b/.test(el.textContent);
+  if (_peekMsgNavContent === 'board') return _peekHasBoardRef(el.textContent);
   if (_peekMsgNavContent === 'files') return !!el.querySelector('.file-link, .md-link');
   if (_peekMsgNavContent === 'links') return !!el.querySelector('a[href^="https://"], a[href^="http://"]');
   return true;

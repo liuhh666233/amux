@@ -133,6 +133,32 @@ const INJECTED_PREFIXES: [&str; 6] = [
     "<user-prompt-submit-hook",
 ];
 
+/// Prompts Claude Code itself submits (2026-10-02 audit, AMUX-5501). Measured
+/// on the live ledger: 12 of the 21 rows ever recorded here were the usage-limit
+/// auto-resume, each one a Human badge on text no person wrote. Compared
+/// lowercase, after the paste wrapper is removed.
+const PROVIDER_PREFIXES: [&str; 6] = [
+    "your claude.ai usage limit has reset",
+    "goal check-in:",
+    "base directory for this skill:",
+    "press up to edit queued messages",
+    "[request interrupted by user",
+    "this session is being continued from a previous conversation",
+];
+
+/// A long paste reaches the hook wrapped as `<pasted_content id="..">...`, so
+/// the stamp a peer envelope starts with sits behind the wrapper. One such
+/// peer message was recorded as Human before this.
+fn unwrap_paste(lower: &str) -> &str {
+    let t = lower.trim_start();
+    if let Some(rest) = t.strip_prefix("<pasted_content") {
+        if let Some(end) = rest.find('>') {
+            return rest[end + 1..].trim_start();
+        }
+    }
+    t
+}
+
 pub(crate) fn same_text(a: &str, b: &str) -> bool {
     if a == b {
         return true;
@@ -148,8 +174,11 @@ pub(crate) fn classify(prompt: &str, delivered: &[String]) -> PaneVerdict {
     if norm.is_empty() {
         return PaneVerdict::SkipEmpty;
     }
-    let lower = norm.to_ascii_lowercase();
-    if INJECTED_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+    let lower_full = norm.to_ascii_lowercase();
+    let lower = unwrap_paste(&lower_full);
+    if INJECTED_PREFIXES.iter().any(|p| lower.starts_with(p))
+        || PROVIDER_PREFIXES.iter().any(|p| lower.starts_with(p))
+    {
         return PaneVerdict::SkipInjected;
     }
     // Every amux-authored delivery that is not the sender's own text carries
@@ -308,6 +337,28 @@ mod tests {
             classify("yes", &d(&["yes"])),
             PaneVerdict::SkipAmuxDelivered
         );
+    }
+
+    /// The audit's real rows (AMUX-5501): every one of these was recorded as
+    /// a human-typed prompt on the live ledger.
+    #[test]
+    fn provider_prompts_and_wrapped_peer_envelopes_are_not_recorded() {
+        for prompt in [
+            "Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.",
+            "Press up to edit queued messages",
+            "Goal check-in: «Use the orchestrate skill on research/goal-specs/12.md»",
+            "Base directory for this skill: /Users/ethan/.claude/skills/chrome-cdp",
+            "[Request interrupted by user for tool use]",
+        ] {
+            assert_eq!(classify(prompt, &[]), PaneVerdict::SkipInjected, "{prompt}");
+        }
+        assert_eq!(
+            classify("<pasted_content id=\"4bae\"> [amux-origin: mixpeek-override — server-verified] Ask: rerun", &[]),
+            PaneVerdict::SkipAmuxStamped
+        );
+        // A person's own words still record, wrapped or not.
+        assert_eq!(classify("[05:13 PM] whats the bottleneck?", &[]), PaneVerdict::Record);
+        assert_eq!(classify("<pasted_content id=\"9\"> my long notes </pasted_content>", &[]), PaneVerdict::Record);
     }
 
     #[test]

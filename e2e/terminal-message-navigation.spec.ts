@@ -719,3 +719,43 @@ test('Gemini peer messages remain searchable with the Workers terminal filter', 
   }, raw);
   expect(nonGemini).toBe(0);
 });
+
+// AMUX-5501 audit (2026-10-02): real prompts from live panes that the Filters
+// popover mis-sorted. The usage-limit resume also has a WRONG ledger row
+// (delivery=pane, type user -> Human) that must not win.
+test('provider prompts are Harness even with a Human row, owner uploads are Human, the rest stays honest', async ({ page }) => {
+  const kinds = await page.evaluate(() => {
+    const w = window as any;
+    w.eval('peekSession = "cls-probe"');
+    const resume = 'Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.';
+    w.eval('_cmdHistory').push({ session: 'cls-probe', text: resume, type: 'user' });
+    const out = [
+      w._classifyPromptKind(resume),
+      w._classifyPromptKind('[Request interrupted by user for tool use]'),
+      w._classifyPromptKind('Goal check-in: «Use the orchestrate skill on research/goal-specs/12-unified-platform-MIGRATION-PLAN.md»'),
+      w._classifyPromptKind('Base directory for this skill: /Users/ethan/.claude/skills/chrome-cdp # chrome-cdp'),
+      w._classifyPromptKind('add these to my cal @/Users/ethan/.amux/uploads/ed317bd75485-upload'),
+      w._classifyPromptKind('@/Users/ethan/.amux/uploads/e80cf4ea8cfe-upload'),
+      w._classifyPromptKind('[amux-origin: gs12-mvs — server-verified] see @/Users/ethan/.amux/uploads/a.png'),
+      w._classifyPromptKind('now it says this worker is blocked'),
+    ];
+    w.eval('_cmdHistory').pop();
+    return out;
+  });
+  expect(kinds).toEqual(['amux', 'amux', 'amux', 'amux', 'human', 'human', 'session', 'unknown']);
+});
+
+test('Board references are real board prefixes, digits included, not UTF-8 or SHA-256', async ({ page }) => {
+  const r = await page.evaluate(() => {
+    const w = window as any;
+    const saved = w.eval('boardItems');
+    w.eval('boardItems = [{ id: "BE1-3" }, { id: "AMUX-5501" }, { id: "GC-57" }]');
+    const out = [w._peekHasBoardRef('blocked on BE1-12 first'), w._peekHasBoardRef('see AMUX-5490 and GC-5'),
+      w._peekHasBoardRef('encode as UTF-8 and hash with SHA-256 on GPT-4')];
+    w.eval('boardItems = []');
+    out.push(w._peekHasBoardRef('see AMUX-5490'));
+    w.eval('boardItems').push(...saved);
+    return out;
+  });
+  expect(r).toEqual([true, true, false, true]);
+});
