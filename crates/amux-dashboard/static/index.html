@@ -1219,6 +1219,21 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     </div>
     <div class="map-loc-pane" id="map-history-pane" hidden>
       <div class="map-loc-native" id="map-loc-native" hidden></div>
+      <div class="map-loc-views" role="group" aria-label="Location history view">
+        <button type="button" class="btn map-loc-view active" id="map-loc-view-day" aria-pressed="true" onclick="_locView('day')">Day</button>
+        <button type="button" class="btn map-loc-view" id="map-loc-view-stats" aria-pressed="false" onclick="_locView('stats')">Stats</button>
+        <button type="button" class="btn map-loc-view" id="map-loc-heat" aria-pressed="false" onclick="_locHeatToggle()">Heatmap</button>
+      </div>
+      <div class="map-loc-stats" id="map-loc-stats" hidden>
+        <select id="map-loc-period" class="input map-loc-period" onchange="_locStats()" aria-label="Period">
+          <option value="week">Last 7 days</option>
+          <option value="month" selected>Last 30 days</option>
+          <option value="year">Last 12 months</option>
+          <option value="all">All time</option>
+        </select>
+        <div id="map-loc-stats-body"></div>
+      </div>
+      <div class="map-loc-daypane" id="map-loc-daypane">
       <div class="map-loc-day">
         <button type="button" class="btn map-loc-step" onclick="_locShift(-1)" aria-label="Previous day">&#x2039;</button>
         <input type="date" id="map-loc-date" class="input map-loc-date" onchange="_locSetDay(this.value)" aria-label="Day">
@@ -1234,7 +1249,14 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
       </details>
       <div class="map-loc-summary" id="map-loc-summary"></div>
+      <div class="map-loc-export">
+        <span>Raw export</span>
+        <button type="button" class="btn" onclick="_locExport('geojson')">GeoJSON</button>
+        <button type="button" class="btn" onclick="_locExport('gpx')">GPX</button>
+        <button type="button" class="btn" onclick="_locExport('csv')">CSV</button>
+      </div>
       <div class="map-loc-list" id="map-loc-list"></div>
+      </div>
     </div>
     <div class="map-pins-pane" id="map-pins-pane">
     <div class="map-geocoder-wrap" id="map-geocoder-wrap">

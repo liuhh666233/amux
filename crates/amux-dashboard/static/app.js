@@ -13657,7 +13657,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1214';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1215';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -30992,8 +30992,10 @@ function _mapSidebarTab(tab) {
     _locNative('status');
     if (!_locDayStart) _locSetDay('');
     else _locLoad();
-  } else if (_locLayer && _map) {
-    _map.removeLayer(_locLayer); _locLayer = null;
+  } else if (_map) {
+    if (_locLayer) { _map.removeLayer(_locLayer); _locLayer = null; }
+    if (_locHeatLayer) { _map.removeLayer(_locHeatLayer); _locHeatLayer = null; }
+    if (_locHeatOn) { _locHeatOn = false; const b = document.getElementById('map-loc-heat'); if (b) { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); } }
   }
 }
 function _locDateValue(d) {
@@ -31127,9 +31129,156 @@ function _locFocus(i) {
     setTimeout(function() { if (_map) _map.invalidateSize(); }, 310);
   }
 }
+// Stats, heatmap and raw export (raw capture, 2026-10-01). Stats and the
+// heatmap read the server's cleaned view; export returns every raw field.
+let _locViewMode = 'day';
+let _locHeatOn = false;
+let _locHeatLayer = null;
+let _locStatsLoading = 0;
+function _locView(v) {
+  _locViewMode = v === 'stats' ? 'stats' : 'day';
+  for (const [id, on] of [['map-loc-view-day', _locViewMode === 'day'], ['map-loc-view-stats', _locViewMode === 'stats']]) {
+    const b = document.getElementById(id);
+    if (b) { b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); }
+  }
+  const day = document.getElementById('map-loc-daypane'), stats = document.getElementById('map-loc-stats');
+  if (day) day.hidden = _locViewMode !== 'day';
+  if (stats) stats.hidden = _locViewMode !== 'stats';
+  if (_locViewMode === 'stats') _locStats();
+}
+function _locPeriod() {
+  const p = document.getElementById('map-loc-period')?.value || 'month';
+  const to = Math.ceil(Date.now() / 1000);
+  const days = {week: 7, month: 30, year: 365, all: 3650}[p] || 30;
+  return {from: to - days * 86400, to, bucket: p === 'year' || p === 'all' ? 'month' : 'day'};
+}
+async function _locStats() {
+  const body = document.getElementById('map-loc-stats-body');
+  if (!body) return;
+  const {from, to, bucket} = _locPeriod();
+  const ticket = ++_locStatsLoading;
+  body.textContent = 'Loading…';
+  try {
+    const tz = -new Date().getTimezoneOffset();
+    const r = await fetch(API + '/api/map/location/stats?from=' + from + '&to=' + to + '&bucket=' + bucket + '&tz_offset_min=' + tz);
+    const d = await r.json().catch(() => ({}));
+    if (ticket !== _locStatsLoading) return;
+    if (!r.ok || d.measured !== true) throw new Error(d.why_unmeasured || d.error || ('HTTP ' + r.status));
+    _locStatsRender(d);
+  } catch (e) {
+    if (ticket !== _locStatsLoading) return;
+    body.textContent = 'Could not load stats: ' + (e.message || e);
+  }
+}
+function _locSpeed(mps) {
+  return mps ? (mps * 3.6).toFixed(1) + ' km/h' : '';
+}
+function _locStatsRender(d) {
+  const body = document.getElementById('map-loc-stats-body');
+  if (!body) return;
+  if (!d.n_considered) {
+    body.innerHTML = '<div class="map-loc-empty">No points recorded in this period.</div>';
+    return;
+  }
+  const totals = d.totals || {};
+  const modes = Object.keys(totals).sort((a, b) => (totals[b].distance_m || 0) - (totals[a].distance_m || 0));
+  const allDist = modes.reduce((a, k) => a + (totals[k].distance_m || 0), 0);
+  const allTime = modes.reduce((a, k) => a + (totals[k].moving_s || 0), 0);
+  let h = '<div class="map-loc-summary">' + d.n_considered + ' points · ' + (d.days_with_data || 0) + ' day' + (d.days_with_data === 1 ? '' : 's')
+    + ' · ' + (_locFmtDist(allDist) || '0 m') + ' · ' + _locFmtDur(allTime) + ' moving</div>';
+  h += '<div class="map-loc-stat-hdr">By mode</div>';
+  h += modes.map(k => {
+    const m = _LOC_MODE[k] || _LOC_MODE.unknown, t = totals[k];
+    const pct = allDist ? Math.max(2, Math.round(100 * (t.distance_m || 0) / allDist)) : 0;
+    return '<div class="map-loc-stat-row"><span class="map-loc-row-title">' + m.icon + ' ' + esc(m.label) + '</span>'
+      + '<span class="map-loc-row-meta">' + esc([_locFmtDist(t.distance_m), _locFmtDur(t.moving_s), t.trips + ' trip' + (t.trips === 1 ? '' : 's'), _locSpeed(t.avg_speed_mps)].filter(Boolean).join(' · ')) + '</span>'
+      + '<span class="map-loc-bar"><span style="width:' + pct + '%;background:' + m.color + '"></span></span></div>';
+  }).join('');
+  const lt = d.longest_trip;
+  if (lt) {
+    const m = _LOC_MODE[lt.mode] || _LOC_MODE.unknown;
+    h += '<div class="map-loc-stat-hdr">Longest trip</div>'
+      + '<button type="button" class="map-loc-row" onclick="_locOpenDay(' + lt.start + ')"><span class="map-loc-dot" style="background:' + m.color + '"></span>'
+      + '<span class="map-loc-row-main"><span class="map-loc-row-title">' + m.icon + ' ' + esc(m.label) + ' · ' + esc(_locFmtDist(lt.distance_m)) + '</span>'
+      + '<span class="map-loc-row-meta">' + esc(new Date(lt.start * 1000).toLocaleDateString([], {month: 'short', day: 'numeric'}) + ' · ' + _locFmtTime(lt.start) + ' · ' + _locFmtDur(lt.duration_s)) + '</span></span></button>';
+  }
+  const place = (p, i, kind) => '<button type="button" class="map-loc-row" onclick="_locGoPlace(' + p.lat + ',' + p.lon + ')">'
+    + '<span class="map-loc-dot" style="background:' + _LOC_MODE.stop.color + '"></span><span class="map-loc-row-main">'
+    + '<span class="map-loc-row-title">' + (kind === 'new' ? 'New place' : 'Place ' + (i + 1)) + ' · ' + esc(_locFmtDur(p.time_s)) + '</span>'
+    + '<span class="map-loc-row-meta">' + p.visits + ' visit' + (p.visits === 1 ? '' : 's') + ' · ' + p.lat.toFixed(4) + ', ' + p.lon.toFixed(4) + '</span></span></button>';
+  const top = d.top_places || [], fresh = d.new_places || [];
+  if (top.length) h += '<div class="map-loc-stat-hdr">Top places by time</div>' + top.map((p, i) => place(p, i, 'top')).join('');
+  h += '<div class="map-loc-stat-hdr">New places: ' + fresh.length + '</div>' + fresh.slice(0, 10).map((p, i) => place(p, i, 'new')).join('');
+  const buckets = d.buckets || [];
+  if (buckets.length) {
+    const sum = b => Object.values(b.modes || {}).reduce((a, t) => a + (t.distance_m || 0), 0);
+    const max = Math.max(1, ...buckets.map(sum));
+    h += '<div class="map-loc-stat-hdr">Distance per ' + esc(d.bucket || 'day') + '</div>'
+      + buckets.slice().reverse().map(b => '<div class="map-loc-stat-row"><span class="map-loc-row-meta">' + esc(b.bucket) + ' · ' + esc(_locFmtDist(sum(b)) || '0 m') + '</span>'
+        + '<span class="map-loc-bar">' + Object.entries(b.modes || {}).map(([k, t]) => '<span style="width:' + (100 * (t.distance_m || 0) / max) + '%;background:' + (_LOC_MODE[k] || _LOC_MODE.unknown).color + '"></span>').join('') + '</span></div>').join('');
+  }
+  body.innerHTML = h;
+}
+function _locOpenDay(ts) {
+  const d = new Date(ts * 1000); d.setHours(0, 0, 0, 0);
+  _locView('day');
+  _locSetDay(_locDateValue(d));
+}
+function _locGoPlace(lat, lon) {
+  if (!_map) return;
+  _map.setView([lat, lon], Math.max(_map.getZoom(), 16));
+  if (window.innerWidth <= 600 && _mapSettings.sidebarOpen) {
+    _mapSettings.sidebarOpen = false;
+    _mapApplySidebarState();
+    setTimeout(function() { if (_map) _map.invalidateSize(); }, 310);
+  }
+}
+async function _locHeatToggle() {
+  _locHeatOn = !_locHeatOn;
+  const b = document.getElementById('map-loc-heat');
+  if (b) { b.classList.toggle('active', _locHeatOn); b.setAttribute('aria-pressed', _locHeatOn ? 'true' : 'false'); }
+  if (!_locHeatOn) {
+    if (_locHeatLayer && _map) _map.removeLayer(_locHeatLayer);
+    _locHeatLayer = null;
+    return;
+  }
+  try {
+    const r = await fetch(API + '/api/map/location/heatmap?cell_m=50');
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.measured !== true) throw new Error(d.why_unmeasured || d.error || ('HTTP ' + r.status));
+    if (!_locHeatOn) return;
+    _locHeatDraw(d);
+    showToast(d.n_considered ? (d.n_cells + ' places on the heatmap' + (d.truncated ? ' (busiest shown)' : '')) : 'Nothing recorded yet');
+  } catch (e) {
+    showToast('Heatmap failed: ' + (e.message || e));
+    _locHeatOn = false;
+    if (b) { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); }
+  }
+}
+function _locHeatDraw(d) {
+  if (typeof L === 'undefined' || !_map) return;
+  if (_locHeatLayer) _map.removeLayer(_locHeatLayer);
+  const cells = Array.isArray(d.cells) ? d.cells : [];
+  const max = Math.log(1 + Math.max(1, ...cells.map(c => c[2])));
+  const renderer = L.canvas({padding: 0.5});
+  _locHeatLayer = L.featureGroup();
+  for (const [lat, lon, n] of cells) {
+    const k = Math.log(1 + n) / max;
+    L.circleMarker([lat, lon], {renderer, radius: 4 + 4 * k, stroke: false, fillColor: k > 0.66 ? '#f85149' : k > 0.33 ? '#f0883e' : '#e3b341', fillOpacity: 0.25 + 0.5 * k, interactive: false}).addTo(_locHeatLayer);
+  }
+  _locHeatLayer.addTo(_map);
+}
+function _locExport(format) {
+  const {from, to} = _locWindow();
+  const a = document.createElement('a');
+  a.href = API + '/api/map/location/export?from=' + from + '&to=' + to + '&format=' + encodeURIComponent(format);
+  a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
+  showToast('Exporting raw points as ' + format.toUpperCase());
+}
 // Native bridge (iPhone app only). The app answers by calling
 // window.__amuxNativeLocation(status) with {enabled, authorization, motion,
-// precise, pending, last_upload, last_error}.
+// precise, pending, mode, delivered, stored, motion_pending, last_upload, last_error}.
 function _locNativeAvailable() {
   return !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.amuxLocation);
 }
@@ -31148,8 +31297,17 @@ window.__amuxNativeLocation = function(st) {
     + (st.enabled ? 'Turn off' : 'Turn on') + '</button></div>'
     + '<div class="map-loc-native-meta">Recording: ' + (st.enabled ? 'on' : 'off') + ' · Location: ' + esc(auth)
     + (st.precise === false ? ' (approximate: turn on Precise Location)' : '')
-    + ' · Motion: ' + esc(st.motion || 'unknown') + '<br>Waiting to upload: ' + (st.pending || 0) + ' · Last upload: ' + esc(last)
+    + ' · Motion: ' + esc(st.motion || 'unknown')
+    + '<br>Fixes delivered / stored: ' + (st.delivered || 0) + ' / ' + (st.stored || 0)
+    + ((st.delivered || 0) !== (st.stored || 0) ? ' <b>(' + ((st.delivered || 0) - (st.stored || 0)) + ' not stored)</b>' : '')
+    + '<br>Waiting to upload: ' + (st.pending || 0) + ' · Last upload: ' + esc(last)
     + (st.last_error ? '<br>Last error: ' + esc(st.last_error) : '') + '</div>'
+    + '<div class="map-loc-views" role="group" aria-label="Recording detail">'
+    + '<button type="button" class="btn map-loc-view' + (st.mode !== 'saver' ? ' active' : '') + '" aria-pressed="' + (st.mode !== 'saver') + '" onclick="_locNative(\'full\')">Full detail</button>'
+    + '<button type="button" class="btn map-loc-view' + (st.mode === 'saver' ? ' active' : '') + '" aria-pressed="' + (st.mode === 'saver') + '" onclick="_locNative(\'saver\')">Battery saver</button></div>'
+    + '<div class="map-loc-native-meta">' + (st.mode === 'saver'
+      ? 'Battery saver: only significant moves and stops, about 1 to 2% a day.'
+      : 'Full detail: every fix, about one a second while moving (an estimate of 5 to 10% battery per hour moving).') + '</div>'
     + (st.enabled && (st.pending || 0) > 0 ? '<button type="button" class="btn" onclick="_locNative(\'upload\')">Upload now</button>' : '');
 };
 setTimeout(() => {

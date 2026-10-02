@@ -7816,6 +7816,21 @@ body.light .bd-answer-head { color: #bc4c00; }
 .map-tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 .map-pins-pane, .map-loc-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .map-pins-pane[hidden], .map-loc-pane[hidden] { display: none; }
+.map-loc-daypane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.map-loc-stats { flex: 1; min-height: 0; overflow-y: auto; }
+.map-loc-daypane[hidden], .map-loc-stats[hidden] { display: none; }
+.map-loc-views { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+.map-loc-view.active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.map-loc-period { width: 100%; margin-bottom: 6px; }
+.map-loc-stat-hdr { font-size: 0.75rem; font-weight: 600; color: var(--muted, #8b949e); text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px; }
+.map-loc-stat-row { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
+.map-loc-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--border, #30363d); }
+.map-loc-bar > span { display: block; height: 100%; }
+.map-loc-export { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 6px 0; font-size: 0.8rem; }
+@media (max-width: 600px) {
+  .map-loc-view, .map-loc-export .btn { min-height: 44px; min-width: 44px; }
+  .map-loc-period { min-height: 44px; }
+}
 .map-loc-native { margin: 8px 10px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 0.78rem; display: flex; flex-direction: column; gap: 6px; }
 .map-loc-native[hidden] { display: none; }
 .map-loc-native .map-loc-native-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
