@@ -6719,7 +6719,7 @@ _land_precheck() {
   git rev-parse -q --verify "$remote/$branch^{commit}" >/dev/null 2>&1 || {
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured: no $remote/$branch" >> "$log"; return 0; }
   t0=$(date +%s); rc=0
-  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="enqueue" perl -e 'alarm shift; exec @ARGV or exit 127' "$budget" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
+  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="enqueue" perl -e "$_LAND_PC_TIMEOUT_PL" "$budget" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
   [ -n "$_pc_tmp" ] && rm -rf -- "${_pc_tmp:?}"
   full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-precheck.log"
   mkdir -p "${full%/*}"; printf '%s\n' "$out" > "$full"
@@ -6733,6 +6733,19 @@ _land_precheck() {
   echo "amux land: refused before queueing: the repository's land precheck failed on this range (full output $full). Fix the commits and run amux land again." >&2
   return 1
 }
+
+# Wall-clock bound for the land precheck. `alarm; exec` signalled only the
+# check's own pid, while `$(...)` waited for every child still holding the
+# pipe, so a 420 s budget ran 21 min at load 54 (2026-10-02 13:09-13:30Z,
+# gs12-gates' composed batch of 15). The check now runs in its own process
+# group, and on timeout the WHOLE group gets TERM then KILL, so the capture
+# returns. Exit status: the check's own, 128+signal, or 142 on timeout.
+_LAND_PC_TIMEOUT_PL='my $t = shift; my $pid = fork;
+die "fork: $!" unless defined $pid;
+if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 }
+$SIG{ALRM} = sub { kill "TERM", -$pid; sleep 3; kill "KILL", -$pid; waitpid($pid, 0); exit 142 };
+alarm $t; waitpid($pid, 0); alarm 0;
+exit(($? & 127) ? 128 + ($? & 127) : ($? >> 8));'
 
 # _land_precheck_resolve <remote/branch>: sets _pc_chk (command to run) and
 # _pc_tmp (a private dir to remove afterwards, or ""). Order: $AMUX_LAND_PRECHECK,
@@ -6797,7 +6810,7 @@ _land_precheck_exec() {
   _land_precheck_resolve "$1"
   chk="$_pc_chk"
   [ -n "$chk" ] || { printf 'land-precheck: none found in %s or this checkout\n' "$1"; return 2; }
-  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="batch" perl -e 'alarm shift; exec @ARGV or exit 127' "$budget" $chk "$1" "$(git rev-parse "$2")" 2>&1)" || rc=$?
+  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="batch" perl -e "$_LAND_PC_TIMEOUT_PL" "$budget" $chk "$1" "$(git rev-parse "$2")" 2>&1)" || rc=$?
   [ -n "$_pc_tmp" ] && rm -rf -- "${_pc_tmp:?}"
   printf '%s\n' "$out"
   case "$(_land_precheck_verdict "$rc" "$out")" in pass) return 0 ;; unmeasured) return 2 ;; *) return 1 ;; esac
@@ -7133,7 +7146,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.19"
+LAND_BEHAVIOR_VERSION="2026-10-02.20"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
