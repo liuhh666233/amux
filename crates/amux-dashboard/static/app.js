@@ -13672,7 +13672,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1225';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1226';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -18008,7 +18008,7 @@ function renderPeekFiles() {
     let status = '';
     const failHtml = failed ? `<span style="color:var(--red)">${failed} failed</span>` : '';
     if (uploading > 0) {
-      const avgPct = peekFiles.filter(f => !f.path && !f.error).reduce((a, f) => a + (f.totalChunks ? f.chunk / f.totalChunks : 0), 0) / (uploading || 1);
+      const avgPct = peekFiles.filter(f => !f.path && !f.error).reduce((a, f) => a + _uploadPct(f) / 100, 0) / (uploading || 1);
       status = `<span style="color:var(--dim)">${done}/${peekFiles.length} done (${Math.round(avgPct * 100)}%)${queued ? ', ' + queued + ' queued' : ''}</span>` + failHtml;
     } else if (failed > 0) {
       status = failHtml;
@@ -18047,7 +18047,7 @@ function _renderPeekFileChips() {
       statusHtml = `<span class="chip-err" title="${esc(f.error)}">!</span>` +
         `<button type="button" class="chip-retry" onclick="event.stopPropagation();retryPeekFile(${i})" title="Retry upload">Retry</button>`;
     } else if (isUploading) {
-      const pct = f.totalChunks ? Math.round(f.chunk / f.totalChunks * 100) : 0;
+      const pct = _uploadPct(f);
       statusHtml = `<span style="color:var(--dim);font-size:0.6rem;">${esc(f.status || (pct + '%'))}</span>`;
     } else {
       statusHtml = `<span style="color:var(--green);font-size:0.75rem;margin-right:2px;">✓</span>`;
@@ -18221,7 +18221,7 @@ function _renderCardFileChips(name) {
     if (f.path) status = `<span style="color:var(--green);font-size:0.75rem;">✓</span>`;
     else if (f.error) status = `<span class="chip-err" title="${esc(f.error)}">!</span>` +
       `<button type="button" class="chip-retry" onclick="event.stopPropagation();retryCardFile('${name}',${i})" title="Retry upload">Retry</button>`;
-    else { const pct = f.totalChunks ? Math.round(f.chunk / f.totalChunks * 100) : 0;
+    else { const pct = _uploadPct(f);
            status = `<span style="color:var(--dim);font-size:0.6rem;">${esc(f.status || (pct + '%'))}</span>`; }
     // The × is on EVERY chip in EVERY state — an escape hatch that only exists
     // once an upload finishes is not one (the peek's own AMUX-85 lesson).
@@ -18344,9 +18344,19 @@ async function _queueAttachment(f, sink) {
     sink.render();
     _drainUploadQueue();
   } catch (error) {
+    _uploadStorageError('attachment-save-failed', error);
+    // The original File is still in memory: upload straight from it. The
+    // only thing lost is surviving a reload before the upload finishes.
+    if (f.file && typeof f.file.arrayBuffer === 'function' && !f.cancelled) {
+      f.noLocalCopy = true; f.stored = false; f.status = 'Queued (no local copy)';
+      _uploadDiagnostic(f, 'cache-fallback', Object.assign(new Error(String(error?.message || error)), {reason:'local_save_failed'}));
+      _uploadQueue.push({ f, sink });
+      sink.render();
+      _drainUploadQueue();
+      return;
+    }
     f.queued = false; f.error = 'Not saved locally — retry or keep the original file'; f.retryable = false;
     if (f.interactionId) _interactionFail(f.interactionId, f.error, false);
-    _uploadStorageError('attachment-save-failed', error);
     sink.render();
   }
 }
@@ -18367,9 +18377,11 @@ function _storedUploadFile(row) {
 }
 function _persistAttachment(f) {
   if (!f.id) return Promise.resolve();
+  // The local save already failed once; do not re-read the whole file per chunk.
+  if (f.noLocalCopy) return Promise.resolve();
   f.persistence = (f.persistence || Promise.resolve()).catch(() => {}).then(async () => {
     if (f.cancelled) return _idb.deleteUpload(f.id);
-    if (f.stored) return _idb.updateUpload(f.id, {path:f.path, url:f.url, uploadId:f.uploadId, nextChunk:f.nextChunk});
+    if (f.stored) return _idb.updateUpload(f.id, {path:f.path, url:f.url, uploadId:f.uploadId, nextChunk:f.nextChunk, uploadChunkSize:f.uploadChunkSize});
     await _idb.putUpload({id:f.id, session:f.session, surface:f.surface, name:f.name, file:f.file,
       dir:f.dir, path:f.path, url:f.url, isImage:f.isImage, sizeMB:f.sizeMB, totalChunks:f.totalChunks}, (done, total) => {
         f.status = 'Saving locally ' + Math.round(done / total * 100) + '%';
@@ -18483,11 +18495,87 @@ async function uploadAndAttach(file, sink) {
 // array; since AMUX-3372 added card composers there are now several sinks, and it
 // is the only shape that works.
 const _UPLOAD_ATTEMPTS = 3;
+// PHONE UPLOADS STUCK AT 0% (AMUX-5504, Ethan 2026-10-02: a 40 MB video from the
+// iPhone app sat at "Uploading 0%"). upload/start answered three times and no
+// chunk ever reached the server, over a direct LAN link: one 5 MB fetch() body
+// per chunk, no progress inside it, and a fixed 60 s wall clock, so every
+// attempt died at 0 with nothing on screen. Now each chunk is read into memory
+// first (the same read the local save already proved works on that phone) and
+// sent with XMLHttpRequest, whose upload progress moves the chip byte by byte.
+// The deadline is a STALL timer (no progress for _UPLOAD_STALL_MS), not a total.
+// Chunk sizes all divide CHUNK_SIZE, the size of the pieces kept in IndexedDB,
+// so a file restored after a reload still slices on piece boundaries.
+const _UPLOAD_CHUNK_SIZES = [256 * 1024, 512 * 1024, 1024 * 1024, CHUNK_SIZE];
+const _UPLOAD_STALL_MS = 20000;
+const _UPLOAD_SLOW_BPS = 100 * 1024;
+const _UPLOAD_FAST_BPS = 2 * 1024 * 1024;
+const _UPLOAD_BPS_KEY = 'amux_upload_bps';
+// Start small; reuse 5 MB pieces only after an upload measured a fast link.
+function _uploadInitialChunkSize() {
+  let bps = 0;
+  try { bps = Number(localStorage.getItem(_UPLOAD_BPS_KEY)) || 0; } catch (e) {}
+  return bps >= _UPLOAD_FAST_BPS ? CHUNK_SIZE : 1024 * 1024;
+}
+function _uploadSmallerChunkSize(size) {
+  const at = _UPLOAD_CHUNK_SIZES.indexOf(size);
+  return at > 0 ? _UPLOAD_CHUNK_SIZES[at - 1] : null;
+}
+function _uploadPct(f) {
+  const size = f.file?.size || 0;
+  if (size && Number.isFinite(f.sent)) return Math.min(100, Math.round(f.sent / size * 100));
+  return f.totalChunks ? Math.round((f.chunk || 0) / f.totalChunks * 100) : 0;
+}
+function _fmtUploadMB(n) { return (n / (1024 * 1024)).toFixed(1); }
+function _uploadProgressStatus(f) {
+  const size = f.file?.size || 0;
+  let text = 'Uploading ' + _uploadPct(f) + '%';
+  if (size) text += ' \u00b7 ' + _fmtUploadMB(f.sent || 0) + ' / ' + _fmtUploadMB(size) + ' MB';
+  if (f.slow) text += ' \u00b7 slow connection';
+  return text;
+}
+// One chunk over XHR. Resolves with the parsed JSON; rejects retryable on a
+// stall (no progress for _UPLOAD_STALL_MS), a network error or a 5xx.
+function _uploadChunkXHR(f, url, body, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let timer = null, settled = false;
+    const done = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); f.aborter = null; fn(value); };
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        xhr.abort();
+        done(reject, Object.assign(new Error('Upload stalled: no progress for ' + Math.round(_UPLOAD_STALL_MS / 1000) + 's'),
+          {retryable:true, stalled:true}));
+      }, _UPLOAD_STALL_MS);
+    };
+    f.aborter = {abort:() => { xhr.abort(); done(reject, Object.assign(new Error('Upload cancelled'), {name:'AbortError'})); }};
+    xhr.open('PUT', url);
+    const headers = _authHeaders({'Content-Type':'application/octet-stream',
+      'X-Amux-Interaction-Id':f.interactionId + '_chunk_' + (f.chunk || 0), 'X-Amux-Command-Kind':'filesystem.upload'});
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    xhr.upload.onprogress = e => { arm(); onProgress(e.loaded); };
+    xhr.upload.onload = () => arm();   // body sent; the server's answer gets its own stall window
+    xhr.onerror = () => done(reject, Object.assign(new Error('Load failed'), {retryable:true}));
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || '{}'); } catch (e) {}
+      if (xhr.status < 200 || xhr.status >= 300 || data.error) {
+        const status = xhr.status;
+        done(reject, Object.assign(new Error(data.error || ('Upload request failed (HTTP ' + status + ')')),
+          {status, retryable:[408,425,429,500,502,503,504].includes(status) || status === 404}));
+      } else done(resolve, data);
+    };
+    arm();
+    xhr.send(body);
+  });
+}
 function _uploadDiagnostic(f, action, error) {
   fetch(API + '/api/client-debug', {method:'POST', headers:_authHeaders({'Content-Type':'application/json'}),
     signal:AbortSignal.timeout(5000),
     body:JSON.stringify({kind:'attachment-upload', action, phase:f.phase, attempt:f.attempt,
-      bytes:f.file?.size, completedChunks:f.chunk, totalChunks:f.totalChunks,
+      bytes:f.file?.size, completedChunks:f.chunk, totalChunks:f.uploadChunks || f.totalChunks,
+      chunkSize:f.uploadChunkSize, sentBytes:f.sent, stalled:!!error?.stalled, slow:!!f.slow,
+      noLocalCopy:!!f.noLocalCopy, reason:error?.reason,
       error:error?.message, httpStatus:error?.status, measured:true, ver:APP_VER})}).catch(()=>{});
 }
 // Deadline includes reading the response body. A header-only response used to
@@ -18546,22 +18634,43 @@ async function _runUpload(f, sink) {
       f.status = attempt === 1 ? 'Starting…' : 'Retrying ' + attempt + '/' + _UPLOAD_ATTEMPTS + '…';
       sink.render();
       try {
+        // The chunk size is fixed per upload ID (the server counts chunks at
+        // start). A legacy resume without a recorded size used CHUNK_SIZE.
+        if (!f.uploadChunkSize) f.uploadChunkSize = f.uploadId ? CHUNK_SIZE : _uploadInitialChunkSize();
+        const chunkSize = f.uploadChunkSize;
+        f.uploadChunks = Math.ceil(file.size / chunkSize) || 1;
         const start = f.uploadId ? {id:f.uploadId} : await _uploadRequest(f, 'start', API + '/api/upload/start', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({name:file.name, size:file.size, chunks:f.totalChunks})});
+          body:JSON.stringify({name:file.name, size:file.size, chunks:f.uploadChunks})});
         if (typeof start.id !== 'string' || !start.id) throw new Error('Server did not return an upload ID');
         f.uploadId = start.id;
         await _persistAttachment(f);
         const uploadUrl = API + '/api/upload/' + encodeURIComponent(start.id);
-        for (let i = f.nextChunk || 0; i < f.totalChunks; i++) {
+        const began = Date.now(), resumedAt = (f.nextChunk || 0) * chunkSize;
+        for (let i = f.nextChunk || 0; i < f.uploadChunks; i++) {
           if (f.cancelled) return;
-          f.status = 'Uploading ' + Math.round(i / f.totalChunks * 100) + '%'; sink.render();
-          await _uploadRequest(f, 'chunk', uploadUrl + '/chunk/' + i, {
-            method:'PUT', headers:{'Content-Type':'application/octet-stream'},
-            body:await file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, file.size))});
-          f.chunk = i + 1; f.nextChunk = i + 1;
-          _interactionSet(f.interactionId, {phase:'sending', progress:{completed:Math.min((i + 1) * CHUNK_SIZE, file.size), total:file.size}, feedback:{message:'Uploading'}});
+          const from = i * chunkSize, to = Math.min(from + chunkSize, file.size);
+          f.phase = 'chunk'; f.sent = from; f.status = _uploadProgressStatus(f); sink.render();
+          let bytes;
+          try { bytes = await (await file.slice(from, to)).arrayBuffer(); }
+          catch (readError) {
+            throw Object.assign(new Error('This device could not read the file: ' + (readError?.message || readError)),
+              {retryable:true, reason:'read_failed'});
+          }
+          if (f.cancelled) return;
+          await _uploadChunkXHR(f, uploadUrl + '/chunk/' + i, bytes, loaded => {
+            f.sent = from + Math.min(loaded, to - from);
+            const secs = (Date.now() - began) / 1000;
+            f.slow = secs > 3 && (f.sent - resumedAt) / secs < _UPLOAD_SLOW_BPS;
+            f.status = _uploadProgressStatus(f); sink.render();
+            _interactionSet(f.interactionId, {phase:'sending', progress:{completed:f.sent, total:file.size}, feedback:{message:'Uploading'}});
+          });
+          f.chunk = i + 1; f.nextChunk = i + 1; f.sent = to;
           await _persistAttachment(f);
+        }
+        const secs = (Date.now() - began) / 1000;
+        if (secs > 0.5 && file.size - resumedAt > chunkSize) {
+          try { localStorage.setItem(_UPLOAD_BPS_KEY, String(Math.round((file.size - resumedAt) / secs))); } catch (e) {}
         }
         if (f.cancelled) return;
         f.status = 'Finishing…'; sink.render();
@@ -18581,7 +18690,18 @@ async function _runUpload(f, sink) {
         if (f.cancelled) return;
         // Resume confirmed chunks on transient failure. A server restart can
         // discard its in-flight map; only that explicit 404 starts a fresh upload.
-        if (error.status === 404) { f.uploadId = null; f.nextChunk = 0; await _persistAttachment(f); }
+        if (error.status === 404) { f.uploadId = null; f.nextChunk = 0; f.uploadChunkSize = null; await _persistAttachment(f); }
+        // Nothing acknowledged yet and the link stalled: try smaller pieces.
+        // The server fixed the chunk COUNT at start, so this needs a new ID.
+        // With chunks already acknowledged, resume at the same size instead.
+        if (error.stalled && !(f.nextChunk > 0)) {
+          const smaller = _uploadSmallerChunkSize(f.uploadChunkSize);
+          if (smaller) {
+            _uploadDiagnostic(f, 'chunk-size-reduced', error);
+            f.uploadChunkSize = smaller; f.uploadId = null; f.nextChunk = 0; f.chunk = 0; f.sent = 0;
+            await _persistAttachment(f);
+          }
+        }
         const retryable = error.retryable === true || error instanceof TypeError || error.name === 'AbortError';
         f.retryable = retryable;
         _uploadDiagnostic(f, retryable && attempt < _UPLOAD_ATTEMPTS ? 'retry' : 'failed', error);

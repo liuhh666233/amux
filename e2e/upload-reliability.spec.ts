@@ -107,6 +107,10 @@ test('a server restart during chunk upload recovers with a fresh upload ID',asyn
 test('the timeout also covers a response body that never finishes',async({page})=>{
   await setup(page);await page.clock.install();
   await page.evaluate(()=>{
+    // Chunks use XMLHttpRequest (AMUX-5504); send them through the fake below.
+    (window as any).XMLHttpRequest=class{upload:any={};headers:any={};status=0;responseText='';method='';url='';onload:any;onerror:any;
+      open(m:string,u:string){this.method=m;this.url=u;} setRequestHeader(k:string,v:string){this.headers[k]=v;} abort(){}
+      send(body:any){window.fetch(this.url,{method:this.method,headers:this.headers,body}).then(async r=>{this.status=r.status;this.responseText=await r.text();this.upload.onload?.();this.onload?.();}).catch(()=>this.onerror?.());}};
     const orig=window.fetch;let first=true;
     window.fetch=async (url:any,options:any)=>{
       if(String(url).includes('/api/upload/')) {

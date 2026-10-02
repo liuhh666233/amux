@@ -14,6 +14,24 @@ import { test, expect } from '@playwright/test';
 // take their collaborators as parameters, so the fakes below are the real code
 // paths with the network and the sink swapped, not a paraphrase of them.
 
+// Chunks travel over XMLHttpRequest for upload progress (AMUX-5504). This
+// stand-in sends each XHR through window.fetch, so a spec's fetch fake still
+// answers the chunk requests exactly as it did when chunks used fetch.
+const FAKE_XHR = `(() => {
+  class FetchBackedXHR {
+    constructor() { this.upload = {}; this.headers = {}; this.status = 0; this.responseText = ''; this._ctl = new AbortController(); }
+    open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(k, v) { this.headers[k] = v; }
+    abort() { this._ctl.abort(); }
+    send(body) {
+      window.fetch(this.url, { method: this.method, headers: this.headers, body, signal: this._ctl.signal })
+        .then(async r => { this.status = r.status; this.responseText = await r.text(); this.upload.onload && this.upload.onload(); this.onload && this.onload(); })
+        .catch(() => { if (!this._ctl.signal.aborted && this.onerror) this.onerror(); });
+    }
+  }
+  window.XMLHttpRequest = FetchBackedXHR;
+})()`;
+
 const FAKE_FILE = `(() => {
   const blob = new Blob(['x'.repeat(64)], { type: 'image/png' });
   const f = new File([blob], 'photo.png', { type: 'image/png' });
@@ -23,8 +41,9 @@ const FAKE_FILE = `(() => {
 test('an upload survives the peek being closed mid-transfer', async ({ page }) => {
   await page.goto('/');
   await page.waitForLoadState('networkidle');
-  const r = await page.evaluate(async ([mkFile]) => {
+  const r = await page.evaluate(async ([mkFile, fakeXhr]) => {
     const w = window as any;
+    eval(fakeXhr as string);
     const file = eval(mkFile as string);
     // A sink whose `has()` is ALWAYS FALSE. That is exactly what closing the
     // peek used to produce: `_peekFilesStash` sets `peekFiles = []`, so the
@@ -46,7 +65,7 @@ test('an upload survives the peek being closed mid-transfer', async ({ page }) =
     await w._runUpload(f, sink);
     w.fetch = orig;
     return { path: f.path, error: f.error, inflight: f.inflight, dropped: dropped.length };
-  }, [FAKE_FILE]);
+  }, [FAKE_FILE, FAKE_XHR]);
 
   expect(r.path, 'the upload must land its path even though the sink no longer holds it').toBe('/u/photo.png');
   expect(r.error).toBeNull();
@@ -56,8 +75,9 @@ test('an upload survives the peek being closed mid-transfer', async ({ page }) =
 test('an explicit cancel stops the transfer, and is not reported as a failure', async ({ page }) => {
   await page.goto('/');
   await page.waitForLoadState('networkidle');
-  const r = await page.evaluate(async ([mkFile]) => {
+  const r = await page.evaluate(async ([mkFile, fakeXhr]) => {
     const w = window as any;
+    eval(fakeXhr as string);
     const file = eval(mkFile as string);
     const sink = { push: () => {}, has: () => true, drop: () => {}, render: () => {} };
     const orig = w.fetch;
@@ -74,7 +94,7 @@ test('an explicit cancel stops the transfer, and is not reported as a failure', 
     await w._runUpload(f, sink);
     w.fetch = orig;
     return { path: f.path, error: f.error, chunks };
-  }, [FAKE_FILE]);
+  }, [FAKE_FILE, FAKE_XHR]);
 
   expect(r.chunks, 'the loop must stop at the cancel, not run all three chunks').toBe(1);
   expect(r.path, 'a cancelled upload never lands a path').toBeNull();
@@ -84,8 +104,9 @@ test('an explicit cancel stops the transfer, and is not reported as a failure', 
 test('a failed upload KEEPS its chip, with an error and a retryable file', async ({ page }) => {
   await page.goto('/');
   await page.waitForLoadState('networkidle');
-  const r = await page.evaluate(async ([mkFile]) => {
+  const r = await page.evaluate(async ([mkFile, fakeXhr]) => {
     const w = window as any;
+    eval(fakeXhr as string);
     const file = eval(mkFile as string);
     const dropped: any[] = [];
     const sink = { push: () => {}, has: () => true, drop: (p: any) => dropped.push(p), render: () => {} };
@@ -111,7 +132,7 @@ test('a failed upload KEEPS its chip, with an error and a retryable file', async
     await w._runUpload(f, sink);
     w.fetch = orig; w.showToast = origToast;
     return { afterFail, path: f.path, error: f.error };
-  }, [FAKE_FILE]);
+  }, [FAKE_FILE, FAKE_XHR]);
 
   expect(r.afterFail.dropped, 'the chip must NOT be spliced out behind a toast').toBe(0);
   expect(r.afterFail.error, 'the failure must be recorded on the chip').toBeTruthy();
