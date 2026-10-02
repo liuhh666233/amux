@@ -6530,7 +6530,7 @@ _land_precheck() {
   case "$(_land_precheck_verdict "$rc" "$out")" in
     pass) printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck passed in $(( $(date +%s) - t0 ))s (rc $rc)" >> "$log"; return 0 ;;
     unmeasured)
-      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured (rc $rc after $(( $(date +%s) - t0 ))s: timed out or could not run, no verdict in its output); queued anyway. Output: $full" >> "$log"; return 0 ;;
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured (rc $rc after $(( $(date +%s) - t0 ))s: timed out, killed or could not run, no verdict in its output); queued anyway, the gate still runs every leg. Output: $full" >> "$log"; return 0 ;;
   esac
   printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck refused (rc $rc, $(( $(date +%s) - t0 ))s); not queued. Output: $full" >> "$log"
   printf '%s\n' "$out" | tail -30 >&2
@@ -6548,14 +6548,21 @@ _land_precheck() {
 # unmeasured.
 _land_precheck_verdict() {
   local rc="$1" out="$2"
+  # Any death by a signal (rc > 128: 142 our alarm, 143 SIGTERM, 137 SIGKILL)
+  # or by timeout(1) (124) is a check that did not finish, not a refusal:
+  # gs12-spend's precheck was SIGTERMed mid-leg at 237 s and read as refused,
+  # so the lane could not queue at all (mixpeek-override, 2026-10-02 09:05Z).
+  local killed=0
+  case "$rc" in 124|126|127) killed=1 ;; *) [ "$rc" -gt 128 ] 2>/dev/null && killed=1 ;; esac
   case "$rc" in
     0) echo pass; return ;;
-    142|127|126)
+  esac
+  if [ "$killed" = 1 ]; then
       if printf '%s\n' "$out" | grep -qE '✗|(^|[^A-Za-z])FAIL|REFUSED'; then echo refuse
       elif printf '%s\n' "$out" | grep -qE '^land-precheck: .*passed'; then echo pass
       else echo unmeasured; fi
-      return ;;
-  esac
+      return
+  fi
   echo refuse
 }
 
@@ -6883,7 +6890,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.11"
+LAND_BEHAVIOR_VERSION="2026-10-02.12"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
