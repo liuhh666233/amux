@@ -13672,7 +13672,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1226';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1227';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -18551,7 +18551,11 @@ function _uploadChunkXHR(f, url, body, onProgress) {
     f.aborter = {abort:() => { xhr.abort(); done(reject, Object.assign(new Error('Upload cancelled'), {name:'AbortError'})); }};
     xhr.open('PUT', url);
     const headers = _authHeaders({'Content-Type':'application/octet-stream',
-      'X-Amux-Interaction-Id':f.interactionId + '_chunk_' + (f.chunk || 0), 'X-Amux-Command-Kind':'filesystem.upload'});
+      // The server binds an interaction id to one method+path and answers 409
+      // for a reuse on another path. A restarted upload has a NEW upload id, so
+      // chunk 0 is a new path: the id must name the upload too. Reusing
+      // "_chunk_0" refused the phone's retry outright (409, 2026-10-02 17:07).
+      'X-Amux-Interaction-Id':f.interactionId + '_' + f.uploadId + '_chunk_' + (f.chunk || 0), 'X-Amux-Command-Kind':'filesystem.upload'});
     for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
     xhr.upload.onprogress = e => { arm(); onProgress(e.loaded); };
     xhr.upload.onload = () => arm();   // body sent; the server's answer gets its own stall window

@@ -99,3 +99,26 @@ test('a failed local save still uploads from the original file and says so', asy
   expect(log.chunks).toEqual(['up1:0', 'up1:1']);
   expect(diag.some(d => d.action === 'cache-fallback' && d.noLocalCopy === true && d.reason === 'local_save_failed')).toBe(true);
 });
+
+// The server binds an interaction id to one method+path (409 on reuse). A
+// restart under a new upload id must not reuse the old chunk ids: live on
+// 2026-10-02 the phone's retry got 409 "Interaction could not be recorded".
+test('a restarted upload gives every chunk an interaction id that names the new upload', async ({page}) => {
+  const ids: string[] = [];
+  let first = true;
+  await page.route(/\/api\/upload\//, async r => {
+    const url = r.request().url();
+    if (url.endsWith('/start')) return r.fulfill({json: {id: first ? 'gone1' : 'fresh2'}});
+    if (url.includes('/finish')) return r.fulfill({json: {path: '/uploads/clip.mov', url: '/api/uploads/clip.mov'}});
+    ids.push(r.request().headers()['x-amux-interaction-id'] || '');
+    if (first) { first = false; return r.fulfill({status: 404, json: {error: 'unknown upload'}}); }
+    return r.fulfill({json: {ok: true}});
+  });
+  await setup(page);
+  await page.locator('#peek-file-input').setInputFiles(blob(1 * MB));
+  await expect(chip(page)).toContainText('✓', {timeout: 30000});
+  expect(ids.length).toBe(2);
+  expect(ids[0]).toContain('_gone1_chunk_0');
+  expect(ids[1]).toContain('_fresh2_chunk_0');
+  expect(new Set(ids).size).toBe(2);
+});
