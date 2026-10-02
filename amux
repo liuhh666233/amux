@@ -6659,14 +6659,20 @@ _land_pid_cwd() {
 # waiter is resumed as it was. A waiter that holds the lock is never adopted.
 _land_adopt() {
   local want="${1:-}" force_batch=0 me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" url key q lock t pid pgid cwd sha nb n=0 got mine=0 mk
+  local all_lanes=0 who
   if [ "$want" = "--batch" ]; then force_batch=1; want="${2:-}"; elif [ "${2:-}" = "--batch" ]; then force_batch=1; fi
+  # --all-lanes: every lane's older-code tickets, for the orchestrator after a
+  # land release (one run instead of a broadcast). Each adopted waiter keeps
+  # its own lane's name, so its result still reaches that lane.
+  if [ "$want" = "--all-lanes" ]; then all_lanes=1; want="--all"; fi
   git rev-parse --git-dir >/dev/null 2>&1 || die "amux land --adopt: run it inside the repository's checkout"
   url="$(git remote get-url origin 2>/dev/null)" || die "amux land --adopt: no remote origin"
   key="$(printf '%s %s' "$url" main | shasum | cut -c1-16)"
   lock="$HOME/.amux/locks/land-$key"; q="$lock.q"
   for t in "$q"/*; do
     [ -e "$t" ] || continue
-    [ "$(sed -n 1p "$t" 2>/dev/null || true)" = "$me" ] || continue
+    who="$(sed -n 1p "$t" 2>/dev/null || true)"
+    [ "$all_lanes" = 1 ] || [ "$who" = "$me" ] || continue
     pid="${t##*-}"
     [ -z "$want" ] || [ "$want" = "--all" ] || [ "$want" = "$pid" ] || continue
     mine=$((mine + 1))
@@ -6692,17 +6698,17 @@ _land_adopt() {
     # Whatever happens next, never leave the old waiter frozen.
     # shellcheck disable=SC2064  # expanded now on purpose
     trap "kill -CONT -- '-$pgid' 2>/dev/null || kill -CONT '$pid' 2>/dev/null || true" EXIT INT TERM
-    ( cd "$cwd" && AMUX_LAND_ADOPT="${t##*/}" AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED=1 bash "$0" land --sha "$sha" --detach $nb >/dev/null 2>&1 ) || true
+    ( cd "$cwd" && AMUX_WORKER="$who" AMUX_LAND_ADOPT="${t##*/}" AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED=1 bash "$0" land --sha "$sha" --detach $nb >/dev/null 2>&1 ) || true
     got=""
     for _ in $(seq 1 60); do
       [ -f "$mk" ] && { got="$(cat "$mk" 2>/dev/null || true)"; [ -n "$got" ] && break; }
       sleep 1
     done
     rm -f -- "$mk"
-    if [ -n "$got" ] && [ "$got" != gone ] && [ "$(sed -n 1p "$q/$got" 2>/dev/null || true)" = "$me" ]; then
+    if [ -n "$got" ] && [ "$got" != gone ] && [ "$(sed -n 1p "$q/$got" 2>/dev/null || true)" = "$who" ]; then
       kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
       rm -f -- "$HOME/.amux/locks/detached/$pid" "$HOME/.amux/locks/detached/$pgid"
-      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] adopted pid $pid's ticket at its place as $got (pid ${got##*-}, $LAND_BEHAVIOR_VERSION)" >> "$HOME/.amux/logs/land.log"
+      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$key] adopted $who's pid $pid at its place as $got (pid ${got##*-}, $LAND_BEHAVIOR_VERSION)" >> "$HOME/.amux/logs/land.log"
       echo "amux land: adopted pid $pid -> pid ${got##*-} (ticket $got) at the same queue place, on $LAND_BEHAVIOR_VERSION"
       n=$((n + 1))
     else
@@ -6841,7 +6847,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.8"
+LAND_BEHAVIOR_VERSION="2026-10-02.9"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -6891,7 +6897,9 @@ cmd_land() {
   # same queue place (same ticket name, new pid). A lock holder is never
   # adopted, and a failed hand-off resumes the old waiter unchanged.
   # `--adopt --batch` also makes the ticket batchable again (for a ticket an
-  # older land made solo after a refused batch).
+  # older land made solo after a refused batch). `--adopt --all-lanes` adopts
+  # every lane's older-code tickets in one run. From 2026-10-02.9 a waiter
+  # also upgrades ITSELF in place when a newer land is installed.
   #
   # --detach queues and returns at once: land runs in its own session (macOS
   # has no setsid(1); python's os.setsid does it), output goes to a log under
@@ -7068,7 +7076,7 @@ p.communicate(msg.encode())
   # "$lock.q"; only the oldest live ticket may take the lock. A ticket whose pid
   # is gone is removed by whoever sees it. A holder that takes a waiter into its
   # batch writes the outcome to "$lock.r/<ticket>".
-  local q="$lock.q" rdir="$lock.r" tname waited=0 announced=0 head pos t res batchable="$batch" anon_refused=0
+  local q="$lock.q" rdir="$lock.r" tname waited=0 announced=0 head pos t res batchable="$batch" anon_refused=0 _vchk="" _newv=""
   mkdir -p "$q" "$rdir"
   # A ticket's NAME is its place: waiters, including ones started before
   # --priority existed, find the head by sorting names. Ordinary tickets are a
@@ -7089,12 +7097,18 @@ p.communicate(msg.encode())
     # The adopting command waits for THIS marker, never for a name match: a
     # same-second ticket of another lane shares the prefix (gs12-tiering,
     # 2026-10-02: adopt reported another lane's pid and its own was dropped).
-    if ! mv -- "${q:?}/${_old:?}" "${q:?}/${tname:?}" 2>/dev/null; then
+    if [ "$_old" = "$tname" ]; then
+      # Self-upgrade: the waiter exec'd the new code in place, same pid, so
+      # the ticket already has the right name.
+      [ -e "${q:?}/${tname:?}" ] || die "amux land: ticket $tname vanished during self-upgrade; nothing to resume"
+      _land_log "self-upgraded at its place to $LAND_BEHAVIOR_VERSION (ticket $tname, pid $$)"
+    elif ! mv -- "${q:?}/${_old:?}" "${q:?}/${tname:?}" 2>/dev/null; then
       echo gone > "${q:?}/.adopt-${_old##*-}"
       die "amux land --adopt: ticket $_old is gone; nothing adopted"
+    else
+      echo "$tname" > "${q:?}/.adopt-${_old##*-}"
+      _land_log "adopted ticket ${_old} (land code $(sed -n 5p "${q:?}/${tname:?}" 2>/dev/null || echo ?)) at its place, now on $LAND_BEHAVIOR_VERSION"
     fi
-    echo "$tname" > "${q:?}/.adopt-${_old##*-}"
-    _land_log "adopted ticket ${_old} (land code $(sed -n 5p "${q:?}/${tname:?}" 2>/dev/null || echo ?)) at its place, now on $LAND_BEHAVIOR_VERSION"
   fi
   _land_ticket
   if [ "$priority" = 1 ]; then
@@ -7183,6 +7197,22 @@ p.communicate(msg.encode())
       kill -0 "${t##*-}" 2>/dev/null || { _land_log "dropped the ticket of a waiter that exited ($(head -1 "$t" 2>/dev/null || echo ?), pid ${t##*-})"; rm -f -- "${t:?}"; }
     done
     head="$(ls "$q" | sort | head -1)"
+    # SELF-UPGRADE (mixpeek-override, 2026-10-02: every land release cost a
+    # broadcast to 8-11 lanes, and lanes that missed it kept the old failure
+    # mode in the batch). A WAITER whose installed CLI now carries a different
+    # LAND_BEHAVIOR_VERSION re-execs the new code in place: same pid, so the
+    # same ticket name, place and flags, and a foreground land keeps its
+    # output. Checked every 30 s, never by a holder. AMUX_LAND_SELF_UPGRADE=0
+    # opts out.
+    if [ "${AMUX_LAND_SELF_UPGRADE:-1}" = 1 ] && [ $(( $(date +%s) - ${_vchk:-0} )) -ge 30 ]; then
+      _vchk=$(date +%s)
+      _newv="$(grep -m1 '^LAND_BEHAVIOR_VERSION=' "$0" 2>/dev/null | cut -d'"' -f2 || true)"
+      if [ -n "$_newv" ] && [ "$_newv" != "$LAND_BEHAVIOR_VERSION" ] && [ -e "${q:?}/${tname:?}" ]; then
+        _land_log "land code $_newv is installed (this waiter runs $LAND_BEHAVIOR_VERSION); re-executing at its place"
+        trap - EXIT INT TERM
+        AMUX_LAND_ADOPT="$tname" AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED=1 exec bash "$0" land ${orig_args[@]+"${orig_args[@]}"}
+      fi
+    fi
     # DEMOTE (MO-4102): `amux land --demote <lane>` leaves "$q/.demote-<pid>";
     # the waiter moves ITS OWN priority ticket back into ordinary order at its
     # arrival time, the same self-rename aging does in the other direction.
