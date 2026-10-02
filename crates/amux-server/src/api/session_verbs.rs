@@ -2025,7 +2025,16 @@ pub(crate) fn observe_claude_limit_with(
     let auto_resume = crate::backend::adapter::claude_auto_resume_banner(pane);
     let lines: Vec<_> = pane.lines().collect();
     let footer = lines[lines.len().saturating_sub(8)..].join("\n");
-    if !menu && auto_resume.is_none() && !is_rate_limited_credit_banner(&footer) {
+    // "You've hit your session limit · resets 2:50am (America/New_York)" (or
+    // the weekly one) is a clocked limit the screen states outright. It was
+    // matched by no detector here, only by the transcript's synthetic 429,
+    // and when that record was not found the lane read as not limited for
+    // auto-resume: nine gs12 lanes sat idle past a 2:50am reset on 2026-10-02
+    // until a hand-sent continue (amux-helper).
+    let clean_footer = strip_ansi(&footer).to_lowercase().replace('\u{2019}', "'");
+    let hit_limit = clean_footer.contains("you've hit your session limit")
+        || clean_footer.contains("you've hit your weekly limit");
+    if !menu && auto_resume.is_none() && !hit_limit && !is_rate_limited_credit_banner(&footer) {
         let reset = transcript_reset?;
         return Some(ClaudeLimitObservation {
             menu: false,
@@ -2033,13 +2042,29 @@ pub(crate) fn observe_claude_limit_with(
             reset_at: effective_rate_limit_reset(recorded_reset, reset, now.timestamp()),
         });
     }
+    // A banner with a clock is a SESSION LIMIT, never a credit cap: a cap has
+    // no reset and auto-resume skips it by design.
+    let banner_reset = if !menu && auto_resume.is_none() {
+        parse_rate_limit_reset_at(&footer, now).or(transcript_reset.filter(|t| *t > 0))
+    } else {
+        None
+    };
     let kind = if menu {
         "menu"
     } else if auto_resume.is_some() {
         "auto-resume"
+    } else if banner_reset.is_some() {
+        "session-limit"
     } else {
         "credit-banner"
     };
+    if let Some(r) = banner_reset {
+        return Some(ClaudeLimitObservation {
+            menu: false,
+            kind,
+            reset_at: effective_rate_limit_reset(recorded_reset, r, now.timestamp()),
+        });
+    }
     let reset_at = if menu || auto_resume.is_some() {
         // The transcript's structured `resetsAt` backs up the screen: a banner
         // wording this parser has not met yet still gets a reset time.
@@ -52207,5 +52232,35 @@ mod docker_vm_tests {
         let log = std::fs::read_to_string(t.path().join("logs").join("docker-vm-refusals.log")).unwrap();
         assert_eq!(log.lines().count(), 5, "each refusal is logged: {log}");
         assert!(log.contains("session=lane"), "{log}");
+    }
+}
+
+#[cfg(test)]
+mod session_limit_banner_tests {
+    use super::{auto_resume_decision, observe_claude_limit_with, AutoResume, AutoResumeInputs};
+    use chrono::TimeZone;
+
+    #[test]
+    fn a_session_limit_banner_with_a_reset_is_resumed_after_it() {
+        let pane = "some work\n\u{23fa} You've hit your session limit \u{b7} resets 2:50am (America/New_York)\n\n> ";
+        let before = chrono::Local.with_ymd_and_hms(2026, 10, 2, 2, 0, 0).single().unwrap();
+        let obs = observe_claude_limit_with(pane, 0, before, None).expect("a limit is observed");
+        assert_eq!(obs.kind, "session-limit", "a banner with a clock is not a credit cap");
+        let reset = chrono::Local.with_ymd_and_hms(2026, 10, 2, 2, 50, 0).single().unwrap().timestamp();
+        assert_eq!(obs.reset_at, reset);
+        let inputs = AutoResumeInputs {
+            enabled: true,
+            idle: true,
+            now: reset + 3600,
+            limit: Some(&obs),
+            limited_since: reset - 6000,
+            account_changed_at: 0,
+            api_error: None,
+            api_error_since: 0,
+            last_key: "",
+            api_window_start: 0,
+            api_count: 0,
+        };
+        assert!(matches!(auto_resume_decision(&inputs), AutoResume::Send { reason: "usage_reset", .. }));
     }
 }
