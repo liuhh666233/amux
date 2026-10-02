@@ -1,0 +1,8 @@
+A7 first worker row 1.88s after tapping amux; 'Preparing what you shared…' visible at first paint: no
+A2 header: 26 active, 24 running · 20 paused hidden
+A8 group filter amux -> 2 in amux
+A3 zz-share-sim-a was already preselected as the last shared worker
+A3 recipients: To zz-share-sim-a, zz-share-sim-b
+A6 saw Sending: true, saw Sent: true; A4 Cancel present while sending: true
+delivered to zz-share-sim-a: true
+delivered to zz-share-sim-b: true
