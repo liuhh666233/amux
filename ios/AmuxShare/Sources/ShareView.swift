@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Pick one or more workers, add an optional note, send.
 ///
@@ -33,6 +34,8 @@ struct ShareView: View {
     @State private var group: String? = nil
     @State private var sort: SortOrder = .recentlyShared
     @State private var sending = false
+    /// Send was tapped with no worker picked: say so instead of ignoring it.
+    @State private var pickHint = false
     /// Sent: the card shows a check for a moment before the sheet closes, so a
     /// fast send is still visibly a send (Ethan, 2026-10-01).
     @State private var sent = false
@@ -168,11 +171,12 @@ struct ShareView: View {
                             Text(selected.count > 1 ? "Send (\(selected.count))" : "Send").bold()
                         }
                     }
-                    .disabled(selected.isEmpty || loading || sending)
+                    .disabled(loading || sending)
                     .accessibilityIdentifier(sending ? "sending" : "send")
                 }
             }
             .overlay { if sending { sendingCard } }
+            .onChange(of: selected) { _ in if !selected.isEmpty { pickHint = false } }
         }
         .navigationViewStyle(.stack)
         .task { await load() }
@@ -258,6 +262,12 @@ struct ShareView: View {
             } header: {
                 HStack {
                     Text("Send to")
+                    if pickHint {
+                        Text("Pick a worker first")
+                            .font(.caption.bold())
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("pickHint")
+                    }
                     Spacer()
                     if refreshing { ProgressView().controlSize(.mini) }
                     Text(countLabel)
@@ -381,7 +391,17 @@ struct ShareView: View {
     }
 
     private func send() {
-        guard !selected.isEmpty, !sending else { return }
+        guard !sending else { return }
+        // EVERY TAP ANSWERS (Ethan, 2026-10-02: "i click send nothing
+        // happens"). With no worker picked the button used to be disabled, and
+        // a disabled button gives nothing back to a tap.
+        if selected.isEmpty {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            pickHint = true
+            return
+        }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        pickHint = false
         focused = nil
         sending = true
         sent = false
@@ -392,8 +412,10 @@ struct ShareView: View {
             DispatchQueue.main.async {
                 if error == nil {
                     // Success: the controller closes the sheet a moment later.
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                     sent = true
                 } else {
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
                     sending = false
                     sendStep = ""
                 }

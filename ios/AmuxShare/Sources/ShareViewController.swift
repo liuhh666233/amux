@@ -49,12 +49,34 @@ final class ShareViewController: UIViewController {
                 append(text: text)
             }
             for provider in item.attachments ?? [] {
-                if let url = await loadFile(from: provider) {
+                // A web link or a text snippet is TEXT. Asking it for a file
+                // first (every provider conforms to public.item) turned a shared
+                // link into a 115-byte file named "upload" (2026-10-02 phone
+                // shares), so the worker got a path instead of the link.
+                if isTextOnly(provider), let text = await loadText(from: provider) {
+                    append(text: text)
+                } else if let url = await loadFile(from: provider) {
                     fileURLs.append(url)
                 } else if let text = await loadText(from: provider) {
                     append(text: text)
                 }
             }
+        }
+    }
+
+    /// True when the provider is a web URL or plain text and offers no real
+    /// file (image, movie, PDF, audio, document, or a file URL).
+    private func isTextOnly(_ provider: NSItemProvider) -> Bool {
+        let fileTypes: [UTType] = [.fileURL, .image, .movie, .audiovisualContent, .audio, .pdf,
+                                   .spreadsheet, .presentation, .archive, .data]
+        let textish = provider.hasItemConformingToTypeIdentifier(UTType.url.identifier)
+            || provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)
+        guard textish else { return false }
+        return !provider.registeredTypeIdentifiers.contains { id in
+            guard let t = UTType(id) else { return false }
+            if t.conforms(to: .fileURL) { return true }   // file-url also conforms to url
+            if t.conforms(to: .url) || t.conforms(to: .text) { return false }
+            return fileTypes.contains { t.conforms(to: $0) }
         }
     }
 
@@ -72,8 +94,15 @@ final class ShareViewController: UIViewController {
         return await withCheckedContinuation { continuation in
             _ = provider.loadFileRepresentation(forTypeIdentifier: UTType.item.identifier) { url, _ in
                 guard let url else { return continuation.resume(returning: nil) }
-                let copy = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+                // Keep the real name: iOS often hands a generic temp name, and
+                // the worker reads the name to know what it was sent.
+                let ext = url.pathExtension
+                var name = provider.suggestedName ?? url.deletingPathExtension().lastPathComponent
+                if name.isEmpty { name = "shared" }
+                if !ext.isEmpty && !name.lowercased().hasSuffix("." + ext.lowercased()) { name += "." + ext }
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let copy = dir.appendingPathComponent(name)
                 do {
                     try FileManager.default.copyItem(at: url, to: copy)
                     continuation.resume(returning: copy)
@@ -150,10 +179,13 @@ final class ShareViewController: UIViewController {
                 }
                 var paths: [String] = []
                 for (i, url) in fileURLs.enumerated() {
-                    progress(fileURLs.count == 1
-                             ? "Uploading \(url.lastPathComponent)…"
-                             : "Uploading \(i + 1) of \(fileURLs.count): \(url.lastPathComponent)…")
-                    paths.append(try await AmuxClient.upload(fileURL: url, server: server))
+                    let label = fileURLs.count == 1
+                        ? "Uploading \(url.lastPathComponent)"
+                        : "Uploading \(i + 1) of \(fileURLs.count): \(url.lastPathComponent)"
+                    progress(label + "…")
+                    paths.append(try await AmuxClient.upload(fileURL: url, server: server) { fraction in
+                        progress("\(label) \(Int((fraction * 100).rounded()))%")
+                    })
                 }
                 // `@<abs path>` is how amux already inlines an attachment into a
                 // prompt; the dashboard composer produces the same shape.

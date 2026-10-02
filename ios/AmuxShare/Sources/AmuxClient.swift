@@ -266,12 +266,19 @@ enum AmuxClient {
     /// answers with `path`, so nothing here has to hardcode a directory that
     /// differs per machine. It also streams, so a shared video is not buffered
     /// whole into one request body.
-    static func upload(fileURL: URL, server: URL) async throws -> String {
-        let data = try Data(contentsOf: fileURL)
+    /// Streams the file: a share extension is killed by iOS at roughly 120 MB
+    /// of memory, and the old code held the whole file plus a copy of each
+    /// chunk, so a video or large photo died after upload/start with nothing
+    /// on screen (2026-10-02 phone share: start logged, no chunk, no send).
+    /// `progress` gets the fraction uploaded after each chunk.
+    static func upload(fileURL: URL, server: URL,
+                       progress: ((Double) -> Void)? = nil) async throws -> String {
         let name = fileURL.lastPathComponent
+        let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
 
         let startBody = try JSONSerialization.data(
-            withJSONObject: ["filename": name, "size": data.count])
+            withJSONObject: ["filename": name, "size": size])
         let startData = try await authedData({
             var start = URLRequest(url: server.appendingPathComponent("api/upload/start"),
                                    timeoutInterval: 30)
@@ -286,12 +293,15 @@ enum AmuxClient {
             throw ClientError.malformed("upload/start gave no id and chunk count")
         }
 
-        let chunkSize = Int(ceil(Double(data.count) / Double(chunks)))
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        let chunkSize = max(1, Int(ceil(Double(max(size, 1)) / Double(chunks))))
         for n in 0..<chunks {
-            let lower = n * chunkSize
-            let upper = min(lower + chunkSize, data.count)
-            guard lower < upper else { break }
-            let slice = data.subdata(in: lower..<upper)
+            let slice: Data = try autoreleasepool {
+                try handle.seek(toOffset: UInt64(n * chunkSize))
+                return try handle.read(upToCount: chunkSize) ?? Data()
+            }
+            if slice.isEmpty && n > 0 { break }
             _ = try await authedData({
                 var put = URLRequest(
                     url: server.appendingPathComponent("api/upload/\(id)/chunk/\(n)"),
@@ -301,6 +311,7 @@ enum AmuxClient {
                 put.httpBody = slice
                 return put
             }, server: server)
+            progress?(Double(n + 1) / Double(chunks))
         }
 
         let fData = try await authedData({

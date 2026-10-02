@@ -454,6 +454,165 @@ final class ShareSheetUITests: XCTestCase {
         }
     }
 
+    /// SEND MATRIX (Ethan, 2026-10-02: "make sure the share works with files
+    /// too, also it should have feedback i click send nothing happens"). One
+    /// case per run, chosen by CASE, so the host can switch the server proxy
+    /// (normal, slow, fail) between cases:
+    ///   image, multi (2 photos), pdf, file (arbitrary), link (Safari URL),
+    ///   slow (send held 8s), fail (send answers 500), nopick (nothing chosen).
+    /// Every case asserts feedback within 1s of tapping Send and writes one
+    /// result line plus a screenshot to SHOT_DIR. Sends only to TARGET, a
+    /// throwaway worker the caller creates guarded and deletes after.
+    func testSendMatrix() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let dir = env["SHOT_DIR"], let kase = env["CASE"], let target = env["TARGET"] else {
+            throw XCTSkip("set SHOT_DIR, CASE and TARGET to run the send matrix")
+        }
+        let marker = env["MARKER"] ?? ("matrix " + UUID().uuidString.prefix(8))
+        func shot(_ name: String) {
+            let png = XCUIScreen.main.screenshot().pngRepresentation
+            try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("m-\(kase)-\(name).png"))
+        }
+        func result(_ line: String) {
+            let url = URL(fileURLWithPath: dir).appendingPathComponent("matrix.txt")
+            let prev = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            try? (prev + "\(kase): \(line)\n").write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        // 1. Open the share sheet from the right source.
+        let host: XCUIApplication
+        switch kase {
+        case "pdf", "file":
+            host = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+            host.launch()
+            let name = kase == "pdf" ? "matrix-sample.pdf" : "matrix-notes.csv"
+            for label in ["Continue", "Not Now"] {
+                let b = host.buttons[label]; if b.waitForExistence(timeout: 2), b.isHittable { b.tap() }
+            }
+            let browse = host.tabBars.buttons["Browse"]
+            if browse.waitForExistence(timeout: 10) { browse.tap(); browse.tap() }
+            let onPhone = host.cells.staticTexts["On My iPhone"].firstMatch
+            if onPhone.waitForExistence(timeout: 10) { onPhone.tap() }
+            let file = host.cells.containing(NSPredicate(format: "label CONTAINS %@", name.split(separator: ".")[0] as CVarArg)).firstMatch
+            guard file.waitForExistence(timeout: 15) else { shot("no-file"); return XCTFail("\(name) not in Files") }
+            file.press(forDuration: 1.3)
+            let share = host.buttons["Share"].firstMatch
+            guard share.waitForExistence(timeout: 10) else { shot("no-share"); return XCTFail("no Share in the Files menu") }
+            share.tap()
+        case "link":
+            host = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+            host.activate()
+            let share = host.buttons["ShareButton"]
+            guard share.waitForExistence(timeout: 20) else { shot("no-share"); return XCTFail("no Safari Share button") }
+            share.tap()
+        default:
+            host = photos
+            if kase == "multi" {
+                photos.launch()
+                for label in ["Continue", "Get Started", "Not Now", "Later"] {
+                    let b = photos.buttons[label]; if b.waitForExistence(timeout: 2), b.isHittable { b.tap() }
+                }
+                let grid = photos.images.matching(identifier: "PXGGridLayout-Info")
+                guard grid.firstMatch.waitForExistence(timeout: 20), grid.count >= 2 else { return XCTFail("need 2 photos") }
+                photos.buttons["Select"].tap()
+                grid.element(boundBy: grid.count - 1).tap()
+                grid.element(boundBy: grid.count - 2).tap()
+                let share = photos.buttons["Share"].firstMatch
+                XCTAssertTrue(share.waitForExistence(timeout: 10), "no Share in select mode")
+                share.tap()
+            } else {
+                try openNewestPhoto()
+                tapShare()
+            }
+        }
+        let amux = host.cells.matching(identifier: "shareCell")
+            .matching(NSPredicate(format: "label == %@", Self.expectedRowLabel)).firstMatch
+        guard amux.waitForExistence(timeout: 20) else { shot("no-amux"); return XCTFail("amux not in the share sheet") }
+        amux.tap()
+        let ext = XCUIApplication(bundleIdentifier: "com.EthanSteininger.nextup.Share")
+        let firstRow = ext.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'worker-'")).firstMatch
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 30), "no worker rows")
+
+        // 2. Choose the target (or deliberately nothing).
+        let search = ext.textFields["search"]
+        if kase != "nopick" {
+            search.tap(); search.clearAndType(target)
+            let row = ext.buttons["worker-\(target)"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), "\(target) not listed")
+            let to = ext.staticTexts["recipients"]
+            if !(to.exists && to.label.contains(target)) { row.tap() }
+            search.tap(); search.clearAndType("")
+            let note = ext.textFields["note"]
+            note.tap(); note.typeText(String(marker))
+        }
+        shot("before-send")
+
+        // 3. Send, and measure how long until the sheet says something.
+        let tap = Date()
+        ext.buttons["send"].tap()
+        if kase == "nopick" {
+            let hint = ext.staticTexts["pickHint"]
+            let ok = hint.waitForExistence(timeout: 2)
+            result(String(format: "hint shown: %@ after %.2fs", ok ? "yes" : "no", Date().timeIntervalSince(tap)))
+            shot("hint")
+            XCTAssertTrue(ok, "tapping Send with nothing picked showed nothing")
+            return
+        }
+        let sendingCard = ext.otherElements["sendingCard"]
+        let sendingBtn = ext.buttons["sending"]
+        var feedbackAt: TimeInterval?
+        var sawSending = false, sawSent = false, sawAlert = false, steps: [String] = []
+        let until = Date().addingTimeInterval(kase == "slow" ? 90 : 150)
+        while Date() < until && !sawSent && !sawAlert {
+            if sendingCard.exists || sendingBtn.exists {
+                if feedbackAt == nil { feedbackAt = Date().timeIntervalSince(tap); shot("sending") }
+                sawSending = true
+                if let step = ext.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Uploading' OR label BEGINSWITH 'Delivering' OR label BEGINSWITH 'Preparing'")).allElementsBoundByIndex.first?.label,
+                   steps.last != step { steps.append(step) }
+            }
+            if ext.otherElements["sentCard"].exists { sawSent = true; shot("sent") }
+            if ext.alerts["Could not send"].exists || host.alerts["Could not send"].exists { sawAlert = true; shot("alert") }
+        }
+        let fb = feedbackAt.map { String(format: "%.2fs", $0) } ?? "none"
+        switch kase {
+        case "fail":
+            let alert = ext.alerts["Could not send"].exists ? ext.alerts["Could not send"] : host.alerts["Could not send"]
+            let msg = alert.staticTexts.allElementsBoundByIndex.map(\.label).joined(separator: " | ")
+            if alert.exists { alert.buttons["OK"].tap() }
+            let retryable = ext.buttons["send"].waitForExistence(timeout: 5) && ext.buttons["send"].isEnabled
+            result("feedback \(fb); sending \(sawSending); error alert \(sawAlert) [\(msg)]; Send re-enabled for retry \(retryable)")
+            shot("after-fail")
+            XCTAssertTrue(sawAlert, "a failing server showed no error")
+            XCTAssertTrue(retryable, "Send was not re-enabled after the failure")
+        default:
+            let delivered = try historyContains(session: target, text: String(marker))
+            var atts = 0
+            if delivered, let text = try historyText(session: target, containing: String(marker)) {
+                atts = text.components(separatedBy: "@/").count - 1
+            }
+            result("feedback \(fb); sending \(sawSending); sent \(sawSent); delivered \(delivered); attachments \(atts); steps \(steps)")
+            XCTAssertTrue(sawSent, "never saw Sent")
+            XCTAssertTrue(delivered, "\(target) never got \(marker)")
+            let want = ["image": 1, "multi": 2, "pdf": 1, "file": 1, "slow": 1, "link": 0][kase] ?? 0
+            XCTAssertEqual(atts, want, "\(kase) should arrive with \(want) attachment(s)")
+        }
+        XCTAssertNotNil(feedbackAt, "Send showed no progress at all")
+        if let feedbackAt { XCTAssertLessThan(feedbackAt, 1.0, "feedback took \(feedbackAt)s") }
+    }
+
+    private func historyText(session: String, containing text: String) throws -> String? {
+        let base = ProcessInfo.processInfo.environment["AMUX_URL"] ?? "https://localhost:8824"
+        let url = URL(string: base + "/api/history?session=\(session)&limit=10")!
+        let s = URLSession(configuration: .ephemeral, delegate: TrustAll(), delegateQueue: nil)
+        let sem = DispatchSemaphore(value: 0)
+        var payload: Data?
+        s.dataTask(with: url) { data, _, _ in payload = data; sem.signal() }.resume()
+        _ = sem.wait(timeout: .now() + 15)
+        guard let payload, let obj = try? JSONSerialization.jsonObject(with: payload) else { return nil }
+        let rows = (obj as? [[String: Any]]) ?? ((obj as? [String: Any])?["items"] as? [[String: Any]]) ?? []
+        return rows.compactMap { $0["text"] as? String }.first { $0.contains(text) }
+    }
+
     private func historyContains(session: String, text: String) throws -> Bool {
         let base = ProcessInfo.processInfo.environment["AMUX_URL"] ?? "https://localhost:8824"
         let deadline = Date().addingTimeInterval(20)
