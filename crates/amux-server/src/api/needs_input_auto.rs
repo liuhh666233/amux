@@ -377,6 +377,16 @@ pub fn never_reason(item: &Value) -> Option<&'static str> {
     if regex::Regex::new(reserved).map(|r| r.is_match(&t)).unwrap_or(false) {
         return Some("reserved_for_owner");
     }
+    // THE OWNER'S OWN SHARE. A setting that keeps something back FOR the owner
+    // (the plan-window reserve "keeps 30 percent for you") protects the owner
+    // from automation, so automation lowering it on the owner's behalf is the
+    // one answer it can never give. 2026-10-02 06:48 ET: MO-4161 ("do you want
+    // the reserve lowered") was approved automatically and a lane was asked to
+    // apply it (amux-helper declined).
+    let own_share = r"\b(reserves?|reserved|keeps?|kept|set aside|held back|protects?)\b[^.?!]{0,80}\bfor (you|the human|the owner|ethan)\b";
+    if regex::Regex::new(own_share).map(|r| r.is_match(&t)).unwrap_or(false) {
+        return Some("owners_own_share");
+    }
     None
 }
 
@@ -503,6 +513,29 @@ pub fn category_of(item: &Value) -> String {
     item["category"].as_str().unwrap_or("other").to_string()
 }
 
+/// The category the POLICY judges an ask by. An ask filed as "other" that
+/// reads like a production or customer change is scored as `prod_data`, so the
+/// owner's own `prod_data` switch decides it (off by default). 2026-10-02: the
+/// policy approved MO-4149 (disable a webhook in the owner's org), MO-4150
+/// (TubeScience ts-api replicas) and MO-4160 (promote through the TubeScience
+/// production ring), all filed as "other".
+fn effective_category(item: &Value) -> String {
+    let cat = category_of(item);
+    if matches!(cat.as_str(), "money" | "prod_data" | "outbound") {
+        return cat;
+    }
+    let t = ask_text(item).to_ascii_lowercase();
+    let hit = |re: &str| regex::Regex::new(re).map(|r| r.is_match(&t)).unwrap_or(false);
+    let action = r"\b(disabl|delet|drop|purg|remov|migrat|backfill|overwrit|restor|promot|roll ?out|rollout|scal|replica|deploy|cut ?over|rotat)\w*";
+    let target = r"\b(production|prod\b|prod plane|customer|tenant|tubescience|primis|live (data|plane|cluster)|your own org)";
+    if hit(action) && hit(target) {
+        tracing::info!(target: "amux::needs_input_auto", verdict = "scored_as_prod_data",
+            "an ask filed as other reads like a production or customer change");
+        return "prod_data".to_string();
+    }
+    cat
+}
+
 pub fn decide(policy: &Policy, item: &Value) -> Decision {
     if !policy.enabled {
         return Decision::Off;
@@ -513,7 +546,7 @@ pub fn decide(policy: &Policy, item: &Value) -> Decision {
         }
         return Decision::Never(why);
     }
-    let cat = category_of(item);
+    let cat = effective_category(item);
     let on = match cat.as_str() {
         "money" => policy.money,
         "prod_data" => policy.prod_data,

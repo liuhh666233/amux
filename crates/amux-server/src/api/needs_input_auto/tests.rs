@@ -447,3 +447,31 @@ fn a_call_the_lane_reserves_for_the_owner_is_never_approved() {
     let worker_choice = item("card", "decision", "decision", "Want me to go after the Gemini source now, or wait for gs-4?");
     assert_eq!(never_reason(&worker_choice), None, "an either/or the lane did not reserve stays approvable (policy)");
 }
+
+#[test]
+fn lowering_what_is_kept_for_the_owner_is_never_approved() {
+    // MO-4161, 2026-10-02: approved automatically, then a lane was asked to apply it.
+    let mo4161 = item("card", "decision", "other",
+        "The Claude plan window is 92 percent used and AMUX_BACKGROUND_RESERVE_PCT keeps 30 percent for you, so amux refused the SCHED-544 orchestration tick at 10:39Z; do you want the reserve lowered?");
+    assert_eq!(never_reason(&mo4161), Some("owners_own_share"));
+    let note = item("card", "decision", "other", "30% is reserved for the human; may I set it to 10?");
+    assert_eq!(never_reason(&note), Some("owners_own_share"));
+    let ordinary = item("card", "decision", "decision", "Want me to keep the retry loop for another hour, or stop it now?");
+    assert_eq!(never_reason(&ordinary), None, "keeping something that is not the owner's stays approvable");
+}
+
+#[test]
+fn production_and_customer_changes_are_judged_as_prod_data() {
+    // The three asks the policy approved on 2026-10-02, verbatim.
+    for (id, q) in [
+        ("MO-4149", "May gs12-compute disable webhook wh_eedaf761b44205c3 (brand_brain_ops_webhook, url placeholder.brand-brain.example.com, Bearer PLACEHOLDER_TOKEN) in your own org int_40ed22c1 (Ethan Personal), which has failed every collection.documents.written delivery since at least 2026-09-27 (23,307 FAILED events, 17,062 in the last 24 h) and keeps WebhookDLQBacklog and WebhookSLOBurnRateCritical paging?"),
+        ("MO-4150", "Should the TubeScience ts-api Deployment stay at 1 replica under the HTTPScaledObject (0 to 1, hand-applied 2026-09-28 by mixpeek-finances and now declared in the model) or go back to the 3 replicas the chart rendered before?"),
+        ("MO-4160", "May gs12-gates run the 8.7 end-to-end pipeline test through the TubeScience tenant ring, which promotes a no-op change (identical image, no config change) to the TubeScience production plane and rolls it back on a planted verify failure, once the nine stages exist (after 8.2, 8.3 and 8.4), and in which window?"),
+    ] {
+        let it = item("card", "decision", "other", q);
+        assert_eq!(never_reason(&it), None, "{id}: not a never-rule");
+        assert_eq!(decide(&Policy::default(), &it), Decision::SkipCategory("prod_data".into()), "{id}");
+    }
+    let local = item("card", "decision", "decision", "Want me to scale the local kind cluster to three nodes for the soak, or keep one?");
+    assert_eq!(decide(&Policy::default(), &local), Decision::Approve, "a local change names no production or customer target");
+}
