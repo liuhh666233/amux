@@ -36,6 +36,10 @@ pub fn routes() -> Router<AppState> {
         .route("/location/timeline", get(timeline))
         .route("/location/segments/{id}", get(segment_one))
         .route("/location/summary", get(summary))
+        .route("/location/motion", post(ingest_motion))
+        .route("/location/stats", get(stats))
+        .route("/location/heatmap", get(heatmap))
+        .route("/location/export", get(export))
 }
 
 /// Largest batch one POST may carry. The phone sends up to 500.
@@ -102,6 +106,21 @@ pub(crate) struct InPoint {
     pub activity_conf: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    // Raw capture (0100): every remaining CLLocation field.
+    #[serde(default)]
+    pub ell_alt: Option<f64>,
+    #[serde(default)]
+    pub speed_acc: Option<f64>,
+    #[serde(default)]
+    pub course_acc: Option<f64>,
+    #[serde(default)]
+    pub floor: Option<i64>,
+    #[serde(default)]
+    pub simulated: Option<bool>,
+    #[serde(default)]
+    pub accessory: Option<bool>,
+    #[serde(default)]
+    pub age_s: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -122,8 +141,12 @@ pub(crate) fn point_problem(p: &InPoint, now: f64) -> Option<&'static str> {
     if !p.lat.is_finite() || !(-90.0..=90.0).contains(&p.lat) || !p.lon.is_finite() || !(-180.0..=180.0).contains(&p.lon) {
         return Some("lat/lon out of range");
     }
-    if p.h_acc.is_some_and(|a| !a.is_finite() || a < 0.0) {
-        return Some("h_acc must be a non-negative number");
+    // RAW: a negative accuracy, speed or course is Core Location's own
+    // "invalid" marker and is stored as delivered; the cleaned view ignores it.
+    // Only a value that is not a number at all is refused.
+    let nums = [p.alt, p.h_acc, p.v_acc, p.speed, p.course, p.ell_alt, p.speed_acc, p.course_acc, p.age_s];
+    if nums.iter().any(|v| v.is_some_and(|x| !x.is_finite())) {
+        return Some("a numeric field is not a finite number");
     }
     None
 }
@@ -141,20 +164,20 @@ pub(crate) fn db_ingest_points(
     let (mut accepted, mut duplicate, mut rejected) = (0, 0, Vec::new());
     let mut stmt = c.prepare_cached(
         "INSERT OR IGNORE INTO location_points
-           (id, device, ts, lat, lon, alt, h_acc, v_acc, speed, course, activity, activity_conf, source, received)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+           (id, device, ts, lat, lon, alt, h_acc, v_acc, speed, course, activity, activity_conf, source, received,
+            ell_alt, speed_acc, course_acc, floor, simulated, accessory, age_s)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
     )?;
     for p in points {
         if let Some(why) = point_problem(p, now) {
             rejected.push((p.id.clone(), why));
             continue;
         }
-        // A negative speed/course is Core Location's "invalid": store NULL.
-        let speed = p.speed.filter(|v| v.is_finite() && *v >= 0.0);
-        let course = p.course.filter(|v| v.is_finite() && *v >= 0.0);
+        // Stored exactly as delivered, invalid markers (-1) included.
         let n = stmt.execute(params![
-            p.id, device, p.ts, p.lat, p.lon, p.alt, p.h_acc, p.v_acc, speed, course,
-            p.activity, p.activity_conf, p.source.clone().unwrap_or_default(), now
+            p.id, device, p.ts, p.lat, p.lon, p.alt, p.h_acc, p.v_acc, p.speed, p.course,
+            p.activity, p.activity_conf, p.source.clone().unwrap_or_default(), now,
+            p.ell_alt, p.speed_acc, p.course_acc, p.floor, p.simulated.map(i64::from), p.accessory.map(i64::from), p.age_s
         ])?;
         if n == 1 { accepted += 1 } else { duplicate += 1 }
     }
@@ -352,14 +375,26 @@ pub(crate) fn haversine_m(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> f64
     2.0 * r * h.sqrt().asin()
 }
 
+/// THE CLEANED VIEW, computed at query time over the raw rows (which are never
+/// thinned): usable horizontal accuracy (0 to 100 m), not stale on arrival
+/// (30 s), not simulated. Speed below 0 is Core Location's "invalid".
+pub(crate) const CLEAN_SQL: &str = "(h_acc IS NULL OR (h_acc >= 0 AND h_acc <= 100)) \
+    AND (age_s IS NULL OR age_s <= 30) AND COALESCE(simulated, 0) = 0";
+
 fn load_points(c: &Connection, from: f64, to: f64) -> rusqlite::Result<Vec<Pt>> {
-    let mut stmt = c.prepare(
-        "SELECT id, ts, lat, lon, speed, activity FROM location_points WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
-    )?;
+    let mut stmt = c.prepare(&format!(
+        "SELECT id, ts, lat, lon, speed, activity FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL} ORDER BY ts, id"
+    ))?;
     let rows = stmt.query_map(params![from, to], |r| {
-        Ok(Pt { id: r.get(0)?, ts: r.get(1)?, lat: r.get(2)?, lon: r.get(3)?, speed: r.get(4)?, activity: r.get(5)? })
+        let speed: Option<f64> = r.get(4)?;
+        Ok(Pt { id: r.get(0)?, ts: r.get(1)?, lat: r.get(2)?, lon: r.get(3)?,
+            speed: speed.filter(|v| *v >= 0.0), activity: r.get(5)? })
     })?;
     rows.collect()
+}
+
+fn count_raw(c: &Connection, from: f64, to: f64) -> rusqlite::Result<i64> {
+    c.query_row("SELECT COUNT(*) FROM location_points WHERE ts >= ?1 AND ts < ?2", params![from, to], |r| r.get(0))
 }
 
 fn load_visits(c: &Connection, from: f64, to: f64) -> rusqlite::Result<Vec<Visit>> {
@@ -564,14 +599,15 @@ async fn timeline(State(state): State<AppState>, Query(q): Query<TimelineQ>) -> 
         .read_async(move |c| {
             let pts = load_points(c, from, to)?;
             let visits = load_visits(c, from, to)?;
+            let raw = count_raw(c, from, to)?;
             let segs = segment(&pts, &visits, t);
-            Ok((pts.len(), visits.len(), segs))
+            Ok((pts.len(), visits.len(), raw, segs))
         })
         .await
     {
-        Ok((n, nv, segs)) => Json(json!({
+        Ok((n, nv, raw, segs)) => Json(json!({
             "ok": true, "from": from, "to": to, "measured": true, "n_considered": n,
-            "visits_considered": nv, "segments": segs,
+            "n_raw": raw, "visits_considered": nv, "segments": segs,
         }))
         .into_response(),
         Err(e) => server_error(e),
@@ -615,16 +651,9 @@ async fn list_points(State(state): State<AppState>, Query(q): Query<RangeQ>) -> 
         .store
         .read_async(move |c| {
             let mut stmt = c.prepare(
-                "SELECT id, ts, lat, lon, alt, h_acc, speed, course, activity, activity_conf, device
-                   FROM location_points WHERE ts >= ?1 AND ts < ?2 ORDER BY ts LIMIT ?3",
+                &format!("SELECT {RAW_COLS} FROM location_points WHERE ts >= ?1 AND ts < ?2 ORDER BY ts LIMIT ?3"),
             )?;
-            let rows = stmt.query_map(params![from, to, limit as i64], |r| {
-                Ok(json!({"id": r.get::<_, String>(0)?, "ts": r.get::<_, f64>(1)?, "lat": r.get::<_, f64>(2)?,
-                    "lon": r.get::<_, f64>(3)?, "alt": r.get::<_, Option<f64>>(4)?, "h_acc": r.get::<_, Option<f64>>(5)?,
-                    "speed": r.get::<_, Option<f64>>(6)?, "course": r.get::<_, Option<f64>>(7)?,
-                    "activity": r.get::<_, Option<String>>(8)?, "activity_conf": r.get::<_, Option<String>>(9)?,
-                    "device": r.get::<_, String>(10)?}))
-            })?;
+            let rows = stmt.query_map(params![from, to, limit as i64], raw_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<Value>>>()?)
         })
         .await
@@ -644,15 +673,434 @@ async fn summary(State(state): State<AppState>) -> Response {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
             let visits: i64 = c.query_row("SELECT COUNT(*) FROM location_visits", [], |r| r.get(0))?;
+            let motion: i64 = c.query_row("SELECT COUNT(*) FROM location_motion", [], |r| r.get(0))?;
             let mut stmt = c.prepare("SELECT device, COUNT(*), MAX(ts) FROM location_points GROUP BY device ORDER BY 3 DESC")?;
             let devices = stmt
                 .query_map([], |r| Ok(json!({"device": r.get::<_, String>(0)?, "points": r.get::<_, i64>(1)?, "last_ts": r.get::<_, f64>(2)?})))?
                 .collect::<rusqlite::Result<Vec<Value>>>()?;
-            Ok(json!({"ok": true, "measured": true, "n_considered": n, "points": n, "visits": visits,
+            Ok(json!({"ok": true, "measured": true, "n_considered": n, "points": n, "visits": visits, "motion": motion,
                 "first_ts": first, "last_ts": last, "last_received": received, "devices": devices}))
         })
         .await
     {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Raw capture: every column, motion stream, export (Ethan 2026-10-01 22:35)
+// ---------------------------------------------------------------------------
+
+/// Every raw column, in export order.
+pub(crate) const RAW_COLS: &str = "id, device, ts, lat, lon, alt, ell_alt, h_acc, v_acc, speed, speed_acc, \
+    course, course_acc, floor, simulated, accessory, age_s, activity, activity_conf, source, received";
+const RAW_NAMES: [&str; 21] = ["id", "device", "ts", "lat", "lon", "alt", "ell_alt", "h_acc", "v_acc", "speed",
+    "speed_acc", "course", "course_acc", "floor", "simulated", "accessory", "age_s", "activity", "activity_conf",
+    "source", "received"];
+
+fn raw_row(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let mut m = serde_json::Map::new();
+    for (i, name) in RAW_NAMES.iter().enumerate() {
+        let v: rusqlite::types::Value = r.get(i)?;
+        let j = match v {
+            rusqlite::types::Value::Null => Value::Null,
+            rusqlite::types::Value::Integer(n) => match *name {
+                "simulated" | "accessory" => json!(n != 0),
+                _ => json!(n),
+            },
+            rusqlite::types::Value::Real(f) => json!(f),
+            rusqlite::types::Value::Text(t) => json!(t),
+            rusqlite::types::Value::Blob(_) => Value::Null,
+        };
+        m.insert((*name).to_string(), j);
+    }
+    Ok(Value::Object(m))
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub(crate) struct InMotion {
+    pub id: String,
+    pub ts: f64,
+    #[serde(default)]
+    pub stationary: bool,
+    #[serde(default)]
+    pub walking: bool,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub cycling: bool,
+    #[serde(default)]
+    pub automotive: bool,
+    #[serde(default)]
+    pub unknown: bool,
+    #[serde(default)]
+    pub confidence: String,
+}
+
+#[derive(Deserialize)]
+struct MotionBatch {
+    #[serde(default)]
+    device: String,
+    motion: Vec<InMotion>,
+}
+
+/// Store Core Motion transitions. Returns (accepted, duplicate, rejected).
+pub(crate) fn db_ingest_motion(c: &Connection, device: &str, items: &[InMotion], now: f64) -> rusqlite::Result<(usize, usize, usize)> {
+    let (mut acc, mut dup, mut rej) = (0, 0, 0);
+    let mut stmt = c.prepare_cached(
+        "INSERT OR IGNORE INTO location_motion (id, device, ts, stationary, walking, running, cycling, automotive, unknown, confidence, received)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    )?;
+    for m in items {
+        if m.id.trim().is_empty() || m.id.len() > 100 || !m.ts.is_finite() || m.ts < 946_684_800.0 || m.ts > now + 86_400.0 {
+            rej += 1;
+            continue;
+        }
+        let n = stmt.execute(params![m.id, device, m.ts, m.stationary, m.walking, m.running, m.cycling,
+            m.automotive, m.unknown, m.confidence.chars().take(20).collect::<String>(), now])?;
+        if n == 1 { acc += 1 } else { dup += 1 }
+    }
+    Ok((acc, dup, rej))
+}
+
+async fn ingest_motion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    Json(batch): Json<MotionBatch>,
+) -> Response {
+    if !owner_write_allowed(&state, &headers, &uri) {
+        return refuse_write("motion");
+    }
+    if batch.motion.len() > MAX_BATCH {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"ok": false, "error": format!("at most {MAX_BATCH} items per request")}))).into_response();
+    }
+    let n = batch.motion.len();
+    let device = batch.device.chars().take(100).collect::<String>();
+    let t = now();
+    match write_value(&state, move |c| db_ingest_motion(c, &device, &batch.motion, t)).await {
+        Ok((accepted, duplicate, rejected)) => {
+            tracing::info!(target: "amux::location", verdict = "location_motion_ingest", accepted, duplicate, rejected,
+                measured = true, n_considered = n, "motion activity ingested");
+            Json(json!({"ok": true, "accepted": accepted, "duplicate": duplicate, "rejected": rejected,
+                "measured": true, "n_considered": n})).into_response()
+        }
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExportQ {
+    from: f64,
+    to: f64,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// Most rows one export returns; a larger range says so in a header.
+const EXPORT_MAX: i64 = 2_000_000;
+
+fn csv_cell(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) if s.contains([',', '"', '\n']) => format!("\"{}\"", s.replace('"', "\"\"")),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+pub(crate) fn render_export(rows: &[Value], format: &str) -> (String, &'static str, &'static str) {
+    match format {
+        "csv" => {
+            let mut out = RAW_NAMES.join(",");
+            out.push('\n');
+            for r in rows {
+                let line: Vec<String> = RAW_NAMES.iter().map(|k| csv_cell(&r[*k])).collect();
+                out.push_str(&line.join(","));
+                out.push('\n');
+            }
+            (out, "text/csv; charset=utf-8", "csv")
+        }
+        "gpx" => {
+            let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gpx version=\"1.1\" creator=\"amux\" \
+                xmlns=\"http://www.topografix.com/GPX/1/1\" xmlns:amux=\"https://amux.io/gpx/1\">\n<trk><name>amux location history</name><trkseg>\n");
+            for r in rows {
+                let ts = r["ts"].as_f64().unwrap_or(0.0);
+                let time = chrono::DateTime::<chrono::Utc>::from_timestamp(ts.floor() as i64, ((ts.fract()) * 1e9) as u32)
+                    .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                    .unwrap_or_default();
+                out.push_str(&format!("<trkpt lat=\"{}\" lon=\"{}\">", r["lat"], r["lon"]));
+                if let Some(a) = r["alt"].as_f64() {
+                    out.push_str(&format!("<ele>{a}</ele>"));
+                }
+                out.push_str(&format!("<time>{time}</time><extensions>"));
+                for k in ["h_acc", "v_acc", "speed", "speed_acc", "course", "course_acc", "floor", "age_s", "activity", "activity_conf", "source", "id"] {
+                    if !r[k].is_null() {
+                        let v = match &r[k] { Value::String(s) => xml_escape(s), other => other.to_string() };
+                        out.push_str(&format!("<amux:{k}>{v}</amux:{k}>"));
+                    }
+                }
+                out.push_str("</extensions></trkpt>\n");
+            }
+            out.push_str("</trkseg></trk>\n</gpx>\n");
+            (out, "application/gpx+xml", "gpx")
+        }
+        _ => {
+            let features: Vec<Value> = rows.iter().map(|r| {
+                let mut coords = vec![r["lon"].clone(), r["lat"].clone()];
+                if !r["alt"].is_null() {
+                    coords.push(r["alt"].clone());
+                }
+                json!({"type": "Feature", "geometry": {"type": "Point", "coordinates": coords}, "properties": r})
+            }).collect();
+            (json!({"type": "FeatureCollection", "features": features}).to_string(), "application/geo+json", "geojson")
+        }
+    }
+}
+
+async fn export(State(state): State<AppState>, Query(q): Query<ExportQ>) -> Response {
+    if !(q.from.is_finite() && q.to.is_finite() && q.to > q.from) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "measured": false, "n_considered": 0,
+            "why_unmeasured": "from/to must be epoch seconds with to > from"}))).into_response();
+    }
+    let (from, to) = (q.from, q.to);
+    let format = q.format.unwrap_or_else(|| "geojson".into());
+    if !["geojson", "gpx", "csv"].contains(&format.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "format must be geojson, gpx or csv"}))).into_response();
+    }
+    match state
+        .store
+        .read_async(move |c| {
+            let total = count_raw(c, from, to)?;
+            let mut stmt = c.prepare(&format!("SELECT {RAW_COLS} FROM location_points WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id LIMIT ?3"))?;
+            let rows = stmt.query_map(params![from, to, EXPORT_MAX], raw_row)?.collect::<rusqlite::Result<Vec<Value>>>()?;
+            Ok((total, rows))
+        })
+        .await
+    {
+        Ok((total, rows)) => {
+            let (body, ctype, ext) = render_export(&rows, &format);
+            tracing::info!(target: "amux::location", verdict = "location_export", format = %format, rows = rows.len(),
+                total, measured = true, n_considered = total, "raw location export");
+            let name = format!("attachment; filename=\"amux-location-{}-{}.{ext}\"", from as i64, to as i64);
+            (
+                [
+                    (axum::http::header::CONTENT_TYPE, ctype.to_string()),
+                    (axum::http::header::CONTENT_DISPOSITION, name),
+                    (axum::http::HeaderName::from_static("x-amux-rows"), rows.len().to_string()),
+                    (axum::http::HeaderName::from_static("x-amux-truncated"), if (rows.len() as i64) < total { "1" } else { "0" }.to_string()),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => server_error(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Analytics over the cleaned view
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct HeatQ {
+    #[serde(default)]
+    from: Option<f64>,
+    #[serde(default)]
+    to: Option<f64>,
+    /// Cell size in metres (default 50).
+    #[serde(default)]
+    cell_m: Option<f64>,
+}
+
+const HEAT_MAX_CELLS: i64 = 20_000;
+
+async fn heatmap(State(state): State<AppState>, Query(q): Query<HeatQ>) -> Response {
+    let from = q.from.unwrap_or(0.0);
+    let to = q.to.unwrap_or(f64::MAX);
+    let deg = q.cell_m.unwrap_or(50.0).clamp(10.0, 5000.0) / 111_320.0;
+    match state
+        .store
+        .read_async(move |c| {
+            // Integer grid cells; the +1e7 offset makes CAST round down for negatives too.
+            let sql = format!(
+                "SELECT CAST(lat/?3 + 10000000 AS INTEGER) - 10000000 AS a, CAST(lon/?3 + 10000000 AS INTEGER) - 10000000 AS b, COUNT(*) AS n
+                   FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL}
+                  GROUP BY a, b ORDER BY n DESC LIMIT ?4"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let cells = stmt
+                .query_map(params![from, to, deg, HEAT_MAX_CELLS + 1], |r| {
+                    let (a, b, n): (i64, i64, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
+                    Ok(json!([(a as f64 + 0.5) * deg, (b as f64 + 0.5) * deg, n]))
+                })?
+                .collect::<rusqlite::Result<Vec<Value>>>()?;
+            let n: i64 = c.query_row(&format!("SELECT COUNT(*) FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL}"),
+                params![from, to], |r| r.get(0))?;
+            Ok((n, cells))
+        })
+        .await
+    {
+        Ok((n, mut cells)) => {
+            let truncated = cells.len() as i64 > HEAT_MAX_CELLS;
+            cells.truncate(HEAT_MAX_CELLS as usize);
+            Json(json!({"ok": true, "measured": true, "n_considered": n, "cell_deg": deg, "cells": cells,
+                "n_cells": cells.len(), "truncated": truncated})).into_response()
+        }
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct StatsQ {
+    from: f64,
+    to: f64,
+    #[serde(default)]
+    bucket: Option<String>,
+    /// Minutes east of UTC for the viewer's day boundaries (e.g. -240 for New York in summer).
+    #[serde(default)]
+    tz_offset_min: Option<f64>,
+}
+
+/// A place: stops grouped on a fixed ~150 m grid. One function, so a better
+/// clustering can replace it without touching storage or callers.
+pub(crate) fn place_key(lat: f64, lon: f64) -> (i64, i64) {
+    ((lat / 0.00135).floor() as i64, (lon / 0.0018).floor() as i64)
+}
+
+fn bucket_label(day: i64, bucket: &str) -> String {
+    let d = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + chrono::Duration::days(day);
+    match bucket {
+        "month" => d.format("%Y-%m").to_string(),
+        "week" => {
+            let monday = d - chrono::Duration::days(i64::from(chrono::Datelike::weekday(&d).num_days_from_monday()));
+            monday.format("%Y-%m-%d").to_string()
+        }
+        _ => d.format("%Y-%m-%d").to_string(),
+    }
+}
+
+#[derive(Default)]
+struct PlaceAcc {
+    time_s: f64,
+    visits: i64,
+    lat_sum: f64,
+    lon_sum: f64,
+    first: f64,
+}
+
+/// The first analytics set. Segments one local day at a time so memory stays
+/// bounded however long the range is (a trip that crosses midnight counts in
+/// both days).
+pub(crate) fn compute_stats(c: &Connection, from: f64, to: f64, bucket: &str, off_s: f64, now: f64) -> anyhow::Result<Value> {
+    let mut days: Vec<i64> = Vec::new();
+    {
+        let mut stmt = c.prepare(&format!(
+            "SELECT DISTINCT CAST((ts + ?3) / 86400 AS INTEGER) FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL} ORDER BY 1"
+        ))?;
+        for d in stmt.query_map(params![from, to, off_s], |r| r.get::<_, i64>(0))? {
+            days.push(d?);
+        }
+    }
+    let mut buckets: std::collections::BTreeMap<String, std::collections::BTreeMap<&'static str, (f64, f64, i64)>> = Default::default();
+    let mut totals: std::collections::BTreeMap<&'static str, (f64, f64, i64)> = Default::default();
+    let mut places: std::collections::HashMap<(i64, i64), PlaceAcc> = Default::default();
+    let mut longest: Option<Value> = None;
+    let mut n_points = 0usize;
+    for day in &days {
+        let d_from = (*day as f64) * 86_400.0 - off_s;
+        let (lo, hi) = (d_from.max(from), (d_from + 86_400.0).min(to));
+        let pts = load_points(c, lo, hi)?;
+        n_points += pts.len();
+        let visits = load_visits(c, lo, hi)?;
+        let label = bucket_label(*day, bucket);
+        for s in segment(&pts, &visits, now) {
+            if s["kind"] == "trip" {
+                let mode: &'static str = match s["mode"].as_str().unwrap_or("unknown") {
+                    "walking" => "walking", "running" => "running", "cycling" => "cycling",
+                    "driving" => "driving", "train" => "train", _ => "unknown",
+                };
+                let (dist, dur) = (s["distance_m"].as_f64().unwrap_or(0.0), s["duration_s"].as_f64().unwrap_or(0.0));
+                for m in [buckets.entry(label.clone()).or_default(), &mut totals] {
+                    let e = m.entry(mode).or_default();
+                    e.0 += dist;
+                    e.1 += dur;
+                    e.2 += 1;
+                }
+                if longest.as_ref().is_none_or(|l| l["distance_m"].as_f64().unwrap_or(0.0) < dist) {
+                    let mut l = s.clone();
+                    if let Some(o) = l.as_object_mut() {
+                        o.remove("path");
+                    }
+                    longest = Some(l);
+                }
+            } else {
+                let (lat, lon) = (s["lat"].as_f64().unwrap_or(0.0), s["lon"].as_f64().unwrap_or(0.0));
+                let p = places.entry(place_key(lat, lon)).or_default();
+                if p.visits == 0 {
+                    p.first = s["start"].as_f64().unwrap_or(0.0);
+                }
+                p.time_s += s["duration_s"].as_f64().unwrap_or(0.0);
+                p.visits += 1;
+                p.lat_sum += lat;
+                p.lon_sum += lon;
+            }
+        }
+    }
+    let modes = |m: &std::collections::BTreeMap<&'static str, (f64, f64, i64)>| -> Value {
+        Value::Object(m.iter().map(|(k, (d, t, n))| ((*k).to_string(), json!({
+            "distance_m": d.round(), "moving_s": t.round(), "trips": n,
+            "avg_speed_mps": if *t > 0.0 { (d / t * 100.0).round() / 100.0 } else { 0.0 },
+        }))).collect())
+    };
+    let mut ranked: Vec<((i64, i64), PlaceAcc)> = places.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.time_s.total_cmp(&a.1.time_s));
+    let place_json = |k: &(i64, i64), p: &PlaceAcc, new: bool| json!({
+        "id": format!("place_{}_{}", k.0, k.1), "lat": p.lat_sum / p.visits as f64, "lon": p.lon_sum / p.visits as f64,
+        "time_s": p.time_s.round(), "visits": p.visits, "first_seen_in_range": p.first, "new": new,
+    });
+    // New = no cleaned fix inside the place's cell before the range began.
+    let mut top = Vec::new();
+    let mut new_places = Vec::new();
+    for (k, p) in ranked.iter().take(50) {
+        let (la0, lo0) = (k.0 as f64 * 0.00135, k.1 as f64 * 0.0018);
+        let seen: bool = c.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM location_points WHERE ts < ?1 AND lat >= ?2 AND lat < ?3 AND lon >= ?4 AND lon < ?5 AND {CLEAN_SQL})"),
+            params![from, la0, la0 + 0.00135, lo0, lo0 + 0.0018], |r| r.get(0))?;
+        let j = place_json(k, p, !seen);
+        if !seen {
+            new_places.push(j.clone());
+        }
+        if top.len() < 10 {
+            top.push(j);
+        }
+    }
+    let buckets_json: Vec<Value> = buckets.iter().map(|(label, m)| json!({"bucket": label, "modes": modes(m)})).collect();
+    Ok(json!({
+        "ok": true, "measured": true, "n_considered": n_points, "days_with_data": days.len(),
+        "bucket": bucket, "from": from, "to": to,
+        "totals": modes(&totals), "buckets": buckets_json, "top_places": top, "new_places": new_places,
+        "places_considered": ranked.len(), "longest_trip": longest,
+    }))
+}
+
+async fn stats(State(state): State<AppState>, Query(q): Query<StatsQ>) -> Response {
+    let valid = q.from.is_finite() && q.to.is_finite() && q.to > q.from && q.to - q.from <= 3660.0 * 86_400.0;
+    if !valid {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "measured": false, "n_considered": 0,
+            "why_unmeasured": "from/to must be epoch seconds, to > from, at most 10 years"}))).into_response();
+    }
+    let bucket = match q.bucket.as_deref() { Some("week") => "week", Some("month") => "month", _ => "day" };
+    let off_s = q.tz_offset_min.unwrap_or(0.0).clamp(-14.0 * 60.0, 14.0 * 60.0) * 60.0;
+    let (from, to) = (q.from, q.to);
+    let t = now();
+    match state.store.read_async(move |c| compute_stats(c, from, to, bucket, off_s, t)).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => server_error(e),
     }
@@ -667,7 +1115,87 @@ mod tests {
     }
     fn inp(id: &str, ts: f64) -> InPoint {
         InPoint { id: id.into(), ts, lat: 40.7, lon: -74.0, alt: None, h_acc: Some(5.0), v_acc: None,
-            speed: Some(-1.0), course: None, activity: Some("walking".into()), activity_conf: Some("high".into()), source: None }
+            speed: Some(-1.0), course: None, activity: Some("walking".into()), activity_conf: Some("high".into()), source: None,
+            ell_alt: None, speed_acc: None, course_acc: None, floor: None, simulated: None, accessory: None, age_s: None }
+    }
+
+    #[test]
+    fn raw_rows_keep_every_field_and_the_cleaned_view_skips_bad_fixes() {
+        let c = crate::db::migrate::test_memdb();
+        let t = 1_790_000_000.0;
+        let good = InPoint { ell_alt: Some(-30.0), speed_acc: Some(0.5), course_acc: Some(3.0), floor: Some(2),
+            simulated: Some(false), accessory: Some(false), age_s: Some(0.2), speed: Some(1.2), ..inp("g", t) };
+        let poor = InPoint { h_acc: Some(450.0), ..inp("poor", t + 1.0) };
+        let invalid = InPoint { h_acc: Some(-1.0), ..inp("inv", t + 2.0) };
+        let stale = InPoint { age_s: Some(120.0), ..inp("stale", t + 3.0) };
+        let sim = InPoint { simulated: Some(true), ..inp("sim", t + 4.0) };
+        let (acc, _, rej) = db_ingest_points(&c, "iphone", &[good, poor, invalid, stale, sim], t + 10.0).unwrap();
+        // RAW: all five are stored, the -1 "invalid" accuracy included.
+        assert_eq!((acc, rej.len()), (5, 0), "{rej:?}");
+        let row = c.query_row(&format!("SELECT {RAW_COLS} FROM location_points WHERE id='g'"), [], raw_row).unwrap();
+        assert_eq!(row["ell_alt"], -30.0);
+        assert_eq!(row["floor"], 2);
+        assert_eq!(row["simulated"], false);
+        assert_eq!(row["speed_acc"], 0.5);
+        // The cleaned view (map, timeline, stats) sees only the good fix.
+        let clean = load_points(&c, t - 1.0, t + 100.0).unwrap();
+        assert_eq!(clean.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["g"]);
+        assert_eq!(count_raw(&c, t - 1.0, t + 100.0).unwrap(), 5);
+    }
+
+    #[test]
+    fn motion_stream_is_stored_raw_and_idempotent() {
+        let c = crate::db::migrate::test_memdb();
+        let t = 1_790_000_000.0;
+        let m = |id: &str, ts: f64| InMotion { id: id.into(), ts, stationary: false, walking: true, running: false,
+            cycling: false, automotive: false, unknown: false, confidence: "high".into() };
+        assert_eq!(db_ingest_motion(&c, "iphone", &[m("m1", t), m("m2", t + 5.0)], t + 10.0).unwrap(), (2, 0, 0));
+        assert_eq!(db_ingest_motion(&c, "iphone", &[m("m1", t)], t + 20.0).unwrap(), (0, 1, 0));
+    }
+
+    #[test]
+    fn exports_carry_every_raw_field_in_each_format() {
+        let rows = vec![json!({"id": "a", "device": "d", "ts": 1790000000.5, "lat": 40.7, "lon": -74.0, "alt": 12.0,
+            "ell_alt": -20.0, "h_acc": 5.0, "v_acc": 3.0, "speed": 1.4, "speed_acc": 0.3, "course": 90.0, "course_acc": 5.0,
+            "floor": 1, "simulated": false, "accessory": false, "age_s": 0.1, "activity": "walking", "activity_conf": "high",
+            "source": "live", "received": 1790000001.0})];
+        let (csv, _, _) = render_export(&rows, "csv");
+        assert!(csv.starts_with(&RAW_NAMES.join(",")));
+        assert_eq!(csv.lines().nth(1).unwrap().split(',').count(), RAW_NAMES.len());
+        let (gpx, _, _) = render_export(&rows, "gpx");
+        assert!(gpx.contains("<trkpt lat=\"40.7\" lon=\"-74.0\">") && gpx.contains("<amux:speed_acc>0.3</amux:speed_acc>"), "{gpx}");
+        assert!(gpx.contains("2026-09-21T") , "{gpx}");
+        let (geo, _, _) = render_export(&rows, "geojson");
+        let g: Value = serde_json::from_str(&geo).unwrap();
+        assert_eq!(g["features"][0]["geometry"]["coordinates"], json!([-74.0, 40.7, 12.0]));
+        assert_eq!(g["features"][0]["properties"]["course_acc"], 5.0);
+    }
+
+    #[test]
+    fn stats_count_distance_per_mode_places_new_places_and_the_longest_trip() {
+        let c = crate::db::migrate::test_memdb();
+        let t = 1_790_049_600.0; // a midday, UTC
+        let mut pts = vec![
+            InPoint { activity: Some("stationary".into()), speed: Some(0.0), ..inp("h1", t) },
+            InPoint { activity: Some("stationary".into()), speed: Some(0.0), lat: 40.70002, ..inp("h2", t + 1200.0) },
+        ];
+        for k in 1..=90 {
+            pts.push(InPoint { lat: 40.7 + k as f64 * 0.000126, speed: Some(1.4), ..inp(&format!("w{k}"), t + 1200.0 + k as f64 * 10.0) });
+        }
+        db_ingest_points(&c, "iphone", &pts, t + 5000.0).unwrap();
+        let v = compute_stats(&c, t - 3600.0, t + 7200.0, "day", 0.0, t + 5000.0).unwrap();
+        assert_eq!(v["measured"], true);
+        assert_eq!(v["n_considered"], 92);
+        let walk = &v["totals"]["walking"];
+        assert!((1100.0..1400.0).contains(&walk["distance_m"].as_f64().unwrap()), "{v}");
+        assert!(walk["avg_speed_mps"].as_f64().unwrap() > 1.0);
+        assert_eq!(v["longest_trip"]["mode"], "walking");
+        assert_eq!(v["top_places"].as_array().unwrap().len(), 1);
+        // Nothing existed before the range, so the place is new.
+        assert_eq!(v["new_places"].as_array().unwrap().len(), 1);
+        // Asked again for a later range only, the same place is no longer new.
+        let later = compute_stats(&c, t + 1000.0, t + 7200.0, "day", 0.0, t + 5000.0).unwrap();
+        assert!(later["new_places"].as_array().unwrap().iter().all(|p| p["id"] != v["new_places"][0]["id"]), "{later}");
     }
 
     #[test]
@@ -683,9 +1211,9 @@ mod tests {
         assert_eq!((acc, dup), (0, 2));
         let n: i64 = c.query_row("SELECT COUNT(*) FROM location_points", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2);
-        // Core Location's -1 "invalid speed" is stored as NULL, not as a speed.
+        // RAW: Core Location's -1 "invalid speed" is stored exactly as delivered.
         let s: Option<f64> = c.query_row("SELECT speed FROM location_points WHERE id='a'", [], |r| r.get(0)).unwrap();
-        assert_eq!(s, None);
+        assert_eq!(s, Some(-1.0));
     }
 
     #[test]

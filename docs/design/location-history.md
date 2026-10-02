@@ -147,7 +147,7 @@ of that is about 1 GB. A one-day query reads about 11,000 rows through the
 
 The map, timeline and stats read a cleaned view of the raw rows: fixes with
 invalid or worse-than-100 m accuracy, fixes older than 30 s on arrival, and
-simulated fixes are left out (unless `include_simulated=1`). Raw export
+simulated fixes are left out (the raw rows keep them). Raw export
 ignores the cleaning.
 
 ### Routes

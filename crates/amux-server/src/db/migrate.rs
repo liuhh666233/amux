@@ -558,6 +558,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "0099_location_history",
         sql: include_str!("../../migrations/0099_location_history.sql"),
     },
+    Migration {
+        version: 100,
+        name: "0100_location_raw",
+        sql: include_str!("../../migrations/0100_location_raw.sql"),
+    },
 ];
 
 /// Migrations embedded in THIS binary that the DB has not recorded yet.

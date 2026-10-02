@@ -1128,6 +1128,8 @@ pub const TIMESTAMP_COLUMNS: &[(&str, &str, bool)] = &[
     ("location_visits", "arrival", false),
     ("location_visits", "departure", false),
     ("location_visits", "received", false),
+    ("location_motion", "ts", false),
+    ("location_motion", "received", false),
     ("cmd_history", "delivered_at", true),
     ("cmd_history", "intake_called_at", false),
     ("cmd_history", "intake_retry_at", false),
