@@ -2353,6 +2353,47 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         path: "/api/browser/action",
         methods: &["POST"],
     },
+    // Verb aliases for /action, and the profile list (4b084e95, AMUX-5490).
+    RouteEntry {
+        path: "/api/browser/profile/list",
+        methods: &["GET"],
+    },
+    RouteEntry {
+        path: "/api/browser/eval",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/click",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/type",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/key",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/scroll",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/wait",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/extract",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/back",
+        methods: &["POST"],
+    },
+    RouteEntry {
+        path: "/api/browser/resize",
+        methods: &["POST"],
+    },
     RouteEntry {
         path: "/api/browser/keepalive",
         methods: &["POST"],
