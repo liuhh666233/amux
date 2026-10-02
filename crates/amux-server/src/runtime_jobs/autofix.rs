@@ -5720,6 +5720,15 @@ enum DuOutcome {
 /// everything it did read. Treating that as unreadable would discard a
 /// mostly-correct figure for the common case of a few protected subdirs.
 fn du_one(p: &std::path::Path, deadline: std::time::Instant) -> DuOutcome {
+    // A deadline already past means no time to measure: do not start a walk.
+    // Checked only inside the poll loop, a fast `du` on a small path could
+    // finish before the first check and report Sized past its deadline (the
+    // CI flake in an_expired_deadline_is_a_timeout_not_an_unreadable_path,
+    // run 37057066552).
+    if std::time::Instant::now() >= deadline {
+        tracing::debug!(path = %p.display(), "disk: du deadline already expired — path skipped in the size ranking");
+        return DuOutcome::TimedOut;
+    }
     let mut child = match std::process::Command::new("/usr/bin/du")
         .args(["-skx"])
         .arg(p)
