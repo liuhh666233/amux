@@ -6524,7 +6524,7 @@ _land_precheck() {
   git rev-parse -q --verify "$remote/$branch^{commit}" >/dev/null 2>&1 || {
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured: no $remote/$branch" >> "$log"; return 0; }
   t0=$(date +%s); rc=0
-  out="$(cd "$top" && perl -e 'alarm shift; exec @ARGV or exit 127' "${AMUX_LAND_PRECHECK_TIMEOUT_S:-180}" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
+  out="$(cd "$top" && AMUX_LAND_PRECHECK_MODE="enqueue" perl -e 'alarm shift; exec @ARGV or exit 127' "${AMUX_LAND_PRECHECK_TIMEOUT_S:-180}" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
   full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-precheck.log"
   mkdir -p "${full%/*}"; printf '%s\n' "$out" > "$full"
   case "$rc" in
@@ -6536,6 +6536,20 @@ _land_precheck() {
   printf '%s\n' "$out" | tail -30 >&2
   echo "amux land: refused before queueing: the repository's land precheck failed on this range (full output $full). Fix the commits and run amux land again." >&2
   return 1
+}
+
+# _land_precheck_exec <base> <tip>: run the repository's land precheck in
+# BATCH mode (AMUX_LAND_PRECHECK_MODE=batch: judge only, write nothing) and
+# print its output. rc 0 pass, 1 refused, 2 no check or unmeasured.
+_land_precheck_exec() {
+  local top chk out rc=0
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 2
+  chk="${AMUX_LAND_PRECHECK:-}"
+  [ -n "$chk" ] || { [ -x "$top/.githooks/land-precheck" ] && chk="$top/.githooks/land-precheck"; }
+  [ -n "$chk" ] || return 2
+  out="$(cd "$top" && AMUX_LAND_PRECHECK_MODE="batch" perl -e 'alarm shift; exec @ARGV or exit 127' "${AMUX_LAND_PRECHECK_TIMEOUT_S:-180}" $chk "$1" "$(git rev-parse "$2")" 2>&1)" || rc=$?
+  printf '%s\n' "$out"
+  case "$rc" in 0) return 0 ;; 142|127|126) return 2 ;; *) return 1 ;; esac
 }
 
 # _land_pick_tree <onto> <commit>: the tree of CHERRY-PICKING <commit> onto
@@ -6644,7 +6658,8 @@ _land_pid_cwd() {
 # process group killed. If the rename does not happen within 60s the old
 # waiter is resumed as it was. A waiter that holds the lock is never adopted.
 _land_adopt() {
-  local want="${1:-}" me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" url key q lock t pid pgid cwd sha nb n=0 got mine=0 mk
+  local want="${1:-}" force_batch=0 me="${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}" url key q lock t pid pgid cwd sha nb n=0 got mine=0 mk
+  if [ "$want" = "--batch" ]; then force_batch=1; want="${2:-}"; elif [ "${2:-}" = "--batch" ]; then force_batch=1; fi
   git rev-parse --git-dir >/dev/null 2>&1 || die "amux land --adopt: run it inside the repository's checkout"
   url="$(git remote get-url origin 2>/dev/null)" || die "amux land --adopt: no remote origin"
   key="$(printf '%s %s' "$url" main | shasum | cut -c1-16)"
@@ -6664,7 +6679,10 @@ _land_adopt() {
     if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$pid" ]; then
       echo "amux land: pid $pid holds the lock; it finishes on its own code (not adopted)"; continue
     fi
-    sha="$(sed -n 2p "$t")"; nb=""; [ "$(sed -n 4p "$t" || true)" = 1 ] || nb="--no-batch"
+    sha="$(sed -n 2p "$t")"; nb=""
+    # Carry the lane's own choice; "0r" (solo after refusals) and, with
+    # --adopt --batch, an older plain 0 come back batchable.
+    case "$(sed -n 4p "$t" || true)" in 1|0r) ;; *) [ "$force_batch" = 1 ] || nb="--no-batch" ;; esac
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     [ -n "$pgid" ] || pgid="$pid"
     cwd="$(_land_pid_cwd "$pid" "$pgid")"
@@ -6823,7 +6841,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.7"
+LAND_BEHAVIOR_VERSION="2026-10-02.8"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -6872,6 +6890,8 @@ cmd_land() {
   # lane's waiters that run OLDER land code onto the installed code at the
   # same queue place (same ticket name, new pid). A lock holder is never
   # adopted, and a failed hand-off resumes the old waiter unchanged.
+  # `--adopt --batch` also makes the ticket batchable again (for a ticket an
+  # older land made solo after a refused batch).
   #
   # --detach queues and returns at once: land runs in its own session (macOS
   # has no setsid(1); python's os.setsid does it), output goes to a log under
@@ -6906,7 +6926,7 @@ cmd_land() {
       --priority) priority=1; fwd_args+=("$1"); shift ;;
       --reason) prio_reason="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --demote) shift; _land_demote "${1:-}"; return $? ;;
-      --adopt) shift; _land_adopt "${1:-}"; return $? ;;
+      --adopt) shift; _land_adopt "${1:-}" "${2:-}"; return $? ;;
       --batch-max) batch_max="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
       --detach) detach=1; shift ;;
       --sha) land_sha="${2:?}"; fwd_args+=("$1" "$2"); shift 2 ;;
@@ -7048,7 +7068,7 @@ p.communicate(msg.encode())
   # "$lock.q"; only the oldest live ticket may take the lock. A ticket whose pid
   # is gone is removed by whoever sees it. A holder that takes a waiter into its
   # batch writes the outcome to "$lock.r/<ticket>".
-  local q="$lock.q" rdir="$lock.r" tname waited=0 announced=0 head pos t res batchable="$batch"
+  local q="$lock.q" rdir="$lock.r" tname waited=0 announced=0 head pos t res batchable="$batch" anon_refused=0
   mkdir -p "$q" "$rdir"
   # A ticket's NAME is its place: waiters, including ones started before
   # --priority existed, find the head by sorting names. Ordinary tickets are a
@@ -7137,7 +7157,16 @@ p.communicate(msg.encode())
         *)
           # After a refused batch nobody knows whose commit was refused, so
           # this lane lands alone rather than poisoning the next batch too.
-          case "$res" in *refused*) batchable=0; _land_ticket ;; esac
+          # A refusal that named nobody used to make every waiter in that batch
+          # solo for good; with blame read from FAIL lines and the composed
+          # precheck, one anonymous refusal is not evidence against this lane
+          # (2026-10-02: four lanes went solo after one 07:42Z batch, about an
+          # hour of extra drain on a 15-deep queue). The second one is: go solo,
+          # marked "0r" so --adopt can tell it from a lane's own --no-batch.
+          case "$res" in *refused*)
+            anon_refused=$((anon_refused + 1))
+            [ "$anon_refused" -ge 2 ] && [ "$batchable" = 1 ] && { batchable="0r"; _land_ticket; } ;;
+          esac
           _land_log "left out of a batch ($res); keeping its place in the queue"
           ;;
       esac
@@ -7392,6 +7421,38 @@ p.communicate(msg.encode())
     [ "$solo" = 1 ] || _land_stack "$stack_tip"
     lanes="$(printf '%s' "$stack_in" | awk 'NF {printf "%s%s", sep, $2; sep=", "}')"
     [ -z "$lanes" ] || _land_log "batching ${lanes} behind this push (one gate run)"
+    # A batch can fail only once COMPOSED (the ops registry goes stale from two
+    # lanes' changes that each pass alone; six batches refused that way on
+    # 2026-10-01/02 after a full gate each). Run the repository's precheck on
+    # the composed stack first: seconds instead of a gate (gs12-gates measured
+    # 46 s at load 22). It judges and writes nothing in batch mode.
+    # AMUX_LAND_PRECHECK_BATCH=0 skips it.
+    if [ -n "$lanes" ] && [ "${AMUX_LAND_PRECHECK_BATCH:-1}" = 1 ]; then
+      local _pc_out _pc_rc=0 _pc_t0 _pc_named _pc_tk _pc_rest _pc_excl=""
+      _pc_t0=$(date +%s)
+      _pc_out="$(_land_precheck_exec "$remote/$branch" "$stack_tip")" || _pc_rc=$?
+      if [ "$_pc_rc" = 1 ]; then
+        full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-a$i-batchcheck.log"
+        mkdir -p "${full%/*}"; printf '%s\n' "$_pc_out" > "$full"
+        _pc_named="$(_land_named_waiters "$(printf '%s\n' "$_pc_out" | grep -E '✗|FAIL|BLOCKED|REFUSED|refus|^error:|^fatal:' | head -40)" "$stack_tip")"
+        if [ -n "$_pc_named" ]; then
+          for _pc_tk in $_pc_named; do
+            batch_skip="$batch_skip$_pc_tk "
+            _pc_rest="$(printf '%s\n' "$stack_in" | awk -v t="$_pc_tk" '$1==t {print $2}')"
+            _pc_excl="$_pc_excl${_pc_excl:+, }$_pc_rest"
+            echo "excluded: the push hook refused the batch on your commit (land precheck, full output $full); fix it and run amux land again" > "$rdir/$_pc_tk"
+            rm -f -- "${q:?}/${_pc_tk:?}"
+          done
+          _land_log "composed batch with ${lanes} failed the land precheck on ${_pc_excl}'s commit in $(( $(date +%s) - _pc_t0 ))s; retrying without it, no gate run spent. Output: $full"
+        else
+          _land_tell "excluded: the composed batch failed the land precheck (full output $full); landing on your own turn"
+          _land_log "composed batch with ${lanes} failed the land precheck naming no waiter in $(( $(date +%s) - _pc_t0 ))s; pushing this lane alone, no gate run spent. Output: $full"
+          solo=1
+        fi
+        continue
+      fi
+      [ "$_pc_rc" = 0 ] && _land_log "composed batch passed the land precheck in $(( $(date +%s) - _pc_t0 ))s"
+    fi
     # `|| rc=$?`, not `; rc=$?`: this CLI runs under set -e, and a rejected
     # push in a bare assignment would exit the script before the retry.
     # AMUX_LAND_HOLDER_PID marks this push as the lock holder's, so a pre-push
