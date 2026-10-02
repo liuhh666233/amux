@@ -7022,10 +7022,16 @@ _land_regenerate() {
     printf '%s\n' "$tip"; return 0
   fi
   n="$(git diff --name-only "$tip" "$tree" | wc -l | tr -d ' ')"
+  # Stamped with the holding lane: git commit-tree runs no commit hooks, so this
+  # commit had no Amux-Session trailer and Mixpeek's session-stamp leg refused
+  # it at the END of the gate (planes 22:11Z, retrievers 21:53Z, 2026-10-02),
+  # marking a dozen innocent tickets "solo after refusals".
   new="$(git commit-tree "$tree" -p "$tip" -m "amux land: regenerate $n derived file(s) on the composed tree
 
 Commands:
-$cmd")" || return 1
+$cmd
+
+Amux-Session: ${AMUX_WORKER:-${AMUX_SESSION:-amux-land}}")" || return 1
   _land_log "regenerate ran in $(( $(date +%s) - t0 ))s and re-rendered $n file(s) as $(git rev-parse --short "$new") on top of $(git rev-parse --short "$tip")"
   printf '%s\n' "$new"
 }
@@ -7435,7 +7441,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.29"
+LAND_BEHAVIOR_VERSION="2026-10-02.30"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
