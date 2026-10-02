@@ -240,6 +240,29 @@ SWAP_FREE_FLOOR_MB=${AMUX_CLEANUP_SWAP_FREE_FLOOR_MB:-512}
 SWAP_FREE_CRITICAL_PCT=${AMUX_CLEANUP_SWAP_FREE_CRITICAL_PCT:-0.10}
 CPU_SHARE=${AMUX_CLEANUP_CPU_SHARE:-0.9}
 STATE_DIR=${AMUX_CLEANUP_STATE_DIR:-$HOME/.amux/logs/mac-cleanup}
+
+# Claude Code session temp dirs (DESKT-77). Claude Code gives every session
+# /private/tmp/claude-<uid>/<project>/<session-uuid>/{scratchpad,tasks} and never
+# removes it. On 2026-10-02 that tree held 214G in 258 session dirs, while the disk
+# sat at 35G free: 84G in sessions whose transcript had not been written for two
+# days, and one live session at 45.8G of leftover 2.1G repo tarballs. Two rules:
+#  1. A DEAD session dir is removed: its transcript (~/.claude/projects/<project>/
+#     <uuid>.jsonl, or the <uuid>/ subagent dir) and every file inside it are idle
+#     for CLAUDE_TMP_IDLE_H (CLAUDE_TMP_TIGHT_IDLE_H when the disk is tight), no
+#     process holds anything in it open, and no git worktree inside it is dirty.
+#  2. A LIVE session over CLAUDE_TMP_QUOTA_GB loses its biggest top-level scratchpad
+#     entries that are idle for CLAUDE_TMP_ENTRY_IDLE_H and not open, until it is
+#     under quota. A git worktree entry is never removed by this rule.
+# Every removal is appended to $STATE_DIR/claude-tmp-reaps.log. CLAUDE_TMP_QUOTA_GB=0
+# turns rule 2 off; CLAUDE_TMP_IDLE_H=0 turns rule 1 off.
+CLAUDE_TMP_ROOT=${AMUX_CLEANUP_CLAUDE_TMP_ROOT:-/private/tmp/claude-$(id -u)}
+CLAUDE_PROJECTS=${AMUX_CLEANUP_CLAUDE_PROJECTS:-$HOME/.claude/projects}
+CLAUDE_TMP_IDLE_H=${AMUX_CLEANUP_CLAUDE_TMP_IDLE_H:-48}
+CLAUDE_TMP_TIGHT_IDLE_H=${AMUX_CLEANUP_CLAUDE_TMP_TIGHT_IDLE_H:-24}
+CLAUDE_TMP_QUOTA_GB=${AMUX_CLEANUP_CLAUDE_TMP_QUOTA_GB:-20}
+CLAUDE_TMP_ENTRY_IDLE_H=${AMUX_CLEANUP_CLAUDE_TMP_ENTRY_IDLE_H:-6}
+CLAUDE_TMP_WALK_S=${AMUX_CLEANUP_CLAUDE_TMP_WALK_S:-45}   # 15s measured too short: a 16G idle session walks in 8-10s unloaded, longer under load
+CLAUDE_TMP_BUDGET_S=${AMUX_CLEANUP_CLAUDE_TMP_BUDGET_S:-150}
 # Not the desktop lane: it is ISOLATED, and amux refuses automated sends into an
 # isolated worker by design (round 1 of DESKT-57 measured exactly that refusal).
 # mac-ops is a non-isolated sonnet worker whose brief is the runbook below.
@@ -789,6 +812,118 @@ reap_idle_worktrees() { # <roots> <idle_hours> <dry:0|1>
   rm -f -- "${cands:?}" "${eligible:?}" "${lsofsnap:?}"
 }
 
+# ── Claude Code session temp dirs (DESKT-77) ────────────────────────────────
+# 0 = some file under one of the paths was written in the last <hours>; 1 = none
+# was (or none exists); 2 = the walk ran out of budget, so the caller must keep.
+any_recent() { # <hours> <budget_s> <path>...
+  local mins=$(( $1 * 60 )) budget=$2 out rc=0; shift 2
+  local -a ex=(); local q
+  for q in "$@"; do [ -e "$q" ] && ex+=("$q"); done
+  [ ${#ex[@]} -gt 0 ] || return 1
+  out=$(perl -e 'alarm shift; exec @ARGV' "$budget" find "${ex[@]}" -mmin "-$mins" -print -quit 2>/dev/null) || rc=$?
+  if [ "$rc" = 142 ]; then return 2; fi
+  [ -n "$out" ]
+}
+
+# Is there a git worktree (a .git FILE) within three levels of <dir> with uncommitted
+# or untracked content? A dirty worktree is the one thing in a scratchpad most
+# likely to be somebody's only copy, so it keeps the whole session dir.
+has_dirty_worktree() { # <dir>
+  local g w
+  while IFS= read -r g; do
+    w=$(dirname "$g")
+    if [ -n "$(git -C "$w" status --porcelain --untracked-files=normal 2>/dev/null | head -1)" ]; then return 0; fi
+  done < <(find "$1" -maxdepth 3 -name .git -type f 2>/dev/null)
+  return 1
+}
+
+du_kb() { # <path> <budget_s>; prints KB, or nothing when the walk ran out of time
+  perl -e 'alarm shift; exec @ARGV' "$2" du -sk "$1" 2>/dev/null | awk '{print $1+0}'
+}
+
+claude_tmp_ledger() { # <reason> <kb> <path>
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  printf '%s\t%s\t%s\t%s\n' "$(date '+%F %T')" "$1" "${2:-?}" "$3" >> "$STATE_DIR/claude-tmp-reaps.log"
+}
+
+# Sets CLAUDE_TMP_REAPED / CLAUDE_TMP_REAPED_KB. Fails closed like the arms above:
+# no lsof snapshot means nothing is removed, and a walk that runs out of time keeps.
+reap_claude_tmp() { # <root> <idle_hours> <dry:0|1>
+  local root=$1 idle_h=$2 dry=${3:-0}
+  local t0 lsofsnap live sess proj uuid rc kb q n_sess=0 n_live=0 n_open=0 n_dirty=0 n_unk=0 n_over=0 n_fail=0 n_quota=0 n_qkept=0 handles=measured
+  local quota_kb=${CLAUDE_TMP_QUOTA_KB:-$(( CLAUDE_TMP_QUOTA_GB * 1048576 ))}   # KB override: the suite's fixtures are megabytes
+  CLAUDE_TMP_REAPED=0; CLAUDE_TMP_REAPED_KB=0
+  if [ ! -d "$root" ]; then echo "mac-cleanup: claude tmp: no root at $root (not present)"; return 0; fi
+  t0=$(date +%s)
+  lsofsnap=$(mktemp "${TMPDIR:-/tmp}/ctmp-lsof.XXXXXX"); live=$(mktemp "${TMPDIR:-/tmp}/ctmp-live.XXXXXX")
+  if $LSOF_CMD > "$lsofsnap" 2>/dev/null && [ -s "$lsofsnap" ]; then :; else handles=UNMEASURED; fi
+  if [ "$handles" = UNMEASURED ]; then
+    echo "mac-cleanup: claude tmp: open handles UNMEASURED (lsof produced nothing): reaped 0, nothing is deleted without it"
+    rm -f -- "${lsofsnap:?}" "${live:?}"; return 0
+  fi
+  for sess in "$root"/*/*/; do
+    sess=${sess%/}
+    [ -d "$sess" ] || continue
+    n_sess=$((n_sess+1))
+    uuid=${sess##*/}; proj=${sess%/*}; proj=${proj##*/}
+    if [ $(( $(date +%s) - t0 )) -ge "$CLAUDE_TMP_BUDGET_S" ]; then n_over=$((n_over+1)); continue; fi
+    if [ "$idle_h" -le 0 ]; then printf '%s\n' "$sess" >> "$live"; n_live=$((n_live+1)); continue; fi
+    rc=0; any_recent "$idle_h" "$CLAUDE_TMP_WALK_S" "$CLAUDE_PROJECTS/$proj/$uuid.jsonl" "$CLAUDE_PROJECTS/$proj/$uuid" "$sess" || rc=$?
+    if [ "$rc" = 0 ]; then printf '%s\n' "$sess" >> "$live"; n_live=$((n_live+1)); continue; fi
+    if [ "$rc" = 2 ]; then n_unk=$((n_unk+1)); continue; fi
+    if has_open_handle "$sess" "$lsofsnap"; then n_open=$((n_open+1)); printf '%s\n' "$sess" >> "$live"; continue; fi
+    if has_dirty_worktree "$sess"; then n_dirty=$((n_dirty+1)); continue; fi
+    kb=$(du_kb "$sess" "$CLAUDE_TMP_WALK_S")
+    if [ "$dry" = 1 ]; then echo "mac-cleanup:   would remove $(fmt_kb "${kb:-0}") $sess (session idle >= ${idle_h}h, dry run)"; continue; fi
+    rm -rf -- "${sess:?}"
+    if [ -e "$sess" ]; then n_fail=$((n_fail+1)); echo "mac-cleanup:   FAILED to remove $sess (still present after rm)"; continue; fi
+    CLAUDE_TMP_REAPED=$((CLAUDE_TMP_REAPED+1)); CLAUDE_TMP_REAPED_KB=$((CLAUDE_TMP_REAPED_KB+${kb:-0}))
+    claude_tmp_ledger "session idle >= ${idle_h}h" "$kb" "$sess"
+    echo "mac-cleanup:   removed $(fmt_kb "${kb:-0}") $sess (session idle >= ${idle_h}h)"
+  done
+  # Rule 2: the quota on live sessions, biggest idle entries first.
+  if [ "$quota_kb" -gt 0 ]; then
+    while IFS= read -r sess; do
+      [ -d "$sess" ] || continue
+      if [ $(( $(date +%s) - t0 )) -ge "$CLAUDE_TMP_BUDGET_S" ]; then n_over=$((n_over+1)); continue; fi
+      # A session too big to sum inside the walk budget is measured by its entries
+      # instead: skipping it would exempt exactly the sessions the quota is for
+      # (gs12-cicd's 45.8G did not finish a 15s walk on 2026-10-02).
+      local total ents ekb e sum=0
+      kb=$(du_kb "$sess" "$CLAUDE_TMP_WALK_S")
+      if [ -n "$kb" ] && [ "$kb" -le "$quota_kb" ]; then continue; fi
+      ents=$(mktemp "${TMPDIR:-/tmp}/ctmp-ents.XXXXXX")
+      for e in "$sess"/scratchpad/* "$sess"/scratchpad/.[!.]*; do
+        [ -e "$e" ] || continue
+        if [ $(( $(date +%s) - t0 )) -ge "$CLAUDE_TMP_BUDGET_S" ]; then break; fi
+        ekb=$(du_kb "$e" "$CLAUDE_TMP_WALK_S")
+        if [ -n "$ekb" ]; then printf '%s\t%s\n' "$ekb" "$e" >> "$ents"; sum=$((sum+ekb)); fi
+      done
+      total=${kb:-$sum}
+      if [ "$total" -le "$quota_kb" ]; then rm -f -- "${ents:?}"; [ -n "$kb" ] || n_unk=$((n_unk+1)); continue; fi
+      n_quota=$((n_quota+1))
+      sort -rn "$ents" -o "$ents"
+      while IFS=$'\t' read -r ekb e; do
+        [ "$total" -gt "$quota_kb" ] || break
+        if [ -f "$e/.git" ]; then n_qkept=$((n_qkept+1)); continue; fi
+        rc=0; any_recent "$CLAUDE_TMP_ENTRY_IDLE_H" "$CLAUDE_TMP_WALK_S" "$e" || rc=$?
+        if [ "$rc" != 1 ]; then n_qkept=$((n_qkept+1)); continue; fi
+        if has_open_handle "$e" "$lsofsnap" || has_dirty_worktree "$e"; then n_qkept=$((n_qkept+1)); continue; fi
+        if [ "$dry" = 1 ]; then echo "mac-cleanup:   would remove $(fmt_kb "$ekb") $e (session over ${CLAUDE_TMP_QUOTA_GB}G quota, entry idle >= ${CLAUDE_TMP_ENTRY_IDLE_H}h, dry run)"; total=$((total-ekb)); continue; fi
+        rm -rf -- "${e:?}"
+        if [ -e "$e" ]; then n_fail=$((n_fail+1)); echo "mac-cleanup:   FAILED to remove $e (still present after rm)"; continue; fi
+        total=$((total-ekb)); CLAUDE_TMP_REAPED=$((CLAUDE_TMP_REAPED+1)); CLAUDE_TMP_REAPED_KB=$((CLAUDE_TMP_REAPED_KB+ekb))
+        claude_tmp_ledger "over ${CLAUDE_TMP_QUOTA_GB}G quota, entry idle >= ${CLAUDE_TMP_ENTRY_IDLE_H}h" "$ekb" "$e"
+        echo "mac-cleanup:   removed $(fmt_kb "$ekb") $e (session over ${CLAUDE_TMP_QUOTA_GB}G quota, entry idle >= ${CLAUDE_TMP_ENTRY_IDLE_H}h)"
+      done < "$ents"
+      rm -f -- "${ents:?}"
+      if [ "$total" -gt "$quota_kb" ]; then echo "mac-cleanup:   OVER QUOTA $(fmt_kb "$total") $sess (quota ${CLAUDE_TMP_QUOTA_GB}G): the rest is recent, open or a worktree, so it stays"; fi
+    done < "$live"
+  fi
+  echo "mac-cleanup: claude tmp: ${n_sess} session dir(s) under $root, removed ${CLAUDE_TMP_REAPED} ($(fmt_kb "$CLAUDE_TMP_REAPED_KB")), idle >= ${idle_h}h, quota ${CLAUDE_TMP_QUOTA_GB}G; kept: live ${n_live}, open ${n_open}, dirty worktree ${n_dirty}, unmeasured ${n_unk}, over budget ${n_over}, failed ${n_fail}; over quota ${n_quota} (entries kept ${n_qkept})"
+  rm -f -- "${lsofsnap:?}" "${live:?}"
+}
+
 # ── assessment (DESKT-57) ────────────────────────────────────────────────────
 # Burn rate and hours to full from two readings. Prints "<burn_gbh> <hours|->".
 # A disk that is not losing space (or lost less than BURN_MIN_GBH) has no ETA,
@@ -924,7 +1059,7 @@ escalation_message() { # <cls> <verdict> <bundle> <card_file> <now_snapshot> <pr
   echo "3. The constraint re-measured after the fix, cleared or not, with the number."
   echo "4. A card on your board with the above, and its id written to $cardf (just the id, e.g. MO-1234), so the next escalation for $cls can start from it."
   echo
-  echo "Boundary: never delete another lane's uncommitted work, a repo, .git, credentials or a database; never touch anything under /private/tmp/claude-* (live Claude session scratchpads: no process standing in a directory does not mean it is unused); never kill a live lane's workload; spending money or anything outside the company needs Ethan."
+  echo "Boundary: never delete another lane's uncommitted work, a repo, .git, credentials or a database; never touch anything under /private/tmp/claude-* by hand (live Claude session scratchpads: no process standing in a directory does not mean it is unused; this tick's claude-tmp arm owns that tree, with its liveness rules and its ledger); never kill a live lane's workload; spending money or anything outside the company needs Ethan."
 }
 
 # One board card for a failure nobody would otherwise see. Deduped by key for 24h
@@ -1205,6 +1340,9 @@ vm_level=$($PRESSURE_CMD 2>/dev/null); case "$vm_level" in ''|*[!0-9]*) vm_level
 if [ "$vm_level" -ge 2 ]; then stop_idle_vms "$DRY" "memory pressure $vm_level"
 elif [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then stop_idle_vms "$DRY" "disk under ${TARGET_TIGHT_FREE_GB}G"; fi
 reap_idle_worktrees "$WORKTREE_ROOTS" "$WORKTREE_IDLE_H" "$DRY"
+ctmp_idle=$CLAUDE_TMP_IDLE_H
+if [ "$tgt_idle" != "$TARGET_IDLE_H" ] && [ "$ctmp_idle" -gt 0 ] && [ "$CLAUDE_TMP_TIGHT_IDLE_H" -lt "$ctmp_idle" ]; then ctmp_idle=$CLAUDE_TMP_TIGHT_IDLE_H; fi
+reap_claude_tmp "$CLAUDE_TMP_ROOT" "$ctmp_idle" "$DRY"
 
 # ── act: thin APFS local snapshots when the disk is tight ────────────────────
 disk_free_gb=$(df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2{ printf "%.1f", $4/1048576 }')
@@ -1377,5 +1515,5 @@ fi
 if [ "$SECONDS" -ge "$TICK_WARN_S" ]; then
   echo "mac-cleanup: WARN tick took ${SECONDS}s, over ${TICK_WARN_S}s: the scheduler kills it at 600s, so a slower run is lost; tighten the budgets"
 fi
-echo "mac-cleanup: done elapsed=${SECONDS}s purge=${purged%% *} agents_restarted=${agents_restarted}/${agents_checked} stale_shells=${stale_killed} targets_reaped=${TARGETS_REAPED} constraints=$(printf '%s' "$verdicts" | grep -c . || true) escalated=${escalated} reported=${reported}"
+echo "mac-cleanup: done elapsed=${SECONDS}s purge=${purged%% *} agents_restarted=${agents_restarted}/${agents_checked} stale_shells=${stale_killed} targets_reaped=${TARGETS_REAPED} claude_tmp_reaped=${CLAUDE_TMP_REAPED:-0} constraints=$(printf '%s' "$verdicts" | grep -c . || true) escalated=${escalated} reported=${reported}"
 exit 0

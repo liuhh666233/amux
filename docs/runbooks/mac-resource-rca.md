@@ -61,7 +61,14 @@ The symptom fix buys time. The cause fix is what stops the next message:
 - Never touch anything under `/private/tmp/claude-*`. Those are live Claude
   session scratchpads. No process standing in a directory at the moment you
   look does not mean it is unused: on 2026-09-26 a worktree sweep removed the
-  desktop lane's active worktree between two of its commands. Prove regenerability (build output, a clone whose every commit
+  desktop lane's active worktree between two of its commands.
+  The tick's claude-tmp arm owns that tree (DESKT-77): it removes a session dir
+  only when its transcript and files are idle for `AMUX_CLEANUP_CLAUDE_TMP_IDLE_H`
+  (48h, 24h on a tight disk), nothing holds it open and no worktree in it is
+  dirty, and it holds live sessions to `AMUX_CLEANUP_CLAUDE_TMP_QUOTA_GB` (20G) by
+  removing their idle scratchpad entries. Every removal is in
+  `~/.amux/logs/mac-cleanup/claude-tmp-reaps.log`. Tune the knobs in the Scope tab
+  instead of deleting by hand. Prove regenerability (build output, a clone whose every commit
   is in the real repo) or ask the owner.
 - Never kill a live lane's workload to reclaim memory. Report it to its owner.
 - Spending money, and anything outside the company, needs Ethan.

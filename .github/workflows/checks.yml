@@ -387,6 +387,10 @@ jobs:
         run: |
           set -uo pipefail
           ./scripts/test-mac-cleanup-fallback.sh
+      - name: Claude session temp dirs are removed only when dead, and live ones held to a quota (DESKT-77)
+        run: |
+          set -uo pipefail
+          ./scripts/test-mac-cleanup-claude-tmp.sh
       # AF-677. AF-346's ratchet (above) recorded 31 harnesses as unwired rather
       # than wiring them blind, because that decision belongs to each one's
       # owner (ethos rule 8). This is that decision, made for 28 of the 31:
