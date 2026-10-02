@@ -2151,11 +2151,17 @@
   @media (max-width: 600px) {
     .settings-menu {
       position: fixed;
-      top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
+      /* Under the header, centred across: it fits the phone with 16px margins
+         and scrolls inside (f3441687), and the header stays uncovered so the
+         gear can close it. Vertically centred, it sat over the gear and the
+         settings tabs swallowed the tap (header, host-metrics and
+         usage-recovery e2e, 2026-10-02). */
+      top: var(--mobile-header-bottom, calc(max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)) + 60px));
+      left: 50%;
+      transform: translateX(-50%);
       right: auto;
       max-width: calc(100vw - 32px);
-      max-height: calc(var(--dialog-viewport-height, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 32px);
+      max-height: calc(var(--dialog-viewport-height, 100dvh) - var(--mobile-header-bottom, 60px) - 16px - env(safe-area-inset-bottom, 0px));
       z-index: 6000;
     }
   }
