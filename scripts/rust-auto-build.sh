@@ -147,7 +147,10 @@ import json,re,sys
 try:
     d=json.load(sys.stdin)
     commit=d.get("commit_full") or d.get("commit", "")
-    if not isinstance(commit,str) or not re.fullmatch(r"[0-9a-f]{12,40}",commit):
+    # A "-dirty" identity is a MEASURED image too: a server built from an
+    # uncommitted checkout. It passes through so the caller can tell a dirty
+    # build of the elected commit (defer) from a foreign one (rebuild).
+    if not isinstance(commit,str) or not re.fullmatch(r"[0-9a-f]{12,40}(-dirty)?",commit):
         raise ValueError("invalid commit")
     print(commit)
 except Exception:
@@ -247,6 +250,18 @@ if [ "${AMUX_RS_BUILD_PROVENANCE_ONLY:-}" != "1" ] \
       echo "== $(date '+%F %T') !! ACTIVATION IDENTITY UNMEASURED expected=$built_sha trigger=$head $identity_reason measured=false action=defer — unavailable health is not evidence of image drift" >> "$LOG"
       exit 0
     fi
+    # A dirty build of the ELECTED commit is someone's local experiment on the
+    # right base: leave it. A dirty build of any OTHER commit pinned the live
+    # server 176 commits behind main for an hour on 2026-10-02 (62a149c3-dirty),
+    # because it used to read as unmeasured and defer forever. It is drift.
+    case "$live" in
+      *-dirty)
+        case "$built_sha" in
+          "${live%-dirty}"*)
+            echo "== $(date '+%F %T') !! ACTIVATION IDENTITY DIRTY expected=$built_sha live=$live same_commit=true measured=true action=defer" >> "$LOG"
+            exit 0 ;;
+        esac ;;
+    esac
     case "$built_sha" in
       "$live"*)
         echo "== $(date '+%F %T') ACTIVATION IDENTITY MATCH expected=$built_sha live=$live measured=true action=skip" >> "$LOG"

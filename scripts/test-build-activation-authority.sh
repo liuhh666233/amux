@@ -136,12 +136,22 @@ expect test "$(grep -c '^build ' "$TRACE")" = 2
 expect test "$(wc -l < "$CURL_TRACE" | tr -d ' ')" = 1
 expect grep -q 'ACTIVATION IDENTITY UNMEASURED.*curl_exit=28.*action=defer' "$LOG"
 rm -f "$FAKE_HOME/.cargo/bin/curl" "$CURL_TRACE"
-# Missing/invalid identities must not become prefix matches or rebuild orders.
+# Missing/invalid identities must not become prefix matches or rebuild orders,
+# and a dirty build of the ELECTED commit is left alone.
 for identity in '' a unknown "${ELECTED:0:12}-dirty"; do
   printf '{"commit":"%s"}\n' "$identity" > "$HEALTH"
   run_builder "$AUTH"
   expect test "$(grep -c '^build ' "$TRACE")" = 2
 done
+expect grep -q "ACTIVATION IDENTITY DIRTY expected=$ELECTED live=${ELECTED:0:12}-dirty same_commit=true" "$LOG"
+# 2026-10-02: a dirty build of a DIFFERENT commit is a measured foreign image.
+# It used to read as unmeasured and pinned live 176 commits behind for an hour.
+# Here the elected bytes are already installed, so the measured answer is
+# "awaiting adoption" with no rebuild. It used to be "unmeasured, defer".
+printf '{"commit":"%s-dirty"}\n' "${STALE:0:12}" > "$HEALTH"
+run_builder "$AUTH"
+expect test "$(grep -c '^build ' "$TRACE")" = 2
+expect grep -q "ACTIVATION AWAITING ADOPTION expected=$ELECTED live=${STALE:0:12}-dirty" "$LOG"
 
 # Worker-attributed diagnostic runs must remain offline, while a real install
 # of that same commit must still fail closed without a measured overlap permit.
