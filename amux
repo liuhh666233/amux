@@ -6621,7 +6621,7 @@ _land_adopt() {
     trap "kill -CONT -- '-$pgid' 2>/dev/null || kill -CONT '$pid' 2>/dev/null || true" EXIT INT TERM
     ( cd "$cwd" && AMUX_LAND_ADOPT="${t##*/}" AMUX_LAND_PRECHECKED=1 AMUX_LAND_PRIORITY_CHECKED=1 bash "$0" land --sha "$sha" --detach $nb >/dev/null 2>&1 ) || true
     got=""
-    for k in $(seq 1 60); do
+    for _ in $(seq 1 60); do
       [ -f "$mk" ] && { got="$(cat "$mk" 2>/dev/null || true)"; [ -n "$got" ] && break; }
       sleep 1
     done
