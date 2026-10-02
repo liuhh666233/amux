@@ -145,11 +145,27 @@ async fn a_chat_delegate_reads_the_live_worker_without_ever_touching_it() {
     assert!(!logged.contains("dangerously"), "the worker's YOLO flag never reaches a delegate: {logged}");
     assert!(logged.contains("SESSION social@delegate"), "{logged}");
     assert!(logged.contains("LOCKS 0"), "git may not refresh the shared index: {logged}");
-    if Path::new("/usr/bin/sandbox-exec").is_file() {
+    // Layer 1, the provider CLI's read-only mode, is asserted on its argv above
+    // (a fake provider cannot enforce flags it ignores). Layer 3, the API
+    // guard, is asserted in step 2 below. Layer 2, the OS sandbox, exists only
+    // where macOS sandbox-exec does: on Linux (CI) there is no unprivileged
+    // equivalent amux can rely on (Ubuntu 24.04 blocks the user namespaces
+    // bwrap needs), so the job must say it ran WITHOUT it rather than claim it.
+    // AMUX_DELEGATE_NO_SANDBOX=1 runs the Linux path on a Mac, so both arms are
+    // exercisable locally; a Mac WITHOUT it must have the sandbox.
+    let sandbox_expected = Path::new("/usr/bin/sandbox-exec").is_file()
+        && std::env::var("AMUX_DELEGATE_NO_SANDBOX").ok().as_deref() != Some("1");
+    if sandbox_expected {
         assert!(logged.contains("WRITE denied"), "the OS sandbox denies writes in the checkout: {logged}");
-        assert!(job["enforcement"]["os_sandbox"] == true, "{job}");
+        assert_eq!(job["enforcement"]["os_sandbox"], true, "{job}");
+        assert!(!repo.join("pwned.txt").exists(), "nothing may be written into the worker's checkout");
+    } else {
+        assert_eq!(job["enforcement"]["os_sandbox"], false, "no OS sandbox here, and the record must say so: {job}");
+        assert_eq!(job["enforcement"]["cli"], true, "{job}");
+        assert_eq!(job["enforcement"]["api_guard"], true, "{job}");
+        // The fake ignored the CLI's read-only flags, so its probe file may exist.
+        let _ = std::fs::remove_file(repo.join("pwned.txt"));
     }
-    assert!(!repo.join("pwned.txt").exists(), "nothing may be written into the worker's checkout");
     assert_eq!(index_fingerprint(&repo), index_before, "the shared git index is untouched");
     // Never anything into the worker's pane: no tmux verb that sends input.
     assert!(logged.lines().any(|l| l.starts_with("TMUX capture-pane ")), "the seed read the pane: {logged}");

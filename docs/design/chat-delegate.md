@@ -112,8 +112,10 @@ Why gemini is refused for now: its headless mode can run a shell, and a shell
 can reach the amux API without the delegate identity, so the API guard would
 not hold. Claude cannot (its allowlist has no general shell); codex cannot
 (its read-only sandbox has no network). Gemini joins once its headless shell
-can be restricted. Where no OS sandbox exists (Linux), claude and codex still
-run on their own CLI enforcement plus the API guard.
+can be restricted. Where no OS sandbox exists (Linux, where Ubuntu 24.04
+blocks the unprivileged user namespaces bwrap would need), claude and codex
+still run on their own CLI enforcement plus the API guard, and the job record
+says `os_sandbox: false` rather than claiming it.
 
 The claude allowlist: Read, Grep, Glob, WebFetch, WebSearch, TodoWrite, the
 amux read verbs (`peek`, `info`, `ls`, `board ls`, `board status`, `get`,

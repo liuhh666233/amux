@@ -252,6 +252,12 @@ pub(crate) fn sandbox_profile(paths: &[String]) -> Option<String> {
     Some(format!("(version 1)(allow default)(deny file-write* {deny})"))
 }
 
+/// Exact-match pane target (`=amux-<w>:`) from the L2 helper, so a missing
+/// session never falls through to a sibling's pane (tests/tmux_target_audit.rs).
+fn pane_target_of(worker: &str) -> String {
+    crate::backend::tmux::pane_target(&format!("amux-{worker}"))
+}
+
 /// What the worker has already produced, for a fresh (non-fork) delegate:
 /// its last reply and the tail of its terminal. Read-only: `capture-pane`
 /// prints, it never sends input.
@@ -263,8 +269,9 @@ fn seed_context(worker: &str) -> String {
         s.push_str(last.trim());
         s.push_str("\n\n");
     }
+    let pt = pane_target_of(worker);
     if let Ok(o) = std::process::Command::new("tmux")
-        .args(["capture-pane", "-p", "-J", "-S", "-300", "-t", &format!("amux-{worker}")])
+        .args(["capture-pane", "-p", "-J", "-S", "-300", "-t", &pt])
         .output()
     {
         let pane = String::from_utf8_lossy(&o.stdout);
