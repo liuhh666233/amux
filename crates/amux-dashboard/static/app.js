@@ -28418,10 +28418,21 @@ document.getElementById('peek-body').addEventListener('scroll', function() {
   // Re-arming there traps slow swipes in the follow/restore loop. Resume only
   // when the reader moves down to the actual end (allow subpixel rounding).
   if (movedDown && _isScrolledToBottom(this, 2) && !this.querySelector('.peek-msg-current, .peek-highlight.current')) {
+    const buffered = _peekBufferedOutput;
     _peekScrollLocked = false;
     _peekFollowBottom = true;
     _peekBufferedOutput = false;
     _hideScrollLockBadge(this);
+    // Resuming by scrolling must PAINT what was buffered, as the "New output"
+    // badge does. The buffered frame is already recorded as the last frame,
+    // so the next poll sees no change and never paints it: a question that
+    // appeared while the reader was scrolled up stayed invisible below the
+    // last painted line (Ethan, 2026-10-02: "i cant scroll down all the way").
+    if (buffered) {
+      applyPeekSearch(false, false);
+      this.scrollTop = this.scrollHeight;
+      _peekPollBeacon('buffered-output-flushed', peekSession, { input: 'scroll', verdict: 'following_latest', measured: true, n_considered: 1 });
+    }
   } else {
     _peekScrollLocked = true;
     // Scrolling up is not itself news. The bottom affordance says "Jump to
