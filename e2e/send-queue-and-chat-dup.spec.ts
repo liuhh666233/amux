@@ -55,3 +55,22 @@ test('a Chat send recorded by the server shows once, matched by msg_id', async (
   expect(await count('m-1'), 'the same msg_id is one message, not two').toBe(0);
   expect(await count('m-other'), 'a different send stays visible as pending').toBe(1);
 });
+
+// AMUX-5356: a Chat-tab send goes to `<worker>@chat`, but the composer and its
+// attachments belong to the open worker. The cleanup keyed on the send target,
+// so attachments sent from the Chat tab stayed in the composer to be sent again.
+test('a Chat-tab send clears the attachments it sent', async ({ page }) => {
+  await boot(page);
+  const left = await page.evaluate(async () => {
+    const g = globalThis as any;
+    g.eval('peekSession = "att-w"');
+    g.eval('_peekChatTarget = () => "att-w@chat"');
+    g.eval('doSend = async () => "sent"');
+    g.eval('_cancelUpload = () => true');
+    g.eval('peekFiles = [{ path: "/tmp/att-probe.txt", name: "att-probe.txt" }]');
+    (document.getElementById('peek-cmd-input') as HTMLTextAreaElement).value = 'see attached';
+    await g.sendPeekCmd();
+    return g.eval('peekFiles').length;
+  });
+  expect(left, 'the sent attachment must leave the composer').toBe(0);
+});

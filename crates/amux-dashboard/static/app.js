@@ -13672,7 +13672,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1219';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1220';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -18708,6 +18708,9 @@ function _syncComposerPending() {
 
 async function sendPeekCmd() {
   const session = _peekChatTarget() || peekSession;
+  // The composer belongs to the open worker even when the Chat tab sends to
+  // its `<worker>@chat` companion; its attachments live under that worker.
+  const composerOwner = peekSession;
   if (!session || _composerPendingSends.has(session)) return;
   if (_blockedByAttachment(peekFiles)) return;
   const inp = document.getElementById('peek-cmd-input');
@@ -18759,15 +18762,15 @@ async function sendPeekCmd() {
       sent.add(f);
       if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
     }
-    if (peekSession === session) {
+    if (peekSession === composerOwner) {
       peekFiles = peekFiles.filter(f => !sent.has(f));
       _peekFilesStash(session);
       renderPeekFiles();
       inp.style.borderColor = 'var(--green)';
       setTimeout(() => { inp.style.borderColor = ''; }, 400);
       _refreshPeekSoon();
-    } else if (_peekFilesBySession[session]) {
-      _peekFilesBySession[session] = _peekFilesBySession[session].filter(f => !sent.has(f));
+    } else if (_peekFilesBySession[composerOwner]) {
+      _peekFilesBySession[composerOwner] = _peekFilesBySession[composerOwner].filter(f => !sent.has(f));
     }
   } catch (e) {
     _composerUnconfirmed(session, 'exception', files.length);
