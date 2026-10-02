@@ -173,7 +173,9 @@ final class ShareViewController: UIViewController {
                              ? "Delivering the message…"
                              : "Delivering to \(worker) (\(i + 1) of \(workers.count))…")
                     do {
-                        try await AmuxClient.send(text: text, to: worker, server: server)
+                        try await AmuxClient.send(text: text, to: worker, server: server, waiting: {
+                            progress("Starting \(worker)… (it was stopped; this can take a minute)")
+                        })
                     } catch {
                         let why = delivered.isEmpty
                             ? error.localizedDescription

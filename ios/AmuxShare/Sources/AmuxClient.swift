@@ -324,18 +324,46 @@ enum AmuxClient {
     /// active workers". Measured on a live server: identical request, 409 with
     /// the header and 200 without. A share from a phone is the OWNER acting,
     /// and most workers a human picks from a list are idle or paused.
-    static func send(text: String, to worker: String, server: URL) async throws {
+    ///
+    /// A STOPPED WORKER IS STARTED BY THE SEND, which can take 40s or more, so
+    /// one 30s request used to time out while the server went on to deliver it:
+    /// the sheet then reported a failure for a message that arrived (found on
+    /// the simulator, 2026-10-01). Every attempt now carries the same `msg_id`,
+    /// which the server dedupes: a retry after a timeout or a 503 "pending"
+    /// answers with the real outcome of the one send, never a second copy.
+    /// `waiting` is called once when the first attempt runs long.
+    static func send(text: String, to worker: String, server: URL,
+                     deadline: TimeInterval = 180,
+                     waiting: (() -> Void)? = nil) async throws {
         let encoded = worker.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? worker
         guard let url = URL(string: "api/sessions/\(encoded)/send", relativeTo: server) else {
             throw ClientError.malformed("could not build the send URL for \(worker)")
         }
-        let body = try JSONSerialization.data(withJSONObject: ["text": text])
-        _ = try await authedData({
-            var req = URLRequest(url: url, timeoutInterval: 30)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = body
-            return req
-        }, server: server)
+        let msgID = "share-" + UUID().uuidString.lowercased()
+        // record_history: the owner's message, recorded in the worker's Messages
+        // tab exactly like the dashboard composer's. Without it a share reached
+        // the worker but never appeared in Messages (found on the simulator,
+        // 2026-10-01: zero history rows for two delivered shares).
+        let body = try JSONSerialization.data(withJSONObject: ["text": text, "msg_id": msgID, "record_history": true])
+        let until = Date().addingTimeInterval(deadline)
+        var told = false
+        while true {
+            do {
+                _ = try await authedData({
+                    var req = URLRequest(url: url, timeoutInterval: 30)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.httpBody = body
+                    return req
+                }, server: server)
+                return
+            } catch let error as URLError where error.code == .timedOut && Date() < until {
+                // The server keeps going without us; ask again with the same id.
+            } catch ClientError.http(503, _) where Date() < until {
+                // Same id still in flight on the server.
+            }
+            if !told { told = true; waiting?() }
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+        }
     }
 }

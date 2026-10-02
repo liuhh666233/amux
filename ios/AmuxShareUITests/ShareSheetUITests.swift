@@ -295,6 +295,181 @@ final class ShareSheetUITests: XCTestCase {
         // about the sheet.
     }
 
+    /// OWNER FEEDBACK CHECKLIST (Ethan, 2026-09-23 .. 2026-10-01), one test that
+    /// walks every point he raised about this sheet and leaves a named
+    /// screenshot per point in SHOT_DIR. Sends ONLY to throwaway workers named in
+    /// SHARE_TARGETS (created stopped by the caller and removed after), and
+    /// reads their history back from the server to prove delivery.
+    ///
+    /// Run with: TEST_RUNNER_SHOT_DIR=<dir> TEST_RUNNER_SHARE_TARGETS=a,b
+    /// TEST_RUNNER_AMUX_URL=$(amux url) xcodebuild test ... -only-testing:...
+    func testOwnerFeedbackChecklist() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let dir = env["SHOT_DIR"], let targetsRaw = env["SHARE_TARGETS"] else {
+            throw XCTSkip("set SHOT_DIR and SHARE_TARGETS (throwaway workers) to run the checklist")
+        }
+        let targets = targetsRaw.split(separator: ",").map(String.init)
+        try XCTSkipUnless(targets.count >= 2, "two throwaway targets are needed for multi-select")
+        var notes: [String] = []
+        func shot(_ name: String) {
+            let png = XCUIScreen.main.screenshot().pngRepresentation
+            try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
+            let a = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            a.name = name; a.lifetime = .keepAlways; add(a)
+        }
+        // Written on every line, not in a defer: a failed assertion with
+        // continueAfterFailure = false stops the test before a defer runs.
+        func note(_ line: String) {
+            notes.append(line)
+            try? notes.joined(separator: "\n").write(
+                to: URL(fileURLWithPath: dir).appendingPathComponent("checklist.txt"),
+                atomically: true, encoding: .utf8)
+        }
+
+        try openNewestPhoto()
+        tapShare()
+        let amux = photos.cells.matching(identifier: "shareCell")
+            .matching(NSPredicate(format: "label == %@", Self.expectedRowLabel)).firstMatch
+        XCTAssertTrue(amux.waitForExistence(timeout: 15), "amux is not offered in the share sheet")
+        let tapped = Date()
+        amux.tap()
+        let ext = XCUIApplication(bundleIdentifier: "com.EthanSteininger.nextup.Share")
+
+        // A7: the picker paints from the cached list without waiting on the
+        // network or on copying the shared file.
+        let firstRow = ext.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'worker-'")).firstMatch
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 30), "no worker rows appeared")
+        let paint = Date().timeIntervalSince(tapped)
+        let preparing = ext.staticTexts["Preparing what you shared…"].exists
+        note(String(format: "A7 first worker row %.2fs after tapping amux; 'Preparing what you shared…' visible at first paint: %@",
+                    paint, preparing ? "yes" : "no"))
+        shot("a7-first-paint")
+        XCTAssertLessThan(paint, 10, "the worker list took \(paint)s to paint")
+
+        // A9 + A2 + A8 default: search on top, Filter and Sort under it, active only.
+        XCTAssertTrue(ext.textFields["search"].exists, "no search field")
+        XCTAssertTrue(ext.buttons["groupFilter"].exists, "no Filter menu")
+        XCTAssertTrue(ext.buttons["sortOrder"].label.contains("Recently shared"), "default sort is not Recently shared")
+        XCTAssertTrue(ext.staticTexts["population"].label.contains("paused hidden"), "active-only is not the default")
+        note("A2 header: " + ext.staticTexts["population"].label)
+        shot("a1-a2-a9-layout")
+
+        // A8: every sort order, and a group filter.
+        for order in ["Most shared", "Activity", "Name", "Recently shared"] {
+            ext.buttons["sortOrder"].tap()
+            let item = ext.buttons[order]
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "sort option '\(order)' missing")
+            if order == "Most shared" { shot("a8-sort-menu") }
+            item.tap()
+            XCTAssertTrue(ext.buttons["sortOrder"].label.contains(order), "sort did not switch to \(order)")
+            if order == "Name" { shot("a8-sorted-by-name") }
+        }
+        ext.buttons["groupFilter"].tap()
+        let groupItem = ext.buttons["amux"]
+        if groupItem.waitForExistence(timeout: 5) {
+            shot("a8-filter-menu")
+            groupItem.tap()
+            XCTAssertTrue(ext.buttons["groupFilter"].label.contains("Group: amux"), "group filter did not apply")
+            note("A8 group filter amux -> " + ext.staticTexts["population"].label)
+            shot("a8-group-amux")
+            ext.buttons["groupFilter"].tap()
+            let all = ext.buttons["All groups"]
+            XCTAssertTrue(all.waitForExistence(timeout: 5), "no 'All groups' option")
+            all.tap()
+        } else {
+            note("A8 no group named 'amux' in the Filter menu")
+            shot("a8-filter-menu")
+            ext.buttons["groupFilter"].tap()
+        }
+
+        // A10: workers with Chat on are listed.
+        let search = ext.textFields["search"]
+        for name in ["amux", "mixpeek-override"] {
+            search.tap()
+            search.clearAndType(name)
+            XCTAssertTrue(ext.buttons["worker-\(name)"].waitForExistence(timeout: 10), "\(name) is not listed")
+        }
+        shot("a10-chat-enabled-listed")
+
+        // A1 + A3: pick the throwaway targets, more than one.
+        for t in targets.prefix(2) {
+            search.tap()
+            search.clearAndType(t)
+            let row = ext.buttons["worker-\(t)"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), "throwaway \(t) is not listed")
+            // The sheet preselects the last worker shared to (by design), which
+            // after an earlier run is one of these throwaways. A tap toggles, so
+            // tapping an already-selected target unselected it (07:14 re-test).
+            let to = ext.staticTexts["recipients"]
+            if !(to.exists && to.label.contains(t)) { row.tap() }
+            else { note("A3 \(t) was already preselected as the last shared worker") }
+        }
+        search.tap()
+        search.clearAndType("")
+        XCTAssertTrue(ext.staticTexts["recipients"].waitForExistence(timeout: 5), "no recipients line")
+        note("A3 recipients: " + ext.staticTexts["recipients"].label)
+        // Counted from the recipients line: toolbar queries are unreliable in
+        // this extension (see testTheExtensionLoadsWorkersFromTheAppGroup).
+        let recips = ext.staticTexts["recipients"].label
+        XCTAssertTrue(targets.prefix(2).allSatisfy { recips.contains($0) },
+                      "both throwaways must be selected: '\(recips)'")
+        shot("a1-a3-two-selected")
+
+        // A5: with the note focused the keyboard covers nothing.
+        let noteField = ext.textFields["note"]
+        noteField.tap()
+        let marker = "sim-check " + UUID().uuidString.prefix(8)
+        noteField.typeText(String(marker))
+        let screen = XCUIScreen.main.screenshot().image.size
+        for (name, el) in [("cancel", ext.buttons["cancel"]), ("send", ext.buttons["send"]), ("note", noteField)] {
+            XCTAssertTrue(el.isHittable, "\(name) is covered with the note keyboard up")
+            XCTAssertLessThanOrEqual(el.frame.maxY, screen.height, "\(name) is off screen")
+        }
+        shot("a5-note-keyboard-up")
+
+        // A4 + A6: Send shows progress then a Sent check; Cancel stays.
+        ext.buttons["send"].tap()
+        let sending = ext.otherElements["sendingCard"]
+        let sent = ext.otherElements["sentCard"]
+        var sawSending = false, sawSent = false, cancelDuring = false
+        let until = Date().addingTimeInterval(150)
+        while Date() < until && !sawSent {
+            if sending.exists || ext.staticTexts.containing(NSPredicate(format: "label BEGINSWITH 'Sending to'")).firstMatch.exists {
+                if !sawSending { shot("a6-sending"); cancelDuring = ext.buttons["cancel"].exists }
+                sawSending = true
+            }
+            if sent.exists || ext.staticTexts.containing(NSPredicate(format: "label BEGINSWITH 'Sent to'")).firstMatch.exists {
+                sawSent = true; shot("a6-sent")
+            }
+        }
+        note("A6 saw Sending: \(sawSending), saw Sent: \(sawSent); A4 Cancel present while sending: \(cancelDuring)")
+        XCTAssertTrue(sawSent, "never saw the Sent confirmation")
+        XCTAssertTrue(cancelDuring || !sawSending, "Cancel disappeared while sending")
+
+        // Delivery, read back from the server for each throwaway.
+        for t in targets.prefix(2) {
+            let found = try historyContains(session: t, text: String(marker))
+            note("delivered to \(t): \(found)")
+            XCTAssertTrue(found, "\(t) has no message containing \(marker)")
+        }
+    }
+
+    private func historyContains(session: String, text: String) throws -> Bool {
+        let base = ProcessInfo.processInfo.environment["AMUX_URL"] ?? "https://localhost:8824"
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            let url = URL(string: base + "/api/history?session=\(session)&limit=10")!
+            let session = URLSession(configuration: .ephemeral, delegate: TrustAll(), delegateQueue: nil)
+            let sem = DispatchSemaphore(value: 0)
+            var payload: Data?
+            session.dataTask(with: url) { data, _, _ in payload = data; sem.signal() }.resume()
+            _ = sem.wait(timeout: .now() + 15)
+            if let payload, String(data: payload, encoding: .utf8)?.contains(text) == true { return true }
+            Thread.sleep(forTimeInterval: 2)
+        }
+        return false
+    }
+
     // MARK: - Helpers
 
     /// What the SERVER says the fleet looks like, so the UI's claim can be
@@ -335,5 +510,15 @@ final class ShareSheetUITests: XCTestCase {
                 completionHandler(.performDefaultHandling, nil)
             }
         }
+    }
+}
+
+private extension XCUIElement {
+    /// Replace a text field's contents (select-all is unreliable on a SwiftUI field).
+    func clearAndType(_ text: String) {
+        if let current = value as? String, !current.isEmpty, current != placeholderValue {
+            typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
+        }
+        if !text.isEmpty { typeText(text) }
     }
 }
