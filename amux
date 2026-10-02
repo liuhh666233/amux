@@ -7170,6 +7170,28 @@ _land_cancel() {
       n=$((n + 1))
     done < <(ps -Ao pid=,pgid=,command= 2>/dev/null | awk '/amux land/ && !/awk/')
   fi
+  # The pid `--status` prints is the WAITER's (its ticket name); --cancel keyed
+  # only on the detached wrapper, so it "found nothing" or left the waiter
+  # alive (gs12-restore, gs12-compute, gs12-mvs, 2026-10-02). Accept it.
+  if [ "$n" -eq 0 ] && [ -n "$want" ] && [ "$want" != "--all" ]; then
+    local _url _key _q _t _pg
+    _url="$(git remote get-url origin 2>/dev/null || true)"
+    if [ -n "$_url" ]; then
+      _key="$(printf '%s %s' "$_url" main | shasum | cut -c1-16)"; _q="$HOME/.amux/locks/land-$_key.q"
+      for _t in "$_q"/*-"$want"; do
+        [ -f "$_t" ] || continue
+        [ "$(sed -n 1p "$_t")" = "$me" ] || { echo "amux land: ticket ${_t##*/} belongs to $(sed -n 1p "$_t"), not $me; not cancelled" >&2; return 1; }
+        _pg="$(ps -o pgid= -p "$want" 2>/dev/null | tr -d ' ' || true)"
+        kill -TERM -- "-${_pg:-$want}" 2>/dev/null || kill -TERM "$want" 2>/dev/null || true
+        sleep 2; kill -0 "$want" 2>/dev/null && { kill -KILL -- "-${_pg:-$want}" 2>/dev/null || kill -KILL "$want" 2>/dev/null || true; }
+        rm -f -- "${_t:?}"
+        [ -n "$_pg" ] && rm -f -- "$d/$_pg"
+        echo "amux land: cancelled the queued land of $me with waiter pid $want (process group ${_pg:-?}); ticket ${_t##*/} removed"
+        printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "[$_key] cancelled waiter pid $want (pgid ${_pg:-?}) and removed ticket ${_t##*/}" >> "$HOME/.amux/logs/land.log"
+        return 0
+      done
+    fi
+  fi
   if [ "$n" -eq 0 ]; then
     local _what="this checkout ($here)"
     [ -n "$want" ] && _what="pid $want"
@@ -7188,7 +7210,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.21"
+LAND_BEHAVIOR_VERSION="2026-10-02.22"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7337,9 +7359,22 @@ cmd_land() {
       # at its turn, commits made since included, so a second ticket only
       # costs every lane behind it a slot and a no-op gate run (gs12-cicd,
       # 2026-10-01: three --detach calls from one worktree held three slots).
+      # Only a queued ticket of this lane that carries the current HEAD counts:
+      # a ticket pinned with --sha never follows HEAD, and saying it did let 47
+      # commits wait ~5 h in a queue that did not hold them (gs12-spend,
+      # 2026-10-02). Unpinned tickets refresh to HEAD every poll.
       if [ -z "$land_sha" ] && [ "$_there" = "$_here" ]; then
-        echo "amux land: already queued from this checkout (pid ${_f##*/}); it lands this checkout's HEAD at its turn, including commits made since. Not queuing another. Status: amux land --status"
-        return 0
+        local _head_now _tk _held=""
+        _head_now="$(git rev-parse HEAD)"
+        for _tk in "$lock.q"/*; do
+          [ -f "$_tk" ] || continue
+          [ "$(sed -n 1p "$_tk")" = "$me" ] && [ "$(sed -n 2p "$_tk")" = "$_head_now" ] && { _held="${_tk##*/}"; break; }
+        done
+        if [ -n "$_held" ]; then
+          echo "amux land: already queued from this checkout (ticket $_held, detached pid ${_f##*/}) and it carries HEAD $(git rev-parse --short HEAD). Not queuing another. Status: amux land --status"
+          return 0
+        fi
+        echo "amux land: note: the land queued from this checkout (pid ${_f##*/}) does not carry HEAD $(git rev-parse --short HEAD) (pinned to another commit); queuing HEAD as well." >&2
       fi
       [ -n "$_there" ] && [ "$_there" != "$_here" ] && echo "amux land: note: $me already has a detached land queued from $_there (pid ${_f##*/}); this one is for $_here. Cancel per checkout with: amux land --cancel (run in that checkout) or amux land --cancel <pid>." >&2
     done
@@ -7477,7 +7512,12 @@ p.communicate(msg.encode())
   # Expanded NOW: these are locals, gone by the time an EXIT trap runs, and a
   # `${x:?}` guard on an unset name fails the exit status (rc 1 on success).
   # shellcheck disable=SC2064  # expanded now on purpose, see the comment above
-  trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
+  trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT
+  # INT/TERM must END the process, then EXIT cleans up. A trap that only ran
+  # the cleanup let a cancelled waiter live on, and its HEAD refresh rewrote
+  # the ticket: gs12-mvs's 13730 survived `--cancel` and took main at 14:46:01Z
+  # (2026-10-02). The holder's lock trap below relies on this too.
+  trap 'exit 143' INT TERM
   while :; do
     if [ -f "${rdir:?}/${tname:?}" ]; then
       res="$(cat "${rdir:?}/${tname:?}")"; rm -f -- "${rdir:?}/${tname:?}"
@@ -7609,6 +7649,7 @@ p.communicate(msg.encode())
     # the waiter moves ITS OWN priority ticket back into ordinary order at its
     # arrival time, the same self-rename aging does in the other direction.
     if [ -e "${q:?}/.demote-$$" ] && [ "${tname:0:3}" = "000" ]; then
+      _demoted_self=1
       local demoted _arr
       _arr=$(( $(date +%s) / 1000000000 * 1000000000 + 10#${tname:3:9} ))
       demoted="$(printf '%012d' "$_arr")-$$"
@@ -7616,7 +7657,7 @@ p.communicate(msg.encode())
         _land_log "demoted by $(cat "${q:?}/.demote-$$" 2>/dev/null || echo ?): ticket back in ordinary order at its arrival time"
         tname="$demoted"
         # shellcheck disable=SC2064  # expanded now on purpose: locals are gone when the trap runs
-        trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
+        trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT
         head="$(ls "$q" | sort | head -1)"
       fi
       rm -f -- "${q:?}/.demote-$$"
@@ -7630,14 +7671,17 @@ p.communicate(msg.encode())
     # name order (what every waiter, old or new, serves by) puts it ahead of
     # priority tickets that arrived after it. Only a ticket's own waiter
     # renames it.
-    if [ "${tname:0:3}" != "000" ] && [ $(( $(date +%s) - 10#${tname%%-*} )) -gt "${AMUX_LAND_PRIORITY_AGING_S:-14400}" ]; then
+    # Never re-age a ticket this waiter was demoted out of: the next poll aged
+    # it straight back, so --demote was a no-op on exactly the old tickets it
+    # exists for (mixpeek-override, 2026-10-02).
+    if [ "${_demoted_self:-0}" != 1 ] && [ "${tname:0:3}" != "000" ] && [ $(( $(date +%s) - 10#${tname%%-*} )) -gt "${AMUX_LAND_PRIORITY_AGING_S:-14400}" ]; then
       local aged
       aged="000$(printf '%09d' $(( 10#${tname%%-*} % 1000000000 )))-$$"
       if mv -- "${q:?}/${tname:?}" "${q:?}/${aged:?}" 2>/dev/null; then
         _land_log "waited past ${AMUX_LAND_PRIORITY_AGING_S:-14400}s; ticket aged into the priority order at its arrival time"
         tname="$aged"
         # shellcheck disable=SC2064  # expanded now on purpose: locals are gone when the trap runs
-        trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT INT TERM
+        trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT
         head="$(ls "$q" | sort | head -1)"
       fi
     fi
@@ -7690,7 +7734,7 @@ p.communicate(msg.encode())
   # Remove the lock only while this process still owns it. An unconditional
   # rm deleted the NEXT holder's lock after a takeover (2026-10-01 11:18Z:
   # gs12-model's exit freed gs12-spend's hold and gs12-mvs pushed beside it).
-  trap "[ \"\$(cat '${lock:?}/pid' 2>/dev/null)\" = '$$' ] && rm -rf -- '${lock:?}'" EXIT INT TERM
+  trap "[ \"\$(cat '${lock:?}/pid' 2>/dev/null)\" = '$$' ] && rm -rf -- '${lock:?}'" EXIT
   [ "$waited" -gt 0 ] && _land_log "acquired $branch after waiting ${waited}s"
 
   # _land_stack <tip>: replay queued waiters' commits onto <tip>. Sets
@@ -7712,7 +7756,11 @@ p.communicate(msg.encode())
       [ "$n" -lt "$max" ] || break
       # A --priority ticket lands alone in both roles (gs12-gates, 2026-10-01:
       # gs12-cicd batched its priority ticket at 16:57Z).
-      case "$tk" in 000*) continue ;; esac
+      # A GRANTED priority ticket (its reason on line 6) lands alone; an AGED one
+      # (no reason) batches like any other: five aged tickets each took a solo
+      # holder turn, about 2.7 h for a queue one batch clears (mixpeek-override,
+      # 2026-10-02 14:35Z).
+      case "$tk" in 000*) [ -n "$(sed -n 6p "$q/$tk" 2>/dev/null || true)" ] && continue ;; esac
       case "$batch_skip" in *" $tk "*) continue ;; esac
       kill -0 "${tk##*-}" 2>/dev/null || continue
       who=""; wsha=""; wcommon=""; wbatch=""
