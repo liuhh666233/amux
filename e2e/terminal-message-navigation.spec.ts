@@ -535,6 +535,11 @@ test('a worker menu that loses its opening announces the failure', async ({ page
 
 async function filterSpecimen(page: Page) {
   await page.evaluate(() => {
+    // Board references count only for a prefix the loaded board uses. The
+    // shared e2e server's board holds whatever earlier specs created, so name
+    // the referenced card here rather than depend on test order (mobile CI run
+    // 37067255136 counted 0 because no AMUX card had been created yet).
+    eval("if (!boardItems.some(i => i && i.id === 'AMUX-4242')) boardItems.push({id:'AMUX-4242', title:'filter specimen', status:'todo'})");
     eval("peekSessionDir='/tmp/toolbar-probe'; _peekMsgRows=[{session:'nav-probe',type:'direct',text:'Review AMUX-4242 needle in docs/result.md'}, {session:'nav-probe',type:'direct',text:'Check needle at https://example.com/report'}, {session:'nav-probe',type:'direct',text:'Plain needle request'}];");
     const raw = '› Review AMUX-4242 needle in docs/result.md\nAssistant needle reply\n'
       + '❯ [amux-origin:peer] Check AMUX-4242 needle in docs/worker.md\nAssistant\n'
