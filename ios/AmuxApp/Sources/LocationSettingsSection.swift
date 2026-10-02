@@ -13,6 +13,18 @@ struct LocationSettingsSection: View {
                 get: { recorder.enabled },
                 set: { recorder.setEnabled($0) }))
                 .accessibilityIdentifier("locationHistoryToggle")
+            Picker("Detail", selection: Binding(
+                get: { recorder.mode },
+                set: { recorder.setMode($0) })) {
+                Text("Full detail").tag(LocationMode.full)
+                Text("Battery saver").tag(LocationMode.saver)
+            }
+            .accessibilityIdentifier("locationHistoryMode")
+            Text(recorder.mode == .full
+                 ? "Records every fix, about one a second while you move. Costs roughly what a navigation app does while moving (an estimate of 5 to 10% an hour), close to nothing while still."
+                 : "Records only significant moves (about every 500 m) and places you stop. About 1 to 2% of battery a day; no detailed routes.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             LabeledContent("Location access", value: authText)
                 .accessibilityIdentifier("locationAuthorization")
             if !recorder.precise {
@@ -21,6 +33,8 @@ struct LocationSettingsSection: View {
                     .foregroundStyle(.secondary)
             }
             LabeledContent("Motion", value: recorder.motionState)
+            LabeledContent("Fixes delivered / stored", value: "\(recorder.delivered) / \(recorder.stored)")
+                .accessibilityIdentifier("locationDeliveredStored")
             LabeledContent("Waiting to upload", value: "\(recorder.pending)")
                 .accessibilityIdentifier("locationPending")
             LabeledContent("Last upload", value: lastUploadText)
@@ -38,7 +52,7 @@ struct LocationSettingsSection: View {
         } header: {
             Text("Location history")
         } footer: {
-            Text("Records where you go and how (walking, cycling, driving, train), and saves it only on your own amux server. See it on the Map's Location history tab. Allow location Always so it keeps recording while amux is closed.")
+            Text("Records where you go and how (walking, cycling, driving, train), keeping every raw fix, and saves it only on your own amux server. See it on the Map's Location history tab. Allow location Always so it keeps recording while amux is closed.")
         }
     }
 

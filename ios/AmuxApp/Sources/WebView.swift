@@ -196,6 +196,8 @@ struct WebView: UIViewRepresentable {
                     case "enable": recorder.setEnabled(true)
                     case "disable": recorder.setEnabled(false)
                     case "upload": await recorder.upload()
+                    case "full": recorder.setMode(.full)
+                    case "saver": recorder.setMode(.saver)
                     default: break
                     }
                     self.pushLocationStatus()

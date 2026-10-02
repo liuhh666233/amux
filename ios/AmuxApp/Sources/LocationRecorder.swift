@@ -11,14 +11,19 @@ import UIKit
 /// - iOS 16: `CLLocationManager` standard updates with background updates on.
 /// - Always: visits + significant-location-change monitoring. These are what
 ///   relaunch an app iOS has terminated, so recording comes back by itself.
-/// - Core Motion labels each point (walking, cycling, automotive ...).
-/// - Every kept point goes to a durable buffer first; uploads drain it.
+/// - Core Motion labels each point and its raw transitions are stored too.
+/// - RAW: every fix delivered is stored with every field, nothing thinned or
+///   dropped; `delivered` and `stored` count both sides so a gap is visible.
+/// - Every point goes to a durable buffer first; uploads drain it.
 @MainActor
 final class LocationRecorder: NSObject, ObservableObject {
     static let shared = LocationRecorder()
 
     static let enabledKey = "locationHistoryEnabled"
     static let lastUploadKey = "locationHistoryLastUpload"
+    static let modeKey = "locationHistoryMode"
+    static let deliveredKey = "locationHistoryDelivered"
+    static let storedKey = "locationHistoryStored"
     static let statusChanged = Notification.Name("amuxLocationStatusChanged")
 
     @Published private(set) var enabled = UserDefaults.standard.bool(forKey: LocationRecorder.enabledKey)
@@ -28,11 +33,16 @@ final class LocationRecorder: NSObject, ObservableObject {
     @Published private(set) var pending = 0
     @Published private(set) var lastUpload: Double = UserDefaults.standard.double(forKey: LocationRecorder.lastUploadKey)
     @Published private(set) var lastError: String?
+    @Published private(set) var mode = LocationMode(rawValue: UserDefaults.standard.string(forKey: LocationRecorder.modeKey) ?? "") ?? .full
+    /// Lifetime counts: fixes Core Location handed over, and fixes written to
+    /// the buffer. Raw capture means these are equal; a gap is a lost fix.
+    @Published private(set) var delivered = UserDefaults.standard.integer(forKey: LocationRecorder.deliveredKey)
+    @Published private(set) var stored = UserDefaults.standard.integer(forKey: LocationRecorder.storedKey)
+    @Published private(set) var motionPending = 0
 
     private let manager = CLLocationManager()
     private let motion = CMMotionActivityManager()
     private var activity: (name: String, confidence: String) = ("unknown", "low")
-    private var lastKept: LocationSample?
     private var liveTask: Task<Void, Never>?
     private var backgroundSession: AnyObject?      // CLBackgroundActivitySession on iOS 17+
     private var serviceSession: AnyObject?         // CLServiceSession on iOS 18+
@@ -41,17 +51,20 @@ final class LocationRecorder: NSObject, ObservableObject {
 
     let points: DurableBuffer<LocationSample>
     let visits: DurableBuffer<VisitSample>
+    let motionLog: DurableBuffer<MotionSample>
 
     private override init() {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("location-history", isDirectory: true)
         points = DurableBuffer(url: dir.appendingPathComponent("points.jsonl"))
         visits = DurableBuffer(url: dir.appendingPathComponent("visits.jsonl"))
+        motionLog = DurableBuffer(url: dir.appendingPathComponent("motion.jsonl"))
         super.init()
         manager.delegate = self
         authorization = manager.authorizationStatus
         precise = manager.accuracyAuthorization == .fullAccuracy
         pending = points.count
+        motionPending = motionLog.count
         NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.uploadInBackgroundTask() }
@@ -68,6 +81,17 @@ final class LocationRecorder: NSObject, ObservableObject {
         enabled = on
         UserDefaults.standard.set(on, forKey: Self.enabledKey)
         if on { start() } else { stop() }
+        publish()
+    }
+
+    func setMode(_ m: LocationMode) {
+        guard m != mode else { return }
+        mode = m
+        UserDefaults.standard.set(m.rawValue, forKey: Self.modeKey)
+        if enabled {
+            stopContinuous()
+            startContinuous()
+        }
         publish()
     }
 
@@ -89,17 +113,7 @@ final class LocationRecorder: NSObject, ObservableObject {
         if CLLocationManager.significantLocationChangeMonitoringAvailable() {
             manager.startMonitoringSignificantLocationChanges()
         }
-        if #available(iOS 17.0, *) {
-            startLiveUpdates()
-        } else {
-            manager.desiredAccuracy = kCLLocationAccuracyBest
-            manager.distanceFilter = 5
-            manager.activityType = .otherNavigation
-            manager.pausesLocationUpdatesAutomatically = false
-            manager.allowsBackgroundLocationUpdates = true
-            manager.showsBackgroundLocationIndicator = true
-            manager.startUpdatingLocation()
-        }
+        startContinuous()
         if uploadTimer == nil {
             uploadTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.upload() }
@@ -108,7 +122,24 @@ final class LocationRecorder: NSObject, ObservableObject {
         publish()
     }
 
-    private func stop() {
+    /// Full detail only: every fix, navigation-grade, no distance filter.
+    /// Battery saver relies on visits and significant changes alone.
+    private func startContinuous() {
+        guard mode == .full else { return }
+        if #available(iOS 17.0, *) {
+            startLiveUpdates()
+        } else {
+            manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+            manager.distanceFilter = kCLDistanceFilterNone
+            manager.activityType = .otherNavigation
+            manager.pausesLocationUpdatesAutomatically = false
+            manager.allowsBackgroundLocationUpdates = true
+            manager.showsBackgroundLocationIndicator = true
+            manager.startUpdatingLocation()
+        }
+    }
+
+    private func stopContinuous() {
         liveTask?.cancel()
         liveTask = nil
         if #available(iOS 17.0, *) {
@@ -120,6 +151,10 @@ final class LocationRecorder: NSObject, ObservableObject {
         backgroundSession = nil
         serviceSession = nil
         manager.stopUpdatingLocation()
+    }
+
+    private func stop() {
+        stopContinuous()
         manager.stopMonitoringVisits()
         manager.stopMonitoringSignificantLocationChanges()
         motion.stopActivityUpdates()
@@ -140,7 +175,7 @@ final class LocationRecorder: NSObject, ObservableObject {
                 for try await update in CLLocationUpdate.liveUpdates(.otherNavigation) {
                     if Task.isCancelled { break }
                     guard let loc = update.location else { continue }
-                    await self?.record(loc, source: "live")
+                    await self?.record([loc], source: "live")
                 }
             } catch {
                 await self?.noteError("live updates stopped: \(error.localizedDescription)")
@@ -164,9 +199,14 @@ final class LocationRecorder: NSObject, ObservableObject {
             case .medium: conf = "medium"
             default: conf = "low"
             }
+            let m = MotionSample(id: UUID().uuidString, ts: a.startDate.timeIntervalSince1970,
+                                 stationary: a.stationary, walking: a.walking, running: a.running,
+                                 cycling: a.cycling, automotive: a.automotive, unknown: a.unknown,
+                                 confidence: conf)
             Task { @MainActor in
                 self?.activity = (name, conf)
                 self?.motionState = "on"
+                if self?.motionLog.append([m]) == true { self?.motionPending += 1 }
             }
         }
         switch CMMotionActivityManager.authorizationStatus() {
@@ -177,24 +217,25 @@ final class LocationRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func record(_ loc: CLLocation, source: String) {
+    /// RAW: every fix delivered is stored, unchanged. No accuracy, age or
+    /// distance filter here; the server's cleaned view does that at query time.
+    private func record(_ locs: [CLLocation], source: String) {
+        guard !locs.isEmpty else { return }
         let now = Date().timeIntervalSince1970
-        let ts = loc.timestamp.timeIntervalSince1970
-        if LocationRules.problem(hAcc: loc.horizontalAccuracy, timestamp: ts, now: now) != nil { return }
-        let s = LocationSample(
-            id: UUID().uuidString, ts: ts,
-            lat: loc.coordinate.latitude, lon: loc.coordinate.longitude,
-            alt: loc.verticalAccuracy >= 0 ? loc.altitude : nil,
-            h_acc: loc.horizontalAccuracy,
-            v_acc: loc.verticalAccuracy >= 0 ? loc.verticalAccuracy : nil,
-            speed: loc.speed >= 0 ? loc.speed : nil,
-            course: loc.course >= 0 ? loc.course : nil,
-            activity: activity.name, activity_conf: activity.confidence, source: source)
-        guard LocationRules.shouldKeep(s, after: lastKept) else { return }
-        lastKept = s
-        points.append([s])
-        pending += 1
-        if pending >= 200 || now - lastUpload >= 60 {
+        delivered += locs.count
+        let samples = locs.map {
+            LocationSample(raw: $0, receivedAt: now, activity: activity.name,
+                           confidence: activity.confidence, source: source)
+        }
+        if points.append(samples) {
+            stored += samples.count
+            pending += samples.count
+        } else {
+            lastError = "could not write \(samples.count) fix(es) to the buffer"
+        }
+        UserDefaults.standard.set(delivered, forKey: Self.deliveredKey)
+        UserDefaults.standard.set(stored, forKey: Self.storedKey)
+        if pending >= LocationRules.batchSize || now - lastUpload >= 60 {
             Task { await upload() }
         }
     }
@@ -205,16 +246,16 @@ final class LocationRecorder: NSObject, ObservableObject {
         "iphone-" + (UIDevice.current.identifierForVendor?.uuidString.prefix(8).lowercased() ?? "unknown")
     }
 
-    /// Drain the buffers to the server, 500 points per request. A point leaves
+    /// Drain the buffers to the server, 1000 points per request. A point leaves
     /// the buffer only once the server accepted it, already had it, or refused
     /// it for good (a refused point would never be accepted on retry).
     func upload() async {
         guard !uploading, let server = AmuxStore.serverURL else { return }
         uploading = true
-        defer { uploading = false; pending = points.count; publish() }
+        defer { uploading = false; pending = points.count; motionPending = motionLog.count; publish() }
         do {
             while true {
-                let batch = points.first(500)
+                let batch = points.first(LocationRules.batchSize)
                 if batch.isEmpty { break }
                 let body: [String: Any] = [
                     "device": device,
@@ -227,7 +268,21 @@ final class LocationRecorder: NSObject, ObservableObject {
                 points.remove(ids: Set(batch.map(\.id)))
                 lastUpload = Date().timeIntervalSince1970
                 UserDefaults.standard.set(lastUpload, forKey: Self.lastUploadKey)
-                if batch.count < 500 { break }
+                if batch.count < LocationRules.batchSize { break }
+            }
+            while true {
+                let batch = motionLog.first(LocationRules.batchSize)
+                if batch.isEmpty { break }
+                let body: [String: Any] = [
+                    "device": device,
+                    "motion": try batch.map { try JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) },
+                ]
+                let reply = try await AmuxClient.postJSON(path: "api/map/location/motion", body: body, server: server)
+                guard reply["ok"] as? Bool == true else {
+                    throw AmuxClient.ClientError.malformed("motion upload not acknowledged")
+                }
+                motionLog.remove(ids: Set(batch.map(\.id)))
+                if batch.count < LocationRules.batchSize { break }
             }
             let v = visits.all()
             if !v.isEmpty {
@@ -272,7 +327,8 @@ final class LocationRecorder: NSObject, ObservableObject {
         default: auth = "notDetermined"
         }
         var s: [String: Any] = ["enabled": enabled, "authorization": auth, "precise": precise,
-                                "motion": motionState, "pending": pending]
+                                "motion": motionState, "pending": pending, "mode": mode.rawValue,
+                                "delivered": delivered, "stored": stored, "motion_pending": motionPending]
         if lastUpload > 0 { s["last_upload"] = lastUpload }
         if let lastError { s["last_error"] = lastError }
         return s
@@ -301,7 +357,7 @@ extension LocationRecorder: CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         Task { @MainActor in
             // iOS 16 standard updates, and significant-change wake-ups on every iOS.
-            for loc in locations { self.record(loc, source: "manager") }
+            self.record(locations, source: "manager")
         }
     }
 
