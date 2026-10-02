@@ -24,13 +24,21 @@ L="$(git rev-parse HEAD)"
 git config --add amux.landRegenerable 'gen/*'
 git config --add amux.landRegenerate 'sh gen1.sh'
 git config --add amux.landRegenerate 'sh gen2.sh'
-[ "$WHEN" = always ] || git config amux.landRegenerateWhen "$WHEN"
+# when=failing: a generator that fails must not stop the land (land .27 stopped
+# every Mixpeek holder at 20:16Z on 2026-10-02); the stack is pushed unrendered.
+[ "$WHEN" = failing ] && git config --add amux.landRegenerate 'cat missing/components.overlay.yaml'
+case "$WHEN" in always|failing) ;; *) git config amux.landRegenerateWhen "$WHEN" ;; esac
 for p in gen1.sh gen2.sh in.txt gen; do git config --add amux.landRegenerateInput "$p"; done
 AMUX_LAND_NOTIFY=0 AMUX_WORKER=lrg2 bash "$AM" land --sha "$L" >/dev/null 2>&1 || echo "land rc=$?"
 git fetch -q origin main
+landed=no; [ "$(git show origin/main:in.txt)" = b ] && landed=yes
 one="$(git show origin/main:gen/out.txt)"; two="$(git show origin/main:gen/two.txt)"
 w1="$(echo b | cksum)"; w2="$(printf '%s\n' "$w1" | cksum)"
 rm -rf -- "${T:?}"
+if [ "$WHEN" = failing ]; then
+  [ "$landed" = yes ] && { echo "ok   failing generator: the lane's commit still landed (pushed unrendered)"; exit 0; }
+  echo "FAIL failing generator stopped the land"; exit 1
+fi
 if [ "$WHEN" = always ]; then
   [ "$one" = "$w1" ] && [ "$two" = "$w2" ] && { echo "ok   always: both chained generators re-rendered on a stack with no conflict"; exit 0; }
   echo "FAIL always: out='$one' (want '$w1') two='$two' (want '$w2')"; exit 1

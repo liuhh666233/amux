@@ -7000,7 +7000,7 @@ _land_regenerate() {
     local log; log="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}-$$-regenerate.log"
     mkdir -p "${log%/*}"; printf '%s\n' "$out" > "$log"
     rm -rf -- "${tmp:?}"
-    _land_log "regenerate failed (rc $rc after $(( $(date +%s) - t0 ))s: $cmd); nothing pushed, a stale render would be refused. Output: $log"
+    _land_log "regenerate failed (rc $rc after $(( $(date +%s) - t0 ))s: $cmd). Output: $log"
     return 1
   fi
   after="$(cd "$tmp" && find . -type f | sed 's|^\./||' | while read -r p; do _matches "$p" && printf '%s\n' "$p"; done | sort)"
@@ -7297,7 +7297,40 @@ _land_cancel_for() {
     n=$((n + 1))
   done
   [ "$n" -gt 0 ] && return 0
-  echo "amux land: no queued ticket with waiter pid $want (amux land --status prints the waiter pid; a detached wrapper's pid is not a ticket)" >&2
+  # The HOLDER (mixpeek-override, 2026-10-02 20:17Z): main was red on four
+  # tree-guard tests, so gates' 9-push hold was doomed to burn the 30-minute
+  # guard leg and no one but gates could stop it. Stop the holder and every
+  # process under it (its git push and hook), never its process group: a
+  # foreground land shares a group with the lane's own shell. Its EXIT trap
+  # releases the lock; batched waiters keep their tickets and their place.
+  local lk lkwho kids k
+  for lk in "$HOME"/.amux/locks/land-*; do
+    [ -d "$lk" ] && [ -f "$lk/pid" ] || continue
+    [ "$(cat "$lk/pid" 2>/dev/null)" = "$want" ] || continue
+    lkwho="$(cat "$lk/who" 2>/dev/null)"
+    if [ "$lkwho" != "$lane" ]; then
+      echo "amux land: the holder with pid $want is $lkwho, not $lane; not cancelled" >&2; return 1
+    fi
+    kids="$want"; k="$want"
+    while [ -n "$k" ]; do
+      k="$(ps -A -o pid=,ppid= | awk -v set=" $k " 'index(set, " " $2 " ") {printf "%s ", $1}')"
+      kids="$kids $k"
+    done
+    # Children first, so the hook and git push stop before the holder's trap runs.
+    # shellcheck disable=SC2086  # word-split pid list on purpose
+    for k in $(printf '%s\n' $kids | awk 'NF' | tail -r 2>/dev/null || printf '%s\n' $kids | awk 'NF' | tac); do
+      [ "$k" = "$$" ] || kill -TERM "$k" 2>/dev/null || true
+    done
+    sleep 3
+    kill -0 "$want" 2>/dev/null && kill -KILL "$want" 2>/dev/null
+    [ "$(cat "$lk/pid" 2>/dev/null)" = "$want" ] && rm -rf -- "${lk:?}"
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "cancelled $lane's HOLD on ${lk##*/} (holder pid $want and its children); the queue moves on; reason: $reason" >> "$HOME/.amux/logs/land.log"
+    echo "amux land: cancelled $lane's hold (holder pid $want); the lock is released and queued waiters keep their place; $lane is told"
+    command -v amux >/dev/null 2>&1 && printf '%s\n' "Your amux land HOLD (holder pid $want) was cancelled by $me: $reason. Nothing was pushed for that attempt; your waiters keep their place. Run amux land again when it is ready." \
+      | amux send "$lane" --stdin >/dev/null 2>&1 || true
+    return 0
+  done
+  echo "amux land: no queued ticket or holder with pid $want (amux land --status prints both)" >&2
   return 1
 }
 
@@ -7401,7 +7434,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.27"
+LAND_BEHAVIOR_VERSION="2026-10-02.28"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -8194,8 +8227,16 @@ $f"
     if [ -f "${TMPDIR:-/tmp}/amux-land-regen.$$" ] || { [ "$_rg_when" = always ] && [ -n "$(git config --get-all amux.landRegenerate 2>/dev/null || true)" ]; }; then
       rm -f "${TMPDIR:-/tmp}/amux-land-regen.$$"
       local _rg
-      _rg="$(_land_regenerate "$stack_tip")" || return 2
-      stack_tip="$_rg"
+      # A failing generator must never stop the queue: land .27 stopped every
+      # Mixpeek holder in seconds when a batched commit made the plane
+      # generator read a file outside the declared inputs (20:16Z 2026-10-02).
+      # Push unrendered and let the gate judge the render; a stale-render
+      # refusal costs one lane, a stopped queue costs all of them.
+      if _rg="$(_land_regenerate "$stack_tip")"; then
+        stack_tip="$_rg"
+      else
+        _land_log "WARN regenerate failed on the composed stack; pushing it unrendered, the gate judges the render (see the regenerate log above)"
+      fi
     fi
     # A batch can fail only once COMPOSED (the ops registry goes stale from two
     # lanes' changes that each pass alone; six batches refused that way on
