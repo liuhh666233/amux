@@ -6515,7 +6515,7 @@ USAGE
 # check that times out (AMUX_LAND_PRECHECK_TIMEOUT_S, default 180) or cannot
 # run is logged as unmeasured and the ticket queues: the gate still runs.
 _land_precheck() {
-  local remote="$1" branch="$2" tip="$3" me="$4" log="$5" chk top out rc t0 full
+  local remote="$1" branch="$2" tip="$3" me="$4" log="$5" chk top out rc t0 full budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}"
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
   chk="${AMUX_LAND_PRECHECK:-}"
   [ -n "$chk" ] || { [ -x "$top/.githooks/land-precheck" ] && chk="$top/.githooks/land-precheck"; }
@@ -6524,7 +6524,7 @@ _land_precheck() {
   git rev-parse -q --verify "$remote/$branch^{commit}" >/dev/null 2>&1 || {
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured: no $remote/$branch" >> "$log"; return 0; }
   t0=$(date +%s); rc=0
-  out="$(cd "$top" && AMUX_LAND_PRECHECK_MODE="enqueue" perl -e 'alarm shift; exec @ARGV or exit 127' "${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
+  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="enqueue" perl -e 'alarm shift; exec @ARGV or exit 127' "$budget" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
   full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-precheck.log"
   mkdir -p "${full%/*}"; printf '%s\n' "$out" > "$full"
   case "$(_land_precheck_verdict "$rc" "$out")" in
@@ -6566,16 +6566,18 @@ _land_precheck_verdict() {
   echo refuse
 }
 
+# The check is told its budget in AMUX_LAND_PRECHECK_TIMEOUT_S (always set,
+# default 420), so a script with its own internal limit can align with it.
 # _land_precheck_exec <base> <tip>: run the repository's land precheck in
 # BATCH mode (AMUX_LAND_PRECHECK_MODE=batch: judge only, write nothing) and
 # print its output. rc 0 pass, 1 refused, 2 no check or unmeasured.
 _land_precheck_exec() {
-  local top chk out rc=0
+  local top chk out rc=0 budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}"
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 2
   chk="${AMUX_LAND_PRECHECK:-}"
   [ -n "$chk" ] || { [ -x "$top/.githooks/land-precheck" ] && chk="$top/.githooks/land-precheck"; }
   [ -n "$chk" ] || return 2
-  out="$(cd "$top" && AMUX_LAND_PRECHECK_MODE="batch" perl -e 'alarm shift; exec @ARGV or exit 127' "${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}" $chk "$1" "$(git rev-parse "$2")" 2>&1)" || rc=$?
+  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="batch" perl -e 'alarm shift; exec @ARGV or exit 127' "$budget" $chk "$1" "$(git rev-parse "$2")" 2>&1)" || rc=$?
   printf '%s\n' "$out"
   case "$(_land_precheck_verdict "$rc" "$out")" in pass) return 0 ;; unmeasured) return 2 ;; *) return 1 ;; esac
 }
