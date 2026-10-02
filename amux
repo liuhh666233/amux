@@ -1752,6 +1752,16 @@ try:
 except Exception:
     sys.exit(1)
 tgt = os.environ["TGT"]
+# The server holds this message ID and is still delivering it (it answers
+# "pending" for 120 s, then "uncertain"). Neither is a refusal: printing them
+# as FAILED made gs12-cicd resend under NEW ids and the orchestrator got the
+# same message three times (2026-10-02). 3 = poll the same id, 4 = unconfirmed.
+if d.get("submission") == "pending" and d.get("retryable"):
+    sys.exit(3)
+if d.get("submission") == "uncertain":
+    print(f"UNCONFIRMED send to {tgt}: the server holds this message but never confirmed delivery; "
+          f"check `amux history` or the worker before sending again", file=sys.stderr)
+    sys.exit(4)
 if d.get("error") or d.get("ok") is False:
     # stderr, like every other failure the CLI reports. On stdout it was one
     # `| tail -1` away from invisible, and callers that capture a send's output
@@ -1772,13 +1782,18 @@ PYEOF
     # affect the result of the send the user actually asked for.
     [[ $rc -eq 0 ]] && { _flush_unstamped_ledger || true; return 0; }
     [[ $rc -eq 2 ]] && return 1   # server understood and refused — do NOT fall back
+    [[ $rc -eq 4 ]] && return 1   # held but unconfirmed: said so; never resend
   fi
   # Retry: the server restarts when the builder installs a new binary (it
   # self-adopts and relaunches); a 1-2s wait often recovers. Three tries over
   # ~4s. Every attempt carries the same msg_id so a lost reply cannot duplicate delivery.
-  local _retry
-  for _retry in 1 2; do
-    sleep 2
+  # A "pending" answer polls the SAME message ID every 3s for up to ~2 min
+  # (AMUX_SEND_PENDING_WAIT_S) instead of counting as a failed try.
+  local _retry=0 _waited=0 _pend_max="${AMUX_SEND_PENDING_WAIT_S:-120}" _transport=0 _pend_prev=""
+  while :; do
+    _retry=$((_retry + 1))
+    _pend_prev=""
+    if [[ "${rc:-1}" -eq 3 ]]; then _pend_prev=1; sleep 3; _waited=$((_waited + 3)); else sleep 2; _waited=$((_waited + 2)); _transport=$((_transport + 1)); fi
     resp=$(_curl -sk -m 5 -X POST -H 'Content-Type: application/json' \
       -H "X-Amux-Worker: ${AMUX_WORKER:-${AMUX_SESSION:-}}" \
       -d "$body" "$AMUX_API/api/workers/$name/send" 2>/dev/null) || resp=""
@@ -1805,7 +1820,7 @@ PYEOF
       # on both sides caught it. The ELAPSED wait ships too, because "retry 2"
       # alone does not say how long the gap was, and the gap is the window a
       # deploy fits into.
-      _R="$_retry" _R_WAITED="$(( _retry * 2 ))" RESP="$resp" TGT="$name" python3 - <<'PYEOF' || rc=$?
+      _R_PENDING="$_pend_prev" _R="$_retry" _R_WAITED="$_waited" RESP="$resp" TGT="$name" python3 - <<'PYEOF' || rc=$?
 import json, os, sys
 try:
     d = json.loads(os.environ["RESP"])
@@ -1814,6 +1829,12 @@ except Exception:
 tgt = os.environ["TGT"]
 attempt = os.environ["_R"]
 waited = os.environ["_R_WAITED"]
+if d.get("submission") == "pending" and d.get("retryable"):
+    sys.exit(3)
+if d.get("submission") == "uncertain":
+    print(f"UNCONFIRMED send to {tgt} after {waited}s: the server holds this message but never "
+          f"confirmed delivery; check `amux history` or the worker before sending again", file=sys.stderr)
+    sys.exit(4)
 if d.get("error") or d.get("ok") is False:
     # A REFUSAL HAS TO SPEAK. This arm used to `sys.exit(2)` in silence, and
     # the shell turns that into a bare `return 1`. So a send whose transport
@@ -1834,6 +1855,10 @@ if d.get("error") or d.get("ok") is False:
 if d.get("held_for_resume"):
     print(f"QUEUED for {tgt} (retry {attempt} after {waited}s), not delivered: {d.get('message', '')}")
     sys.exit(0)
+if os.environ.get("_R_PENDING") == "1":
+    print(f"sent to {tgt} (origin-stamped; confirmed after {waited}s pending under one message ID): "
+          f"{d.get('message', 'ok')}")
+    sys.exit(0)
 # Both operands are REQUIRED, not defaulted: a missing one must crash here
 # rather than print an empty field that reads as a measured zero. That default
 # is the whole bug this line is fixing, and the refusal arm above reads the
@@ -1848,7 +1873,16 @@ PYEOF
       # Same reconciliation point as the first attempt: the server answered.
       [[ $rc -eq 0 ]] && { _flush_unstamped_ledger || true; return 0; }
       [[ $rc -eq 2 ]] && return 1
+      [[ $rc -eq 4 ]] && return 1
+      if [[ $rc -eq 3 ]]; then
+        [[ $_waited -lt $_pend_max ]] && continue
+        echo "${RED}UNCONFIRMED${RESET} send to $name: still pending after ${_waited}s under one message ID; the server is delivering it. Check message history before sending again." >&2
+        return 1
+      fi
+    else
+      rc=1
     fi
+    [[ $_transport -ge 2 ]] && break
   done
   # A missing response is not proof that the request failed. The server may
   # already have queued it. Retrying with the same msg_id is safe; typing an
