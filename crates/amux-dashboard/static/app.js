@@ -1408,6 +1408,12 @@ function showConnHistory() {
         + '<div style="color:var(--dim);font-size:0.76rem;">' + when + '</div>' + note + '</div>'
         + '<span style="color:var(--dim);flex-shrink:0;font-variant-numeric:tabular-nums;">' + dur + '</span></div>';
     }).join('');
+    // Collapsed by default (Ethan, 2026-10-03: "make these entire lists an
+    // accordion not expanded by default"). The summary keeps the count and the
+    // latest one visible, so the state still reads without opening it.
+    const latest = shown[0];
+    rows = '<details class="list-acc" id="conn-hist-list"><summary>' + shown.length + ' interruption' + (shown.length === 1 ? '' : 's')
+      + (latest ? ' · latest ' + _fmtClock(latest.start) : '') + '</summary>' + rows + '</details>';
   }
   // THE COUNT BESIDE THE ZERO. Folded blips are summarised, never silently
   // dropped: "no outages" and "no data" must not render the same, and a client
@@ -13793,7 +13799,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1235';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1236';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -40379,7 +40385,7 @@ function openAbout() {
     html += '<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border);">';
     html += '<span>All Claude Code</span><span style="font-weight:600;">' + fmtTokens(data.total_tokens) + '</span></div>';
     if (data.sessions && data.sessions.length) {
-      html += '<div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">Breakdown</div>';
+      html += '<details class="list-acc" id="daily-stats-breakdown"><summary>Breakdown · ' + data.sessions.length + ' worker' + (data.sessions.length === 1 ? '' : 's') + '</summary>';
       data.sessions.forEach(s => {
         const bar = s.total / data.total_tokens * 100;
         html += '<div style="margin-bottom:4px;">';
@@ -40389,6 +40395,7 @@ function openAbout() {
         html += '<div style="height:3px;border-radius:2px;background:var(--border);margin-top:2px;">';
         html += '<div style="height:100%;border-radius:2px;background:' + (s.amux ? 'var(--accent)' : 'var(--dim)') + ';width:' + bar.toFixed(1) + '%;"></div></div></div>';
       });
+      html += '</details>';
     } else {
       html += '<div style="color:var(--dim);font-size:0.75rem;text-align:center;">No usage today</div>';
     }

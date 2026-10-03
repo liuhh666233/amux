@@ -7873,3 +7873,10 @@ body.light .bd-answer-head { color: #bc4c00; }
 .map-loc-settings[open] > summary::before { content: '\25BE'; }
 .map-loc-settings-title { font-weight: 600; color: var(--text); }
 .map-loc-settings .map-loc-native { margin: 4px 0 6px; }
+
+/* Long lists collapsed by default (connection history, token breakdown). */
+.list-acc { margin: 6px 0; }
+.list-acc > summary { cursor: pointer; font-size: 0.8rem; color: var(--dim); min-height: 36px; display: flex; align-items: center; gap: 6px; list-style: none; }
+.list-acc > summary::-webkit-details-marker { display: none; }
+.list-acc > summary::before { content: '\25B8'; font-size: 0.7rem; }
+.list-acc[open] > summary::before { content: '\25BE'; }
