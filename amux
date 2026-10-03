@@ -7592,7 +7592,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.47"
+LAND_BEHAVIOR_VERSION="2026-10-02.48"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -8652,10 +8652,24 @@ $f"
       _fg_env="LAND_PRECHECK=1 AMUX_LAND_PRECHECK_MODE=batch"
       _land_log "fast gate: pushing with the hook's seconds-cheap legs only (amux.landFastGate); the slow legs run in CI on $branch"
     fi
+    # A push that never reached the remote (DNS, connect, TLS) is retried with
+    # backoff instead of stopping: on 2026-10-03 23:30-23:50Z the router's DNS
+    # timed out and gs12-obs's land stopped on "Could not resolve host:
+    # github.com" as if the hook had refused it, so the lane re-ran it by hand.
+    local _net=0 _net_max="${AMUX_LAND_NET_RETRIES:-8}" _net_wait
+    while :; do
     rc=0; out="$(set -o pipefail; env -u GH_TOKEN -u GITHUB_TOKEN $_fg_env AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1 \
       | AMUX_TL="$_tl" perl -MTime::HiRes=time -ne 'BEGIN{$|=1; $t0=time; open($o,">>",$ENV{AMUX_TL}) or die} printf $o "%8.1fs %s", time-$t0, $_; print')" || rc=$?
     _land_leg_summary "$_tl" "$(( $(date +%s) - _t0p ))"
     _land_heal_core_worktree "the push and its hook (rc $rc)"
+    if [ $rc -ne 0 ] && [ "$_net" -lt "$_net_max" ] && printf '%s\n' "$out" | grep -qE "^(fatal: unable to access .*: (Could not resolve host|Failed to connect|Couldn't connect|Connection timed out|Operation timed out|Connection reset|Recv failure|SSL_ERROR_SYSCALL|The requested URL returned error: 5[0-9][0-9])|fatal: unable to connect|ssh: Could not resolve hostname|error: RPC failed|send-pack: unexpected disconnect)"; then
+      _net=$((_net + 1))
+      _net_wait=$(( ${AMUX_LAND_NET_BACKOFF_S:-60} * _net )); [ "$_net_wait" -gt 180 ] && _net_wait=180
+      _land_log "WARN push did not reach $remote (network: $(printf '%s\n' "$out" | grep -m1 -oE "(Could not resolve host[^']*|Failed to connect[^']*|Couldn't connect[^']*|Connection timed out|Operation timed out|Connection reset[^']*|Recv failure[^']*|SSL_ERROR_SYSCALL|returned error: 5[0-9][0-9]|unable to connect[^']*|Could not resolve hostname[^']*|RPC failed[^']*|unexpected disconnect[^']*)")); retry $_net of $_net_max in ${_net_wait}s, holding the lock"
+      sleep "$_net_wait"; _t0p=$(date +%s); continue
+    fi
+    break
+    done
     # Keep the whole hook output for EVERY attempt, landed or refused
     # (gs12-spend, 2026-10-01: the deciding line sits above the ERROR list, so
     # a tail lost it; gs12-gates, 2026-10-02: a batch landed a stale
