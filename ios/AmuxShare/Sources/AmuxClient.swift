@@ -258,6 +258,52 @@ enum AmuxClient {
         }
     }
 
+    /// 1MB, the size the PWA's queued upload uses. The server caps a chunk PUT
+    /// at 8MB, and this client used to send no `chunks`, so the server
+    /// answered one and the whole file went in one request: anything over 8MB
+    /// failed outright. Small chunks matter on their own too: the phone's link
+    /// to the host can run at ~40KB/s with stalls (measured 2026-10-03, a 4.5MB
+    /// Timeline.json), and one dropped connection then costs one chunk and a
+    /// retry instead of the whole share.
+    static let uploadChunkBytes = 1024 * 1024
+
+    /// Wait before each retry of a chunk; its length is the retry budget.
+    private static let chunkBackoff: [UInt64] = [1, 2, 4, 8, 15]
+
+    /// Failures worth retrying: the link dropped or stalled. Anything else
+    /// (a 4xx, a refused credential) will fail the same way again.
+    private static func transient(_ error: Error) -> Bool {
+        if let u = error as? URLError {
+            return [.networkConnectionLost, .timedOut, .notConnectedToInternet,
+                    .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+                    .secureConnectionFailed, .dataNotAllowed, .internationalRoamingOff]
+                .contains(u.code)
+        }
+        if case let ClientError.http(code, _) = error {
+            return [408, 425, 429, 500, 502, 503, 504].contains(code)
+        }
+        return false
+    }
+
+    /// A dropped connection never reaches the server's request log (hyper
+    /// drops the request with the socket), so the extension reports its own
+    /// chunk retries and failures. They land in server-rs.log as
+    /// `client-debug beacon kind=share-upload-...`. Best effort: a beacon that
+    /// fails must never fail the share.
+    private static func beacon(_ kind: String, server: URL, _ fields: [String: Any]) async {
+        var body = fields
+        body["kind"] = kind
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        var req = URLRequest(url: server.appendingPathComponent("api/client-debug"), timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        if let t = cachedToken, !t.isEmpty {
+            req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
+        }
+        _ = try? await session.data(for: req)
+    }
+
     /// Upload one file and return the ABSOLUTE path on the amux host.
     ///
     /// Uses the chunked API rather than the single-shot multipart one on
@@ -278,7 +324,8 @@ enum AmuxClient {
         let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
 
         let startBody = try JSONSerialization.data(
-            withJSONObject: ["filename": name, "size": size])
+            withJSONObject: ["name": name, "size": size,
+                             "chunks": max(1, (size + uploadChunkBytes - 1) / uploadChunkBytes)])
         let startData = try await authedData({
             var start = URLRequest(url: server.appendingPathComponent("api/upload/start"),
                                    timeoutInterval: 30)
@@ -302,15 +349,37 @@ enum AmuxClient {
                 return try handle.read(upToCount: chunkSize) ?? Data()
             }
             if slice.isEmpty && n > 0 { break }
-            _ = try await authedData({
-                var put = URLRequest(
-                    url: server.appendingPathComponent("api/upload/\(id)/chunk/\(n)"),
-                    timeoutInterval: 120)
-                put.httpMethod = "PUT"
-                put.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-                put.httpBody = slice
-                return put
-            }, server: server)
+            var attempt = 0
+            while true {
+                let began = Date()
+                do {
+                    _ = try await authedData({
+                        var put = URLRequest(
+                            url: server.appendingPathComponent("api/upload/\(id)/chunk/\(n)"),
+                            timeoutInterval: 120)
+                        put.httpMethod = "PUT"
+                        put.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                        put.httpBody = slice
+                        return put
+                    }, server: server)
+                    break
+                } catch {
+                    let fields: [String: Any] = [
+                        "upload": id, "chunk": n, "chunks": chunks, "bytes": slice.count,
+                        "size": size, "attempt": attempt + 1,
+                        "elapsed_s": Date().timeIntervalSince(began),
+                        "error": error.localizedDescription,
+                        "code": (error as? URLError)?.code.rawValue ?? 0,
+                    ]
+                    guard transient(error), attempt < chunkBackoff.count else {
+                        await beacon("share-upload-failed", server: server, fields)
+                        throw error
+                    }
+                    await beacon("share-upload-retry", server: server, fields)
+                    try await Task.sleep(nanoseconds: chunkBackoff[attempt] * 1_000_000_000)
+                    attempt += 1
+                }
+            }
             progress?(Double(n + 1) / Double(chunks))
         }
 
