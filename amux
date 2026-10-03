@@ -7559,7 +7559,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.39"
+LAND_BEHAVIOR_VERSION="2026-10-02.40"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7802,6 +7802,24 @@ p.communicate(msg.encode())
       [ "$hit" = 1 ] || printf '%s\n' "$p"
     done | head -10 | tr '\n' ' '
   }
+  # SHARED-CONFIG GUARD (mixpeek-override, 2026-10-03 ~13:4xZ): a lane's
+  # scratch script wrote core.worktree into the shared .git/config, pointing
+  # at another lane's scratchpad, and every lane's git in the main checkout and
+  # un-overridden worktrees read THAT directory as the tree: phantom dirt in
+  # nine lanes until someone unset it. A shared config carries no
+  # core.worktree and no core.bare=true for a repository with a working tree;
+  # refuse at the first land and name the value. AMUX_LAND_ALLOW_CORE_WORKTREE=1
+  # for a repository that really is laid out that way.
+  if [ "${AMUX_LAND_ALLOW_CORE_WORKTREE:-0}" != 1 ]; then
+    local _shared_cfg _cwt _cbare
+    _shared_cfg="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/config"
+    _cwt="$(git config --file "$_shared_cfg" --get core.worktree 2>/dev/null || true)"
+    _cbare="$(git config --file "$_shared_cfg" --get core.bare 2>/dev/null || true)"
+    if [ -n "$_cwt" ] || [ "$_cbare" = true ]; then
+      _land_log "refused: the shared git config $_shared_cfg sets ${_cwt:+core.worktree=$_cwt }${_cbare:+core.bare=$_cbare }; every lane's git reads that as its tree. Remove it (git config --file $_shared_cfg --unset core.worktree) and land again; nothing queued"
+      return 2
+    fi
+  fi
   local _cf
   _cf="$(_land_conflicts)"
   if [ -n "$_cf" ]; then
@@ -7831,7 +7849,29 @@ p.communicate(msg.encode())
     tname="000$(printf '%09d' $(( $(date +%s) % 1000000000 )))-$$"
   else
     tname="$(printf '%012d' "$(date +%s)")-$$"
+    # RESUME (mixpeek-override, 2026-10-03): a long stack that conflicted with
+    # origin at its turn after an 80-95 min wait went to the BACK on its
+    # re-enqueue and repeated (templates three times, data once). A conflict
+    # stop records this lane's arrival time; the lane's next land within
+    # AMUX_LAND_RESUME_S (default 1800) takes it back.
+    local _rs="$q/.resume-$me"
+    if [ -f "$_rs" ] && [ "$(sed -n 2p "$_rs" 2>/dev/null)" = "$common" ] \
+       && [ $(( $(date +%s) - $(sed -n 3p "$_rs" 2>/dev/null || echo 0) )) -le "${AMUX_LAND_RESUME_S:-1800}" ]; then
+      local _ra; _ra="$(sed -n 1p "$_rs")"
+      if [ -n "$_ra" ] && [ "$_ra" -lt "$(date +%s)" ] 2>/dev/null; then
+        tname="$(printf '%012d' "$_ra")-$$"
+        printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "resumed its queue place from $(date -u -r "$_ra" +%H:%MZ 2>/dev/null || echo "$_ra") after a conflict stop and rebase [$key]" >> "$log"
+      fi
+    fi
+    rm -f -- "$_rs"
   fi
+  # _land_mark_resume: a conflict stop keeps this lane's arrival time for its
+  # rebased re-enqueue (see RESUME above).
+  _land_mark_resume() {
+    local _arr
+    case "$tname" in 000000000000-*) _arr="$(date +%s)" ;; 000*) _arr=$(( $(date +%s) / 1000000000 * 1000000000 + 10#${tname:3:9} )) ;; *) _arr=$((10#${tname%%-*})) ;; esac
+    printf '%s\n%s\n%s\n' "$_arr" "$common" "$(date +%s)" > "$q/.resume-$me" 2>/dev/null || true
+  }
   _land_ticket() { printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$me" "${land_sha:-$(git rev-parse HEAD)}" "$common" "$batchable" "$LAND_BEHAVIOR_VERSION" "$prio_reason" > "${q:?}/${tname:?}"; }
   if [ -n "${AMUX_LAND_ADOPT:-}" ]; then
     # --adopt: take over an old-code waiter's ticket, keeping its NAME (its
@@ -7909,7 +7949,8 @@ p.communicate(msg.encode())
           _cf="$(_land_conflicts)"
           if [ -n "$_cf" ]; then
             rm -f -- "${q:?}/${tname:?}"
-            _land_log "left out of a batch: conflicts with $remote/$branch itself on: $_cf; stopping, since it cannot land. Rebase, resolve, and land again"
+            _land_mark_resume
+            _land_log "left out of a batch: conflicts with $remote/$branch itself on: $_cf; stopping, since it cannot land. Rebase, resolve, and land again within ${AMUX_LAND_RESUME_S:-1800}s to keep this place"
             return 2
           fi
           _land_log "left out of a batch ($res); conflicts only with the batch ahead, not with $remote/$branch; keeping its place"
@@ -8362,7 +8403,8 @@ $f"
         for c in $(git rev-list --reverse "$base..$land_sha_eff"); do
           tree="$(_land_pick_tree "$own_tip" "$c")" || tree=""
           if [ -z "$tree" ]; then
-            _land_log "$(git rev-parse --short "$land_sha_eff") conflicts with $remote/$branch at $(git rev-parse --short "$c"); nothing pushed"
+            _land_mark_resume
+            _land_log "$(git rev-parse --short "$land_sha_eff") conflicts with $remote/$branch at $(git rev-parse --short "$c"); nothing pushed. Rebase and land again within ${AMUX_LAND_RESUME_S:-1800}s to keep this place"
             return 2
           fi
           [ "$tree" != "$(git rev-parse "$own_tip^{tree}")" ] || continue
@@ -8385,7 +8427,8 @@ $f"
           _land_log "rebase onto $remote/$branch conflicted; retrying by replay (regenerable paths are declared)"
           continue
         fi
-        _land_log "rebase onto $remote/$branch conflicted; nothing pushed"
+        _land_mark_resume
+        _land_log "rebase onto $remote/$branch conflicted; nothing pushed. Resolve and land again within ${AMUX_LAND_RESUME_S:-1800}s to keep this place"
         return 2
       fi
       stack_tip="$(git rev-parse HEAD)"; stack_in=""
