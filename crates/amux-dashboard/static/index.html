@@ -1303,6 +1303,14 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <button class="btn map-drop-btn" id="map-drop-btn" onclick="_mapToggleDropMode()" style="font-size:0.78rem;padding:3px 9px;" title="Drop a pin by clicking the map">&#x1F4CD; Drop Pin</button>
       <button class="btn" onclick="_mapLocateMe()" style="font-size:0.78rem;padding:3px 9px;" title="Center map on my location">&#x25CE; Locate Me</button>
       <button class="btn" onclick="_mapSetDefaultView()" style="font-size:0.78rem;padding:3px 9px;" title="Save current zoom/center as default">&#x1F4BE; Save View</button>
+      <select class="input map-base-select" id="map-base-select" onchange="_mapSetBase(this.value)" title="Map style" aria-label="Map style">
+        <option value="street">Street</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="satellite">Satellite</option>
+        <option value="terrain">Terrain</option>
+      </select>
+      <button class="btn" id="map-pins-btn" onclick="_mapTogglePins()" aria-pressed="false" style="font-size:0.78rem;padding:3px 9px;" title="Hide pins on the map (the list stays)">Hide pins</button>
       <span class="map-coords" id="map-coords"></span>
     </div>
   </div>

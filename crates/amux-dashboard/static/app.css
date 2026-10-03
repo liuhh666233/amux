@@ -5720,6 +5720,7 @@
   .map-pinbar-btn:hover { border-color: var(--accent); color: var(--accent); }
   .map-pin-dist { font-size: 0.68rem; color: var(--dim); font-weight: 400; white-space: nowrap; }
   .map-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--card); border-top: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
+  .map-toolbar .map-base-select { width: auto; font-size: 0.78rem; padding: 3px 6px; }
   .map-coords { font-size: 0.71rem; color: var(--dim); font-family: monospace; margin-left: auto; }
   .map-drop-btn.dropping { background: var(--accent) !important; color: #fff !important; border-color: transparent !important; }
   .map-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9100; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
@@ -5773,6 +5774,7 @@
     .map-sidebar.hidden { transform: translateX(-110%); }
     .map-open-btn { display: flex; }
     .map-toolbar { gap: 4px; padding: 5px 8px; }
+    .map-toolbar .map-base-select, #map-pins-btn { min-height: 44px; }
     /* On mobile: geocoder flows inside sidebar, not floating */
     .map-geocoder-wrap { position: relative !important; top: auto !important; left: auto !important; transform: none !important; width: 100% !important; padding: 8px 10px; box-sizing: border-box; z-index: auto; }
     .map-geocoder-wrap .map-geocoder-input-row { box-shadow: none; border-radius: 8px; }

@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2413,
+  "n_considered": 2417,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -1484,6 +1484,12 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_mapSetBase": {
+      "kind": "command._mapSetBase",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_mapSetDefaultView": {
       "kind": "command._mapSetDefaultView",
       "feedback_required": true,
@@ -1492,6 +1498,12 @@
     },
     "_mapSetSort": {
       "kind": "command._mapSetSort",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_mapTogglePins": {
+      "kind": "command._mapTogglePins",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

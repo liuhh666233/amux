@@ -13799,7 +13799,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1236';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1237';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -30642,6 +30642,7 @@ function _mapLoad() {
     _mapSettings = Object.assign(_mapSettings, data.settings || {});
     if (window.innerWidth <= 600 && _mapMobileSidebarInited) _mapSettings.sidebarOpen = sidebarHere;
     _mapApplySidebarState();
+    _mapApplyBase();
     _mapGoogleKey = (data.settings || {}).googleMapsKey || '';
     _mapServerLoaded = true; // safe to persist now that client mirrors server
     // Cache for offline
@@ -30695,10 +30696,7 @@ function _mapInit() {
       zoom: _mapSettings.defaultZoom,
       zoomControl: true
     });
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '\u00a9 <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-      maxZoom: 19
-    }).addTo(_map);
+    _mapApplyBase();
     _map.on('click', function(e) {
       if (_mapDropMode) {
         _mapExitDropMode();
@@ -30878,8 +30876,63 @@ function _mapRenderPins() {
   }).join('');
 }
 
+// Base map styles. Every source here is keyless; Google tiles would need the
+// Maps JS SDK and its key, so they are not offered as a raster layer.
+const _MAP_BASES = {
+  street: { label: 'Street', url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19,
+    attribution: '\u00a9 <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' },
+  light: { label: 'Light', url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', maxZoom: 20,
+    attribution: '\u00a9 <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> \u00a9 <a href="https://carto.com/attributions">CARTO</a>' },
+  dark: { label: 'Dark', url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', maxZoom: 20,
+    attribution: '\u00a9 <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> \u00a9 <a href="https://carto.com/attributions">CARTO</a>' },
+  satellite: { label: 'Satellite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom: 19,
+    attribution: 'Tiles \u00a9 Esri, Maxar, Earthstar Geographics' },
+  terrain: { label: 'Terrain', url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', maxZoom: 17,
+    attribution: '\u00a9 <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, SRTM \u00a9 <a href="https://opentopomap.org">OpenTopoMap</a>' },
+};
+let _mapBaseLayer = null;
+let _mapBaseKey = '';
+
+// Draw the saved base style. Called on init and again after the server copy of
+// the settings arrives, so another device's choice wins over a stale cache.
+function _mapApplyBase() {
+  const key = _MAP_BASES[_mapSettings.baseLayer] ? _mapSettings.baseLayer : 'street';
+  const sel = document.getElementById('map-base-select');
+  if (sel) sel.value = key;
+  if (!_map || (_mapBaseLayer && _mapBaseKey === key)) return;
+  if (_mapBaseLayer) _map.removeLayer(_mapBaseLayer);
+  const b = _MAP_BASES[key];
+  _mapBaseLayer = L.tileLayer(b.url, { attribution: b.attribution, maxZoom: b.maxZoom }).addTo(_map);
+  _mapBaseLayer.bringToBack();
+  _mapBaseKey = key;
+  if (_map.getZoom() > b.maxZoom) _map.setZoom(b.maxZoom);
+}
+
+function _mapSetBase(key) {
+  if (!_MAP_BASES[key]) return;
+  _mapSettings.baseLayer = key;
+  _mapApplyBase();
+  _mapSave();
+}
+
+function _mapSyncPinsBtn() {
+  const btn = document.getElementById('map-pins-btn');
+  if (!btn) return;
+  const hidden = !!_mapSettings.pinsHidden;
+  btn.textContent = hidden ? 'Show pins' : 'Hide pins';
+  btn.setAttribute('aria-pressed', hidden ? 'true' : 'false');
+  btn.title = hidden ? 'Show pins on the map' : 'Hide pins on the map (the list stays)';
+}
+
+function _mapTogglePins() {
+  _mapSettings.pinsHidden = !_mapSettings.pinsHidden;
+  _mapRenderMarkers();
+  _mapSave();
+}
+
 function _mapRenderMarkers() {
   if (!_map) return;
+  _mapSyncPinsBtn();
   // Clustering (AMUX-1865 #4): ~67 pins overlap heavily in Manhattan. Use a
   // markerClusterGroup when the plugin loaded; fall back to direct markers so
   // the map still works if the CDN is unreachable.
@@ -30895,6 +30948,9 @@ function _mapRenderMarkers() {
     Object.values(_mapMarkers).forEach(function(m) { m.remove(); });
   }
   _mapMarkers = {};
+  // Hidden pins: draw nothing. The sidebar list is untouched, and a click on a
+  // listed pin still flies there (_mapFlyToPin falls back when no marker).
+  if (_mapSettings.pinsHidden) return;
   _mapVisiblePins().forEach(function(pin) {
     if (isNaN(parseFloat(pin.lat)) || isNaN(parseFloat(pin.lng))) return;
     const marker = L.marker([pin.lat, pin.lng], { icon: _mapMakeIcon(pin) });
