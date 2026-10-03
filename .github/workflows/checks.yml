@@ -371,6 +371,7 @@ jobs:
         run: |
           set -uo pipefail
           ./scripts/test-mac-cleanup-lima.sh
+          ./scripts/test-mac-cleanup-keep-context.sh
       - name: the idle cargo-target reaper keeps anything it cannot prove idle and unopened (DESKT-51)
         run: |
           set -uo pipefail

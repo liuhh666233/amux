@@ -1143,6 +1143,25 @@ vm_is_idle() { # <profile>
   return 0
 }
 
+# `colima stop` deletes the profile's docker context and only `colima start`
+# recreates it, so a VM brought back any other way left every lane's
+# `docker --context colima-<p>` failing "context not found" (gs12-tiering,
+# 2026-10-03: goal-shared stopped here at 04:09, running again by 11:5x with no
+# context; gs12-restore's context gone too). Keep the context, pointing at the
+# VM's socket: while stopped a lane gets "cannot connect" (the truth), and the
+# context works again however the VM is restarted.
+keep_docker_context() { # <profile>
+  local p=$1 ctx="colima-$1" sock="${COLIMA_HOME:-$HOME/.colima}/$1/docker.sock"
+  command -v docker >/dev/null 2>&1 || return 0
+  docker context inspect "$ctx" >/dev/null 2>&1 && return 0
+  if docker context create "$ctx" --docker "host=unix://$sock" >/dev/null 2>&1; then
+    echo "mac-cleanup:   kept docker context $ctx (colima stop removes it) -> $sock"
+    echo "$(date '+%F %T') kept docker context $ctx after stopping $p" >> "$STATE_DIR/vm-stops.log"
+  else
+    echo "mac-cleanup:   WARN could not keep docker context $ctx after stopping $p"
+  fi
+}
+
 # Stop every idle running VM. Sets VMS_STOPPED. Records each stop.
 stop_idle_vms() { # <dry:0|1> <why>
   local dry=$1 why=$2 p rc n_busy=0 n_unk=0 profiles cmd
@@ -1161,6 +1180,7 @@ stop_idle_vms() { # <dry:0|1> <why>
       mkdir -p "$STATE_DIR"
       echo "$(date '+%F %T') stopped colima VM $p ($why; guest load under $VM_IDLE_LOAD, no docker activity but healthchecks for ${VM_IDLE_MIN}m). Restore: colima start -p $p" >> "$STATE_DIR/vm-stops.log"
       echo "mac-cleanup:   stopped idle colima VM $p (restore: colima start -p $p)"
+      keep_docker_context "$p"
     else
       echo "mac-cleanup:   FAILED to stop idle colima VM $p"
     fi
