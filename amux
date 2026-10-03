@@ -7573,7 +7573,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.44"
+LAND_BEHAVIOR_VERSION="2026-10-02.45"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7910,6 +7910,20 @@ p.communicate(msg.encode())
     else
       _land_log "WARN the shared $cfg holds core.worktree=$val (not this hold's worktree) after $phase; left for its owner"
     fi
+  }
+  # _land_leg_summary <timed log> <total s>: a leg starts at the first line
+  # carrying its "name:" prefix and ends where the next leg starts; log the
+  # five slowest with the push's total.
+  _land_leg_summary() {
+    [ -s "$1" ] || return 0
+    local top
+    top="$(awk '
+      { t=$1; sub(/s$/,"",t); line=$0; sub(/^ *[0-9.]+s /,"",line)
+        if (match(line,/^[A-Za-z0-9_.-]+:/)) { leg=substr(line,1,RLENGTH-1)
+          if (!(leg in seen)) { seen[leg]=1; n++; name[n]=leg; start[n]=t } } last=t }
+      END { for (i=1;i<=n;i++) { e=(i<n)?start[i+1]:last; d=e-start[i]; if (d>=1) printf "%.0f %s\n", d, name[i] } }' "$1" \
+      | sort -nr | head -5 | awk '{printf "%s%s %ss", (NR>1?", ":""), $2, $1}')"
+    _land_log "push took ${2}s; slowest legs: ${top:-none over 1s}. Timed output: $1"
   }
   # _land_mark_resume: a conflict stop keeps this lane's arrival time for its
   # rebased re-enqueue (see RESUME above).
@@ -8600,7 +8614,16 @@ $f"
     # deferring them at 60s: a median hold of 23.7 min, 33 to 67 in the
     # afternoon. gh's own stored login answers when the variables are unset,
     # and git's credential helper already ignores them.
-    rc=0; out="$(env -u GH_TOKEN -u GITHUB_TOKEN AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
+    # Every line of the push (and its hook) is also written with its elapsed
+    # time to a -timed.log beside the hook output, and the slowest legs are
+    # logged: "what is the biggest time suck of the pre-push?" (Ethan,
+    # 2026-10-03) had no answer because the hook records no per-leg time.
+    local _tl _t0p
+    _tl="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-a$i-timed.log"; mkdir -p "${_tl%/*}"
+    _t0p=$(date +%s)
+    rc=0; out="$(set -o pipefail; env -u GH_TOKEN -u GITHUB_TOKEN AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1 \
+      | AMUX_TL="$_tl" perl -MTime::HiRes=time -ne 'BEGIN{$|=1; $t0=time; open($o,">>",$ENV{AMUX_TL}) or die} printf $o "%8.1fs %s", time-$t0, $_; print')" || rc=$?
+    _land_leg_summary "$_tl" "$(( $(date +%s) - _t0p ))"
     _land_heal_core_worktree "the push and its hook (rc $rc)"
     # Keep the whole hook output for EVERY attempt, landed or refused
     # (gs12-spend, 2026-10-01: the deciding line sits above the ERROR list, so
