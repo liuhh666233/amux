@@ -7573,7 +7573,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.45"
+LAND_BEHAVIOR_VERSION="2026-10-02.46"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -8621,7 +8621,19 @@ $f"
     local _tl _t0p
     _tl="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-a$i-timed.log"; mkdir -p "${_tl%/*}"
     _t0p=$(date +%s)
-    rc=0; out="$(set -o pipefail; env -u GH_TOKEN -u GITHUB_TOKEN AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1 \
+    # FAST GATE (Ethan, 2026-10-03 16:21 ET, for the goal-spec-12 build): with
+    # `git config amux.landFastGate true` in the repository (or
+    # AMUX_LAND_FAST_GATE=1) the push runs the repository's hook in its
+    # land-precheck mode, judge only: every seconds-cheap leg (secrets,
+    # tree-revert, identity, ratchets) and none of the slow ones (clippy cold
+    # build, mirror-tests, repo-state/tree/workflow guards), which CI on main
+    # still runs. Off by default; unset the config to restore the full gate.
+    local _fg_env=""
+    if [ "${AMUX_LAND_FAST_GATE:-}" = 1 ] || [ "$(git config --bool --get amux.landFastGate 2>/dev/null)" = true ]; then
+      _fg_env="LAND_PRECHECK=1 AMUX_LAND_PRECHECK_MODE=batch"
+      _land_log "fast gate: pushing with the hook's seconds-cheap legs only (amux.landFastGate); the slow legs run in CI on $branch"
+    fi
+    rc=0; out="$(set -o pipefail; env -u GH_TOKEN -u GITHUB_TOKEN $_fg_env AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1 \
       | AMUX_TL="$_tl" perl -MTime::HiRes=time -ne 'BEGIN{$|=1; $t0=time; open($o,">>",$ENV{AMUX_TL}) or die} printf $o "%8.1fs %s", time-$t0, $_; print')" || rc=$?
     _land_leg_summary "$_tl" "$(( $(date +%s) - _t0p ))"
     _land_heal_core_worktree "the push and its hook (rc $rc)"
