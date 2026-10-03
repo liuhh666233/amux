@@ -939,7 +939,7 @@ These change the screen immediately (open a menu, switch a tab) and need no busy
 | app.js:31777 | Full detail | `_locNative` | onclick |
 | app.js:31778 | Battery saver | `_locNative` | onclick |
 | app.js:31782 | Upload now | `_locNative` | onclick |
-| app.js:31614 | Show  | `_locToggleMode` | onclick |
+| app.js:31616 | Show  | `_locToggleMode` | onclick |
 | index.html:1210 | Drop a pin on the map | `_mapAddPin` | onclick |
 | index.html:1286 | + Group | `_mapAddTag` | onclick |
 | index.html:1327 | map-pin-modal | `_mapClosePinModal` | onclick |

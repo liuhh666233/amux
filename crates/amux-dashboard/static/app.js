@@ -13799,7 +13799,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1238';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1239';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -31607,14 +31607,14 @@ function _locRenderOverview() {
   if (!st) return;
   const modesEl = document.getElementById('map-loc-modes'), dist = document.getElementById('map-loc-dist');
   const shown = _locModesShown();
-  // The whole row is the switch: a phone tap anywhere on it toggles the mode.
+  // Compact chips, three to a row, so the period, distances and places stay on
+  // the first phone screen (Ethan asked for conservative real estate). Each chip
+  // is a 44 px switch; off reads as a hollow, muted chip.
   _locSetHTML(modesEl, shown.map(k => {
     const m = _LOC_MODE[k], on = !_locModesOff.has(k);
-    return '<button type="button" role="switch" class="map-loc-mode-row" aria-checked="' + on + '" aria-label="Show ' + esc(m.label) + '"'
-      + ' data-mode="' + k + '" onclick="_locToggleMode(\'' + k + '\')">'
-      + '<span class="map-loc-mode-ico" style="color:' + m.color + '">' + m.icon + '</span>'
-      + '<span class="map-loc-mode-label">' + esc(m.short) + '</span>'
-      + '<span class="map-loc-switch' + (on ? ' on' : '') + '" style="--sw:' + m.color + '" aria-hidden="true"><span></span></span></button>';
+    return '<button type="button" role="switch" class="map-loc-mode-chip' + (on ? ' on' : '') + '" style="--mc:' + m.color + '" aria-checked="' + on + '"'
+      + ' aria-label="Show ' + esc(m.label) + '" data-mode="' + k + '" onclick="_locToggleMode(\'' + k + '\')">'
+      + '<span class="map-loc-mode-ico" aria-hidden="true">' + m.icon + '</span><span class="map-loc-mode-label">' + esc(m.short) + '</span></button>';
   }).join(''));
   const label = _LOC_PERIODS[_locPeriodKey][1];
   if (dist) {
@@ -31624,7 +31624,7 @@ function _locRenderOverview() {
       const totals = st.totals || {};
       const rows = shown.filter(k => k !== 'still' && !_locModesOff.has(k)).map(k => {
         const m = _LOC_MODE[k], t = totals[k];
-        return '<div class="map-loc-dist-row"><span class="map-loc-dot" style="background:' + m.color + '"></span><span class="map-loc-dist-label">' + esc(m.short) + '</span>'
+        return '<div class="map-loc-dist-row"><span class="map-loc-dist-label"><span class="map-loc-dot" style="background:' + m.color + '"></span>' + esc(m.short) + '</span>'
           + '<span class="map-loc-dist-val">' + (t && t.distance_m ? esc(_locFmtDist(t.distance_m)) : '<span class="map-loc-none">none</span>') + '</span></div>';
       });
       _locSetHTML(dist, rows.join('') || '<div class="map-loc-empty">Every mode is switched off.</div>');

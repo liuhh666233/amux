@@ -126,6 +126,8 @@ const STATS = {
   totals: {
     walking: {distance_m: 1609.344 * 12.5, moving_s: 4400, trips: 5, avg_speed_mps: 1.41},
     driving: {distance_m: 1609.344 * 300, moving_s: 3600, trips: 2, avg_speed_mps: 13.3},
+    running: {distance_m: 1609.344 * 9, moving_s: 3000, trips: 3, avg_speed_mps: 3},
+    train: {distance_m: 1609.344 * 8.5, moving_s: 900, trips: 1, avg_speed_mps: 15},
   },
   buckets: [], top_places: [], new_places: [], places_considered: 7, longest_trip: null,
   areas: [
@@ -162,16 +164,28 @@ test('Map > Location history overview: mode switches, period, distances, top pla
   await expect.poll(() => statsAsked.length).toBeGreaterThan(0);
   let q = new URL(statsAsked.at(-1)!).searchParams;
   expect(Number(q.get('to')) - Number(q.get('from'))).toBe(3650 * 86400);
-  // Mode switches: Drive, Walk, Bike always; Stays because the heatmap has it.
+  // Mode switches: Drive, Walk, Bike always; Run, Train and Stays because this
+  // period has them.
   const modes = page.locator('#map-loc-modes [role="switch"]');
-  await expect(modes).toHaveCount(4);
+  await expect(modes).toHaveCount(6);
   await expect(page.locator('#map-loc-modes')).toContainText('Drive');
   await expect(page.locator('#map-loc-modes')).toContainText('Bike');
   // Distances in the reader's units (miles for en-US), "none" for a mode with nothing.
   const dist = page.locator('#map-loc-dist');
-  await expect(dist).toContainText(/Drive\s*300 mi/);
-  await expect(dist).toContainText(/Walk\s*12\.5 mi/);
-  await expect(dist).toContainText(/Bike\s*none/);
+  await expect(dist.locator('.map-loc-dist-row').filter({hasText: 'Drive'})).toContainText('300 mi');
+  await expect(dist.locator('.map-loc-dist-row').filter({hasText: 'Walk'})).toContainText('12.5 mi');
+  await expect(dist.locator('.map-loc-dist-row').filter({hasText: 'Bike'})).toContainText('none');
+  // On a phone the first screen holds the period, the distances and the top of
+  // Top Places: six mode rows once filled it (Ethan: conservative real estate).
+  if ((page.viewportSize()?.width || 1200) <= 600) {
+    const fit = await page.evaluate(() => {
+      const ov = document.getElementById('map-loc-overview')!; ov.scrollTop = 0;
+      const bottom = ov.getBoundingClientRect().bottom;
+      const below = (sel: string) => document.querySelector(sel)!.getBoundingClientRect().bottom <= bottom + 0.5;
+      return {seg: below('#map-loc-seg'), dist: below('#map-loc-dist'), place: below('#map-loc-places .map-loc-place')};
+    });
+    expect(fit).toEqual({seg: true, dist: true, place: true});
+  }
   // Top places: five, named or pending, then All Places.
   const places = page.locator('#map-loc-places .map-loc-place');
   await expect(places).toHaveCount(5);

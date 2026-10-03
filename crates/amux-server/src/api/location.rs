@@ -1008,7 +1008,58 @@ pub(crate) fn place_key(lat: f64, lon: f64) -> (i64, i64) {
 /// visits in and names ("New York, NY"). Coarse on purpose: one reverse geocode
 /// per area, cached in location_place_names.
 pub(crate) fn area_key(lat: f64, lon: f64) -> String {
-    format!("a_{}_{}", (lat / 0.05).floor() as i64, (lon / 0.05).floor() as i64)
+    // "b_": names looked up from the cell centre (see area_lookup_url). Names
+    // cached under "a_" were looked up with precise visit-weighted centres.
+    format!("b_{}_{}", (lat / AREA_DEG).floor() as i64, (lon / AREA_DEG).floor() as i64)
+}
+
+const AREA_DEG: f64 = 0.05;
+
+/// The reverse-geocode request for an area. PRIVACY: it carries only the
+/// centre of the area's ~5 km grid cell, rounded to 2 decimals (~1 km), never
+/// where the owner actually stopped: an area dominated by home would otherwise
+/// put a home-precise coordinate in a third party's request log.
+pub(crate) fn area_lookup_url(base: &str, key: &str) -> Option<String> {
+    let mut parts = key.strip_prefix("b_")?.split('_');
+    let (i, j): (i64, i64) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let (lat, lon) = ((i as f64 + 0.5) * AREA_DEG, (j as f64 + 0.5) * AREA_DEG);
+    Some(format!("{base}/reverse?format=jsonv2&lat={lat:.2}&lon={lon:.2}&zoom=10&addressdetails=1"))
+}
+
+/// A city spans several ~5 km cells, so cells that resolved to the same name
+/// are one place: visits and time add up, the position is visit-weighted, and
+/// the busiest cell's key is kept. Unnamed cells stay separate.
+pub(crate) fn merge_named_areas(areas: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut by_name: std::collections::HashMap<String, usize> = Default::default();
+    for a in areas {
+        let name = a["name"].as_str().map(str::to_string);
+        match name.as_ref().and_then(|n| by_name.get(n).copied()) {
+            Some(i) => {
+                let (v0, v1) = (out[i]["visits"].as_i64().unwrap_or(0), a["visits"].as_i64().unwrap_or(0));
+                let w = (v0 + v1).max(1) as f64;
+                let lat = (out[i]["lat"].as_f64().unwrap_or(0.0) * v0 as f64 + a["lat"].as_f64().unwrap_or(0.0) * v1 as f64) / w;
+                let lon = (out[i]["lon"].as_f64().unwrap_or(0.0) * v0 as f64 + a["lon"].as_f64().unwrap_or(0.0) * v1 as f64) / w;
+                let t = out[i]["time_s"].as_f64().unwrap_or(0.0) + a["time_s"].as_f64().unwrap_or(0.0);
+                let o = out[i].as_object_mut().expect("area object");
+                o.insert("visits".into(), json!(v0 + v1));
+                o.insert("time_s".into(), json!(t));
+                o.insert("lat".into(), json!(lat));
+                o.insert("lon".into(), json!(lon));
+            }
+            None => {
+                if let Some(n) = name {
+                    by_name.insert(n, out.len());
+                }
+                out.push(a);
+            }
+        }
+    }
+    out.sort_by(|a, b| b["visits"].as_i64().cmp(&a["visits"].as_i64()));
+    out
 }
 
 /// A failed lookup is retried after this long; a successful one is kept.
@@ -1178,6 +1229,7 @@ pub(crate) fn compute_stats(c: &Connection, from: f64, to: f64, bucket: &str, of
         areas_json.push(json!({"key": key, "name": name, "name_status": status, "visits": visits,
             "time_s": time_s.round(), "lat": lat_w / *w as f64, "lon": lon_w / *w as f64}));
     }
+    let areas_json = merge_named_areas(areas_json);
     let buckets_json: Vec<Value> = buckets.iter().map(|(label, m)| json!({"bucket": label, "modes": modes(m)})).collect();
     Ok(json!({
         "ok": true, "measured": true, "n_considered": n_points, "days_with_data": days.len(),
@@ -1243,20 +1295,25 @@ fn spawn_area_names(state: AppState, wanted: Vec<(String, f64, f64)>) {
             if i > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
             }
-            let url = format!("{base}/reverse?format=jsonv2&lat={lat:.5}&lon={lon:.5}&zoom=10&addressdetails=1");
-            let got: Option<Value> = match &client {
-                Ok(cl) => match cl.get(&url).header("User-Agent", "amux/1.0 (location history)").header("Accept-Language", "en").send().await {
+            let got: Option<Value> = match (&client, area_lookup_url(&base, key)) {
+                (Ok(cl), Some(url)) => match cl.get(&url).header("User-Agent", "amux/1.0").header("Accept-Language", "en").send().await {
                     Ok(r) if r.status().is_success() => r.json().await.ok(),
                     _ => None,
                 },
-                Err(_) => None,
+                _ => None,
             };
             let (name, status) = match &got {
                 Some(v) => match area_name(v) { Some(n) => (Some(n), "named"), None => (None, "none") },
                 None => (None, "failed"),
             };
             if status == "failed" { failed += 1 } else { named += 1 }
-            let (k, la, lo, t) = (key.clone(), *lat, *lon, now());
+            let _ = (lat, lon); // the visit-weighted centre never leaves this process
+            let (k, t) = (key.clone(), now());
+            let (la, lo) = area_lookup_url("", key).and_then(|u| {
+                let q = u.split('?').nth(1)?.to_string();
+                let get = |n: &str| q.split('&').find_map(|kv| kv.strip_prefix(n)).and_then(|v| v.parse::<f64>().ok());
+                Some((get("lat=")?, get("lon=")?))
+            }).unwrap_or((0.0, 0.0));
             let res = write_value(&state, move |c| c.execute(
                 "INSERT INTO location_place_names (key, name, status, lat, lon, fetched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(key) DO UPDATE SET name = excluded.name, status = excluded.status, lat = excluded.lat,
@@ -1439,6 +1496,43 @@ mod tests {
         let v = compute_stats(&c, t - 3600.0, t + 20000.0, "day", 0.0, t + 19000.0 + AREA_RETRY_S + 1.0).unwrap();
         assert_eq!(v["areas"][1]["name_status"], "pending");
         assert_eq!(v["areas_considered"], 2);
+    }
+
+    #[test]
+    fn the_geocoder_only_ever_sees_the_cell_centre_at_two_decimals() {
+        // A stop at a precise home-like position...
+        let (lat, lon) = (40.741_123_4, -73.989_765_4);
+        let key = area_key(lat, lon);
+        let url = area_lookup_url("https://geo.example", &key).unwrap();
+        let q: std::collections::HashMap<&str, &str> = url.split('?').nth(1).unwrap().split('&')
+            .filter_map(|kv| kv.split_once('=')).collect();
+        for k in ["lat", "lon"] {
+            let v = q[k];
+            let decimals = v.split('.').nth(1).map_or(0, str::len);
+            assert!(decimals <= 2, "{k}={v} carries more than 2 decimals: {url}");
+        }
+        // ...is sent as the centre of its 0.05 degree cell, not as itself.
+        let (i, j) = ((lat / 0.05).floor(), (lon / 0.05).floor());
+        assert_eq!(q["lat"], format!("{:.2}", (i + 0.5) * 0.05));
+        assert_eq!(q["lon"], format!("{:.2}", (j + 0.5) * 0.05));
+        assert_ne!(q["lat"], format!("{lat:.2}"), "the request must not be the stop rounded, but the cell centre");
+        assert_eq!(q["zoom"], "10");
+        assert_eq!(area_lookup_url("x", "a_1_2"), None, "old-style keys are never looked up");
+    }
+
+    #[test]
+    fn cells_with_the_same_name_merge_into_one_place() {
+        let a = |key: &str, name: Option<&str>, visits: i64, lat: f64| json!({"key": key, "name": name,
+            "name_status": if name.is_some() { "named" } else { "pending" }, "visits": visits, "time_s": 10.0, "lat": lat, "lon": -74.0});
+        let merged = merge_named_areas(vec![
+            a("b_1", Some("New York, NY"), 30, 40.70), a("b_2", Some("New York, NY"), 10, 40.80),
+            a("b_3", None, 25, 41.5), a("b_4", None, 5, 41.6), a("b_5", Some("Boston, MA"), 20, 42.3),
+        ]);
+        let names: Vec<(Option<&str>, i64)> = merged.iter().map(|x| (x["name"].as_str(), x["visits"].as_i64().unwrap())).collect();
+        assert_eq!(names, vec![(Some("New York, NY"), 40), (None, 25), (Some("Boston, MA"), 20), (None, 5)]);
+        assert_eq!(merged[0]["key"], "b_1");
+        assert!((merged[0]["lat"].as_f64().unwrap() - 40.725).abs() < 1e-9, "{}", merged[0]);
+        assert_eq!(merged[0]["time_s"], 20.0);
     }
 
     #[test]
