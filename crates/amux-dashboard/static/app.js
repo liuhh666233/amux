@@ -13696,7 +13696,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1232';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1233';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -36100,7 +36100,15 @@ async function saveSchedModal() {
   const title = document.getElementById('sched-title').value.trim();
   const shell = document.getElementById('sched-kind-shell').checked;
   const kind = shell ? 'shell' : 'tmux';
-  const worker = shell ? '' : document.getElementById('sched-session').value;
+  // A shell schedule hides the worker picker, and this used to send worker ''
+  // for it, so EDITING any shell schedule cleared its session and it vanished
+  // from its worker's list (Ethan, 2026-10-03: SCHED-550 lost amux-helper on a
+  // frequency change). On an edit the picker holds the stored session (the
+  // editor sets it), so send that; with none, leave the field out.
+  const _pick = (document.getElementById('sched-session') || {}).value || '';
+  // A NEW shell schedule keeps no worker (its picker is hidden and would
+  // otherwise default to the first session in the list).
+  const worker = (shell && !_schedEditId) ? '' : _pick;
   const command = document.getElementById('sched-command').value.trim();
   if (!title || !command) { showToast && showToast('Title and command are required'); return; }
   if (!shell && !worker) { showToast && showToast('Pick a worker'); return; }
@@ -36130,10 +36138,11 @@ async function saveSchedModal() {
   // save into an error; they are gone from the payload for the same reason
   // they are gone from the form.
   const worktree = document.getElementById('sched-worktree').checked ? 1 : 0;
-  const payload = { title, worker, kind, command, sched_type: stype, recurrence: null, run_at,
+  const payload = { title, kind, command, sched_type: stype, recurrence: null, run_at,
                     schedule_expr: schedExpr || null,
                     worktree,
                     by: 'dashboard' };
+  if (worker || !_schedEditId) payload.worker = worker;
   const url = _schedEditId ? API + '/api/schedules/' + _schedEditId : API + '/api/schedules';
   const method = _schedEditId ? 'PATCH' : 'POST';
   const r = await apiCall(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
