@@ -7559,7 +7559,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.40"
+LAND_BEHAVIOR_VERSION="2026-10-02.41"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -8392,6 +8392,16 @@ $f"
     elif [ -z "$land_sha" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
       _replay_head="$(git rev-parse HEAD)"
       _land_log "checkout has uncommitted changes; landing HEAD $(git rev-parse --short HEAD) by replay without touching the tree"
+    elif [ -z "$land_sha" ] && [ "${AMUX_LAND_REBASE_CHECKOUT:-0}" != 1 ]; then
+      # Never rebase inside the lane's checkout (gs12-cicd, 2026-10-03): a
+      # holder's `git rebase` checks origin's tree out into the worktree, and
+      # when it conflicted (13:28Z, zb-evals.yml) and the abort did not fully
+      # restore a sparse worktree, the checkout was left with origin's files
+      # under the stack's HEAD and index: 2,331 files "changed", and any
+      # uncommitted work there would have been overwritten. Replay builds the
+      # same commits with no checkout at all. AMUX_LAND_REBASE_CHECKOUT=1
+      # restores the old clean-tree rebase.
+      _replay_head="$(git rev-parse HEAD)"
     fi
     if [ -n "$land_sha$_replay_head" ]; then
       local land_sha_eff="${land_sha:-$_replay_head}"

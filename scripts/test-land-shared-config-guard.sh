@@ -23,6 +23,8 @@ git fetch -q origin; [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)"
 git config --unset core.worktree
 HOME="$H" AMUX_LAND_NOTIFY=0 AMUX_WORKER=lsc bash "$AM" land >/dev/null 2>&1; rc2=$?
 git fetch -q origin
-[ "$rc2" = 0 ] && [ "$(git rev-parse origin/main)" = "$(git rev-parse HEAD)" ] && echo "ok   a clean shared config lands" || { echo "FAIL clean config rc=$rc2"; fail=1; }
+# Compare content, not shas: land replays (a new sha) rather than rebasing the
+# lane's checkout since .41.
+[ "$rc2" = 0 ] && [ "$(git show origin/main:f)" = b ] && echo "ok   a clean shared config lands" || { echo "FAIL clean config rc=$rc2"; fail=1; }
 cd / && rm -rf -- "${H:?}"
 exit $fail

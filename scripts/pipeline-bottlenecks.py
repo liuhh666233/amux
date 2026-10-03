@@ -220,10 +220,18 @@ def main():
             continue
         waits, stale, lanes = [], [], []
         for t in tickets:
+            # Land's marker files (.resume-<lane>, .tohead-<pid>, .batch-<pid>)
+            # live in the queue dir too; they are not tickets.
+            if t.startswith("."):
+                continue
             pid = t.rsplit("-", 1)[-1]
             who = (open(os.path.join(qd, t), errors="replace").readline().strip() or "?")
             lanes.append(who)
-            if t.startswith("000"):
+            if t.startswith("000000000000-"):
+                # Moved by `amux land --to-head`: its name carries no arrival
+                # time (read as 25 years, 2026-10-03), so use the file's mtime.
+                arrived = int(os.path.getmtime(os.path.join(qd, t)))
+            elif t.startswith("000"):
                 arrived = int(now // 1e9 * 1e9 + int(t[3:12]))
             else:
                 arrived = int(t[:12])
