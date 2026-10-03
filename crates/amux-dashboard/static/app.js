@@ -7376,7 +7376,7 @@ function render() {
             onkeydown="cardSlashAcKeydown('${s.name}',event)"
             onpaste="handleCardPaste('${s.name}',event)"
             onbeforeinput="cardSlashAcBeforeInput('${s.name}',event)"></textarea>
-          <div class="send-split${_sendMode === 'queue' ? ' mode-queue' : ''}"><button class="btn primary send-split-main" ${_composerPendingSends.has(s.name) ? 'disabled' : ''} onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => sendFromInput('${s.name}'))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => sendFromInput('${s.name}'))" onclick="_btnFire(event, () => sendFromInput('${s.name}'))" title="${esc(_sendTitleFor(s.name))}">${_sendLabelFor(s.name)}</button><button class="btn primary send-split-arrow" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => _toggleSendMode(event))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => _toggleSendMode(event))" onclick="_btnFire(event, () => _toggleSendMode(event))" title="Switch send mode">&#x25BC;</button></div>
+          <div class="send-split${_sendLabelFor(s.name) === 'Queue' ? ' mode-queue' : ''}"><button class="btn primary send-split-main" ${_composerPendingSends.has(s.name) ? 'disabled' : ''} onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => sendFromInput('${s.name}'))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => sendFromInput('${s.name}'))" onclick="_btnFire(event, () => sendFromInput('${s.name}'))" title="${esc(_sendTitleFor(s.name))}">${_sendLabelFor(s.name)}</button><button class="btn primary send-split-arrow" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => _toggleSendMode(event))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => _toggleSendMode(event))" onclick="_btnFire(event, () => _toggleSendMode(event))" title="Switch send mode">&#x25BC;</button></div>
         </div>` : ''}
       </div>
     </div>`;
@@ -13696,7 +13696,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1231';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1232';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -18857,13 +18857,6 @@ function _toggleSendMode(e) {
   _updateSendSplit();
 }
 function _updateSendSplit() {
-  // querySelectorAll, not querySelector. Send/Queue is ONE mode shared by every
-  // composer, and the worker list now has a split per card — with the singular
-  // lookup only the first one on the page ever relabelled, so the peek could say
-  // Queue while every card still said Send for the same mode.
-  document.querySelectorAll('.send-split').forEach(split => {
-    split.classList.toggle('mode-queue', _sendMode === 'queue');
-  });
   _syncComposerPending();
 }
 setTimeout(_updateSendSplit, 0);
@@ -18884,8 +18877,11 @@ function _syncComposerPending() {
     const pending = _composerPendingSends.has(session);
     btn.disabled = pending;
     // The brief lock covers local persistence only; delivery belongs in Messages.
-    btn.textContent = _sendLabelFor(session);
+    const label = _sendLabelFor(session);
+    btn.textContent = label;
     btn.title = _sendTitleFor(session);
+    const split = btn.closest('.send-split');
+    if (split) split.classList.toggle('mode-queue', label === 'Queue');
   };
   sync(document.querySelector('#peek-overlay .send-split-main'), (typeof _peekChatTarget === 'function' && _peekChatTarget()) || peekSession);
   document.querySelectorAll('.card[data-session]').forEach(card =>
