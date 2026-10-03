@@ -26,7 +26,7 @@ in the last six hours (their closed_at), per hour, and `needed` is open cards
 over hours left. Discards leave the open count but are not progress: they are
 reported beside the rate so "finishing" by discarding is visible. The verdict
 is ON PACE when rate_6h >= needed and BEHIND otherwise; with no closed_at on
-any card it is UNMEASURED and says so rather than reading as on pace. Proof has a checkpoint of its own: half the completion
+any card it is UNMEASURED and says so rather than reading as on pace. Proof has a checkpoint of its own, judged by projecting its 6h rate to it: half the completion
 cards verified by 24 hours before the deadline.
 
 Written 2026-10-01 for goal spec 12 (Ethan: "it needs to be finished by
@@ -60,14 +60,16 @@ def main():
     ap.add_argument("--proof-prefix", action="append", default=[])
     ap.add_argument("--plan-regex", help="titles of the orchestrator's plan-item cards, e.g. '^GS12 (plan item )?\\d+\\.\\d+'")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--board-file", help="read the board from this JSON file instead of the server (tests)")
+    ap.add_argument("--now", help="ISO-8601 time to measure at (tests)")
     a = ap.parse_args()
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.fromisoformat(a.now) if a.now else dt.datetime.now(dt.timezone.utc)
     deadline = dt.datetime.fromisoformat(a.deadline)
     hours_left = max((deadline - now).total_seconds() / 3600, 0.0)
 
     cards = [
-        c for c in board(amux_url())
+        c for c in (json.load(open(a.board_file)) if a.board_file else board(amux_url()))
         if not c.get("archived")
         and ((c.get("session") or "") == a.orchestrator or (c.get("session") or "").startswith(a.lane_prefix))
         and c.get("type") not in ("epic", "watch", "tripwire")
@@ -127,8 +129,16 @@ def main():
                 "discarded": len(items) - len(live)}
         verdict = "ON PACE" if p_rate >= p_needed else "BEHIND"
     checkpoint = deadline - dt.timedelta(hours=24)
-    proof_target_now = len(proof) // 2 if now >= checkpoint else 0
-    proof_verdict = "ON PACE" if proof_verified >= proof_target_now else "BEHIND"
+    # Before the checkpoint, project the proof rate to it: a target of zero
+    # until the checkpoint passed read ON PACE at 6 of 66 with 33 due in
+    # 4.5 hours (2026-10-03), so the verdict could only turn BEHIND too late.
+    proof_target = len(proof) // 2
+    proof_6h = sum(1 for c in proof if c.get("status") == "verified"
+                   and (closed_ts(c) or 0) >= since)
+    proof_rate = proof_6h / 6.0
+    to_checkpoint = max((checkpoint - now).total_seconds() / 3600, 0.0)
+    proof_projected = proof_verified + proof_rate * to_checkpoint
+    proof_verdict = "ON PACE" if proof_projected >= proof_target else "BEHIND"
 
     out = {
         "verdict": verdict, "hours_left": round(hours_left, 1),
@@ -140,6 +150,8 @@ def main():
         "proof_verified": proof_verified, "proof_total": len(proof),
         "proof_checkpoint": f"{len(proof)//2} verified by {checkpoint.isoformat()}",
         "proof_verdict": proof_verdict,
+        "proof_rate_6h_per_h": round(proof_rate, 2),
+        "proof_projected_at_checkpoint": round(proof_projected, 1),
         "needsyou": needsyou,
         "plan": plan,
         "population": f"{a.orchestrator} + {a.lane_prefix}* boards, non-archived, epics/watches/tripwires excluded",
@@ -156,7 +168,8 @@ def main():
               f"{hours_left:.1f}h left -> need {needed:.2f}/h, measured {r} over the last 6h "
               f"(plus {discarded_6h} discarded, not counted as progress)")
         print(f"proof: {proof_verified}/{len(proof)} completion cards verified ({proof_verdict}; "
-              f"checkpoint {len(proof)//2} by {checkpoint.isoformat()})")
+              f"checkpoint {proof_target} by {checkpoint.isoformat()}; measured {proof_rate:.2f}/h, "
+              f"projected {proof_projected:.1f} there)")
         print(f"needsyou: {', '.join(needsyou) or 'none'}")
         print(f"population: {out['population']}")
     return 0 if verdict != "BEHIND" and proof_verdict != "BEHIND" else 2
