@@ -7530,7 +7530,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.34"
+LAND_BEHAVIOR_VERSION="2026-10-02.35"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7828,7 +7828,10 @@ p.communicate(msg.encode())
   if [ "$priority" = 1 ]; then
     local _ord=0 _f
     for _f in "$q"/*; do [ -e "$_f" ] || continue; case "${_f##*/}" in 000*) ;; *) _ord=$((_ord + 1)) ;; esac; done
-    _land_log "queued with --priority ahead of $_ord ordinary waiter(s); reason: $prio_reason"
+    # Only a real priority ticket says so: an adopted (demoted) name re-exec'd
+    # with --priority still in its arguments logged this and read as the
+    # demote being undone (gs12-templates 01:15Z and 03:16Z, 2026-10-03).
+    [ "${tname:0:3}" = 000 ] && _land_log "queued with --priority ahead of $_ord ordinary waiter(s); reason: $prio_reason"
   fi
   # Expanded NOW: these are locals, gone by the time an EXIT trap runs, and a
   # `${x:?}` guard on an unset name fails the exit status (rc 1 on success).
@@ -7987,6 +7990,18 @@ p.communicate(msg.encode())
       if mv -- "${q:?}/${tname:?}" "${q:?}/${demoted:?}" 2>/dev/null; then
         _land_log "demoted by $(cat "${q:?}/.demote-$$" 2>/dev/null || echo ?): ticket back in ordinary order at its arrival time"
         tname="$demoted"
+        # The demote sticks: every re-exec (self-upgrade on a new install, a
+        # lost lock) replays orig_args, and --priority came back each time
+        # (templates' pid 83291 re-queued with priority three times after two
+        # demotes, 2026-10-03). Drop it and its --reason from the replay too.
+        priority=0
+        local _da=() _dskip=0 _dx
+        for _dx in ${orig_args[@]+"${orig_args[@]}"}; do
+          if [ "$_dskip" = 1 ]; then _dskip=0; continue; fi
+          case "$_dx" in --priority) continue ;; --reason) _dskip=1; continue ;; esac
+          _da+=("$_dx")
+        done
+        orig_args=(${_da[@]+"${_da[@]}"})
         # shellcheck disable=SC2064  # expanded now on purpose: locals are gone when the trap runs
         trap "rm -f -- '${q:?}/${tname:?}' '${rdir:?}/${tname:?}'" EXIT
         head="$(ls "$q" | sort | head -1)"
