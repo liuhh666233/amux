@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';
 const source=fs.readFileSync('crates/amux-dashboard/static/app.js','utf8');
-const code=source.slice(source.indexOf('function _pendingMessageProjection('),source.indexOf('async function _pendingCancel('));
+const code=source.slice(source.indexOf('function _pendingMessageProjection('),source.indexOf('function _updatePendingPill('));
 const ctx=vm.createContext({peekSession:'lane'});vm.runInContext(code,ctx);
 const project=(history,pending)=>JSON.parse(JSON.stringify(ctx._pendingMessageProjection(history,pending)));
 const pending={id:'q',msg_id:'transport-1',text:'[01:14 PM] same text',ts:100000,attempted:true};

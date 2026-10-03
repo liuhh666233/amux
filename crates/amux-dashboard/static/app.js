@@ -1438,6 +1438,7 @@ function showConnHistory() {
         + (q.error ? '<div style="color:' + (uncertain ? 'var(--yellow,#d29922)' : 'var(--red,#e55)') + ';font-size:0.72rem;">' + esc(q.error).substring(0, 100) + '</div>' : '')
         + '</div>'
         + '<span style="color:var(--dim);flex-shrink:0;font-variant-numeric:tabular-nums;font-size:0.76rem;">' + timeStr + '</span>'
+        + (_outboxIsMessage(q) && (blocked || uncertain) ? ' <button type="button" class="btn conn-op-retry" onclick="_outboxRetryNow(\'' + escJs(q.id) + '\');document.getElementById(\'conn-hist-modal\')?.remove();" title="Send again">Send again</button>' : '')
         + (blocked ? ' <button type="button" class="conn-op-dismiss" aria-label="Dismiss failed change" onclick="_dismissQueuedOp(\'' + escJs(q.id) + '\');document.getElementById(\'conn-hist-modal\')?.remove();showConnHistory();" title="Dismiss">&#x2715;</button>' : '')
         + '</div>';
     }).join('');
@@ -3463,8 +3464,10 @@ async function _runSyncBanner(quiet = false) {
   const draftCount = drafts.length;
   // Keep every operation durable until its individual acknowledgement. A
   // reload, timeout, or second replay must never erase an in-flight write.
+  await _mutateQueue(current => { _outboxSettleDecisions(current); });
   const blockedResources = new Set();
   const queue = offlineQueue.filter(q => {
+    if (_outboxNeedsDecision(q)) return false;   // waits for the reader, holds nothing
     if (q.state === 'blocked' && !_outboxUncertainMessage(q)) blockedResources.add(q.url);
     // Uncertain sends STAY IN REPLAY (AMUX-4594). This list is what the loop
     // below re-checks, so filtering them here (d69efdef) meant a stuck send
@@ -3643,14 +3646,18 @@ async function _runSyncBanner(quiet = false) {
         // A receipt read is safe after reload, even for a legacy blocked entry.
         q.state = _outboxMessageId(q) ? 'pending' : 'blocked';
       } else if (e.outboxBlocked) q.state = 'blocked';
-      q.error = q.delivery_uncertain && _outboxMessageId(q)
+      if (_outboxIsMessage(q) && !q.needs_decision) {
+        if (q.delivery_uncertain && q.checking_since && Date.now() - q.checking_since > _OUTBOX_DECIDE_AFTER_MS) _outboxMarkDecision(q, 'unconfirmed');
+        else if (q.state === 'blocked' && !q.delivery_uncertain) _outboxMarkDecision(q, 'refused');
+      }
+      if (!q.needs_decision) q.error = q.delivery_uncertain && _outboxMessageId(q)
         ? 'Awaiting confirmation — checking automatically' : String(e.message || e);
       _interactionSet(interaction.id, {phase:q.delivery_uncertain ? 'unknown' : q.state === 'blocked' ? 'refused' : 'queued',
         ...(q.delivery_uncertain ? {measured:false, why_unmeasured:'Server has not confirmed message acceptance'} : {}), feedback:{message:q.error}});
       q.attempts = (q.attempts || 0) + 1;
       _writeError = q.error;
-      await _mutateQueue(current => { const saved = current.find(entry => entry.id === q.id); if (saved) Object.assign(saved, {state: q.state, error: q.error, attempts: q.attempts, delivery_uncertain:!!q.delivery_uncertain, checking_since:q.checking_since || 0}); });
-      failedResources.add(q.url);
+      await _mutateQueue(current => { const saved = current.find(entry => entry.id === q.id); if (saved) Object.assign(saved, {state: q.state, error: q.error, attempts: q.attempts, delivery_uncertain:!!q.delivery_uncertain, checking_since:q.checking_since || 0, needs_decision: q.needs_decision || ''}); });
+      if (!q.needs_decision) failedResources.add(q.url);
       item.status = q.delivery_uncertain ? 'checking' : 'failed';
       item.label += ' — ' + q.error;
       try { amuxTrack('outbox_retry_failed', {id: q.id, status: q.state || 'pending', error: q.error}); } catch (_) {}
@@ -3845,6 +3852,90 @@ async function _outboxConfirmMessage(q, opts) {
   throw Object.assign(new Error('Awaiting confirmation — checking automatically'), {outboxUncertain:true});
 }
 
+// NEEDS A DECISION (Ethan, 2026-10-03: "i need a way to try these again or
+// evict them from my client"). A message to a worker that was refused, or whose
+// delivery could not be confirmed within _OUTBOX_DECIDE_AFTER_MS, or that sat
+// unsent for longer than _OUTBOX_STALE_SEND_MS, stops being retried or
+// re-checked and waits for the reader: Send again (same msg_id, so the server's
+// send_dedup never pastes it twice) or Remove. It also stops holding later
+// messages to the same worker: a refused head has already broken the order,
+// and holding everything behind it is how three notes sat unsent for two days
+// behind one refused message. Non-message operations keep strict ordering.
+const _OUTBOX_DECIDE_AFTER_MS = 15 * 60_000;
+const _OUTBOX_STALE_SEND_MS = 6 * 3600_000;
+function _outboxIsMessage(q) {
+  return /\/api\/sessions\/[^/?]+\/(send|steer)$/.test(String(q?.url || '').split('?')[0]);
+}
+function _outboxNeedsDecision(q) {
+  return !!(q && _outboxIsMessage(q) && q.needs_decision);
+}
+function _outboxMarkDecision(q, reason, now = Date.now()) {
+  Object.assign(q, {needs_decision: reason, state: 'blocked', delivery_uncertain: false,
+    error: reason === 'unconfirmed' ? 'Not confirmed by the worker; it may already be there'
+         : reason === 'stale' ? 'Saved on this device and never sent'
+         : (q.error && !/^Awaiting confirmation/.test(q.error) ? q.error : 'The worker did not accept it')});
+  try { amuxTrack('outbox_needs_decision', {id: q.id, reason, measured: true, n_considered: 1,
+    age_ms: now - (q.timestamp || now)}); } catch (_) {}
+  return q;
+}
+// Settle entries that predate these rules or whose clock has run out. Pure over
+// the stored list so it can run inside _mutateQueue.
+function _outboxSettleDecisions(list, now = Date.now()) {
+  let changed = 0;
+  for (const q of list) {
+    if (!_outboxIsMessage(q) || q.needs_decision || _outboxActive.has(q.id)) continue;
+    const uncertain = _outboxUncertainMessage(q);
+    if (uncertain && q.checking_since && now - q.checking_since > _OUTBOX_DECIDE_AFTER_MS) { _outboxMarkDecision(q, 'unconfirmed', now); changed++; }
+    else if (q.state === 'blocked' && !uncertain) { _outboxMarkDecision(q, 'refused', now); changed++; }
+    else if (!uncertain && !q.attempted_at && !q.attempts && now - (q.timestamp || now) > _OUTBOX_STALE_SEND_MS) { _outboxMarkDecision(q, 'stale', now); changed++; }
+  }
+  return changed;
+}
+async function _outboxRetryNow(id) {
+  if (typeof id !== 'string' || !id) return;
+  let found = false;
+  await _mutateQueue(current => {
+    const q = current.find(entry => entry.id === id);
+    if (!q || _outboxActive.has(id)) return;
+    found = true;
+    // Same body, same msg_id: a copy the server already holds is deduped.
+    const checking = !q.needs_decision && _outboxUncertainMessage(q);
+    // "Check again" on a message still being confirmed re-reads its receipt now;
+    // everything else is sent again. Either way the msg_id is unchanged.
+    Object.assign(q, checking
+      ? {state: 'pending', delivery_uncertain: true, checking_since: Date.now(), retried_at: Date.now()}
+      : {needs_decision: '', state: 'pending', delivery_uncertain: false, error: '', attempts: 0, checking_since: 0, retried_at: Date.now()});
+  });
+  try { amuxTrack('outbox_retry_now', {id, measured: true, n_considered: 1, found}); } catch (_) {}
+  updateConnectionStatus();
+  try { if (typeof _peekMessagesRender === 'function') _peekMessagesRender(); } catch (_) {}
+  if (!found) { showToast('That message is no longer queued here.'); return; }
+  showToast('Sending again…');
+  runSyncBanner(true);
+}
+async function _outboxRemoveMessage(id) {
+  if (typeof id !== 'string' || !id) return;
+  const q = (offlineQueue || []).find(entry => entry.id === id);
+  if (!q) return;
+  const attempted = !!(q.attempted_at || q.attempts || !q.not_attempted);
+  if (attempted) {
+    const worker = decodeURIComponent((q.url.match(/\/api\/sessions\/([^/]+)\//) || [])[1] || 'the worker');
+    const ok = await showConfirm('This message may already be with ' + worker + '. Check its terminal first.\n\nRemove it from this device?', 'Remove', true);
+    if (!ok) return;
+  }
+  let removed = false;
+  await _mutateQueue(current => {
+    const at = current.findIndex(entry => entry.id === id);
+    if (at < 0 || _outboxActive.has(id)) return;
+    current.splice(at, 1); removed = true;
+  });
+  try { amuxTrack('outbox_message_removed', {id, attempted, removed, measured: true, n_considered: 1}); } catch (_) {}
+  if (!offlineQueue.length && !drafts.length) _writeError = '';
+  updateConnectionStatus();
+  try { if (typeof _peekMessagesRender === 'function') _peekMessagesRender(); } catch (_) {}
+  showToast(removed ? 'Removed from this device' : 'It is being sent right now; try again in a moment');
+}
+
 // Queue modal
 function showQueueModal() {
   const el = document.getElementById('queue-list');
@@ -3856,6 +3947,7 @@ function showQueueModal() {
         esc(describeOp(item)) +
         '<br><span class="queue-time">' + new Date(item.timestamp).toLocaleTimeString() + '</span>' +
         (item.error ? '<div class="queue-error">' + esc(item.error) + '</div>' : '') +
+        (_outboxIsMessage(item) ? '<button class="btn" onclick="_outboxRetryNow(\'' + escJs(item.id) + '\');showQueueModal()">Send again</button> ' : '') +
         '<button class="btn" onclick="_removeQueuedOperation(\'' + escJs(item.id) + '\')">Discard this queued change</button>' +
       '</div>'
     ).join('');
@@ -3888,7 +3980,12 @@ async function forceRetry() {
       }).catch(() => {});
     } catch (e) {}
   }
-  await _mutateQueue(current => current.forEach(q => { q.state = 'pending'; q.reviewed_at = Date.now(); }));
+  // Retry now is the reader's decision for everything listed, including
+  // messages waiting for one (needs_decision): send them again, same msg_id.
+  await _mutateQueue(current => current.forEach(q => {
+    q.state = 'pending'; q.reviewed_at = Date.now();
+    if (q.needs_decision) Object.assign(q, {needs_decision: '', error: '', attempts: 0, checking_since: 0});
+  }));
   _syncBannerAuto = true;
   if (online) { runSyncBanner(); } else { setOnline(true); }
 }
@@ -13696,7 +13793,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1234';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1235';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -22035,7 +22132,8 @@ function _pendingSendsFor(session) {
     if (!m || decodeURIComponent(m[1]) !== session) return;
     let text = '', msg_id = '';
     try { const body = JSON.parse(op.options?.body || '{}'); text = body.text || ''; msg_id = body.msg_id || ''; } catch(e) {}
-    if (text) out.push({ text, msg_id, ts: op.timestamp, kind: m[2], idx, attempted: !!(op.attempted_at || op.attempts || !op.not_attempted), id:op.id });
+    if (text) out.push({ text, msg_id, ts: op.timestamp, kind: m[2], idx, attempted: !!(op.attempted_at || op.attempts || !op.not_attempted), id:op.id,
+      decision: op.needs_decision || '', checking: !op.needs_decision && _outboxUncertainMessage(op) });
   });
   return out;
 }
@@ -22054,18 +22152,6 @@ function _pendingMessageProjection(history, pending) {
     return false;
   });
   return {items, pending:grouped};
-}
-async function _pendingCancel(id) {
-  if (typeof id !== 'string' || !id) return;
-  let removed = false;
-  await _mutateQueue(current => {
-    const at = current.findIndex(q => q.id === id);
-    if (at < 0 || !current[at].not_attempted || current[at].attempted_at || current[at].attempts || _outboxActive.has(id)) return;
-    current.splice(at, 1); removed = true;
-  });
-  updateConnectionStatus();
-  _peekMessagesRender();
-  showToast(removed ? 'Removed from queue' : 'Already attempted — check the worker before retrying or removing it');
 }
 // Normal delivery is visible in Messages. Only offline or delayed messages
 // need a notice above the composer; do not flash a queued pill on every Send.
@@ -22158,11 +22244,23 @@ function _peekMessagesRender() {
   const pendingHTML = pending.map(p => {
     const ts = p.ts ? new Date(p.ts).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
     const safe = _hlSearch(p.text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'), q);
-    return `<div style="padding:8px 12px;background:rgba(210,153,34,0.07);border:1px solid rgba(210,153,34,0.45);border-radius:6px;font-size:0.85rem;color:var(--text);display:flex;gap:10px;align-items:flex-start;">
-      <div style="flex:1;min-width:0;word-break:break-word;line-height:1.45;">
-        <div style="margin-bottom:4px;"><span style="display:inline-block;font-size:0.7rem;padding:1px 6px;border-radius:3px;background:rgba(210,153,34,0.16);color:#d29922;margin-right:6px;">${p.attempted ? 'Awaiting confirmation' : 'Saved on this device'}</span><span style="color:var(--dim);font-size:0.7rem;">${ts} &mdash; ${p.attempted ? 'may already be with the worker' : online ? 'waiting to sync' : 'waiting for connection'}</span></div>
+    // Every pending row can be sent again or removed (Ethan, 2026-10-03).
+    const [label, note] = p.decision === 'refused' ? ['Not sent', 'the worker did not accept it']
+      : p.decision === 'unconfirmed' ? ['Not confirmed', 'it may already be with the worker; check its terminal']
+      : p.decision === 'stale' ? ['Not sent', 'saved on this device and never sent']
+      : p.checking ? ['Awaiting confirmation', 'may already be with the worker']
+      : p.attempted ? ['Awaiting confirmation', 'may already be with the worker']
+      : ['Saved on this device', online ? 'waiting to sync' : 'waiting for connection'];
+    const retryLabel = p.checking ? 'Check again' : p.decision || p.attempted ? 'Send again' : 'Send now';
+    const id = escJs(p.id);
+    return `<div class="pending-msg" data-pending-id="${esc(p.id)}" data-decision="${esc(p.decision || '')}" style="padding:8px 12px;background:rgba(210,153,34,0.07);border:1px solid rgba(210,153,34,0.45);border-radius:6px;font-size:0.85rem;color:var(--text);">
+      <div style="min-width:0;word-break:break-word;line-height:1.45;">
+        <div style="margin-bottom:4px;"><span class="pending-msg-state" style="display:inline-block;font-size:0.7rem;padding:1px 6px;border-radius:3px;background:rgba(210,153,34,0.16);color:#d29922;margin-right:6px;">${label}</span><span style="color:var(--dim);font-size:0.7rem;">${ts} &middot; ${note}</span></div>
         <div style="white-space:pre-wrap">${safe}</div>${p.local_notes.some(e => !e.msg_id) ? '<details style="margin-top:4px;color:var(--dim)"><summary>Matching local history note</summary>' + p.local_notes.map(e => esc(e.text)).join('<br>') + '</details>' : ''}</div>
-      <button ${p.attempted ? 'hidden disabled' : ''} onclick="event.stopPropagation();_pendingCancel('${escJs(p.id)}')" title="Remove this unattempted local message" style="border:none;background:none;color:var(--dim);cursor:pointer;font-size:0.95rem;padding:2px 6px;min-width:24px;min-height:24px;">&#215;</button>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button type="button" class="btn pending-msg-retry" onclick="event.stopPropagation();_outboxRetryNow('${id}')">${retryLabel}</button>
+        <button type="button" class="btn pending-msg-remove" onclick="event.stopPropagation();_outboxRemoveMessage('${id}')">Remove</button>
+      </div>
     </div>`;
   }).join('');
   const cnt = document.getElementById('peek-messages-count');

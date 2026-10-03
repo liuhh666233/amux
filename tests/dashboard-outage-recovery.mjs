@@ -48,8 +48,8 @@ function fixture(names = [], shared = {}) {
   };
   const ctx = vm.createContext(sandbox);
   // Load production dependencies too: replay must execute, not fail on a stale fixture.
-  for (const name of ['_outboxManualAction', '_syncBannerShownAt', '_RECEIPT_TIMEOUT_MSG', '_geoFix', '_GEO_FIX_MAX_AGE_MS']) vm.runInContext(declaration(name), ctx);
-  for (const name of ['_syncBannerBeacon', '_sendContext', '_pendingStop', '_localStorageBytes', '_writeUserStorage', '_outboxDiagnostic', '_outboxAgeMs', '_outboxIsStalled', '_outboxAgeLabel', '_outboxNeedsAttention', '_localWriteNotice', '_localMessageRequest', '_validateMessageAcknowledgement', '_validateBoardAcknowledgement', '_readQueue', '_outboxLock', '_mutateQueue', '_outboxQueueable', '_outboxMessageId', '_outboxMessageProgress', '_outboxUncertainMessage', '_outboxConfirmMessage', '_queueOp', '_boundedMutationFetch', '_syncOneDraft', '_syncBackoffReset', '_scheduleSyncRetry', '_clearSyncTransientToast', '_outboxPermanentRefusal', '_runSyncBanner', 'runSyncBanner', ...names]) vm.runInContext(code(name), ctx);
+  for (const name of ['_outboxManualAction', '_syncBannerShownAt', '_RECEIPT_TIMEOUT_MSG', '_geoFix', '_GEO_FIX_MAX_AGE_MS', '_OUTBOX_DECIDE_AFTER_MS', '_OUTBOX_STALE_SEND_MS']) vm.runInContext(declaration(name), ctx);
+  for (const name of ['_syncBannerBeacon', '_sendContext', '_pendingStop', '_localStorageBytes', '_writeUserStorage', '_outboxDiagnostic', '_outboxAgeMs', '_outboxIsStalled', '_outboxAgeLabel', '_outboxNeedsAttention', '_localWriteNotice', '_localMessageRequest', '_validateMessageAcknowledgement', '_validateBoardAcknowledgement', '_readQueue', '_outboxLock', '_mutateQueue', '_outboxQueueable', '_outboxMessageId', '_outboxMessageProgress', '_outboxUncertainMessage', '_outboxConfirmMessage', '_queueOp', '_boundedMutationFetch', '_syncOneDraft', '_syncBackoffReset', '_scheduleSyncRetry', '_clearSyncTransientToast', '_outboxPermanentRefusal', '_runSyncBanner', 'runSyncBanner', ...names, '_outboxIsMessage', '_outboxNeedsDecision', '_outboxMarkDecision', '_outboxSettleDecisions']) vm.runInContext(code(name), ctx);
   return {ctx, stored, timers, timerDelays, element};
 }
 const patch = {method:'PATCH', body:'{"title":"saved","expect_rev":1}'};
@@ -489,15 +489,61 @@ test('an unaccepted or wrong-identity receipt never clears the local message',as
   }
 });
 
-test('an attempted local send cannot be cancelled as though it never reached the server',async()=>{
-  const {ctx,stored}=fixture(['_pendingCancel']);ctx._peekMessagesRender=()=>{};
-  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"retain"}'});
+test('an attempted send is removed only after the reader confirms; an unattempted one at once',async()=>{
+  const {ctx,stored}=fixture(['_outboxRemoveMessage']);ctx._peekMessagesRender=()=>{};
+  const asked=[];let answer=false;ctx.showConfirm=async msg=>{asked.push(msg);return answer;};
+  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"retain","msg_id":"m1"}'});
   await ctx._mutateQueue(rows=>{rows[0].attempted_at=Date.now()});
-  await ctx._pendingCancel(ctx.offlineQueue[0].id);assert.equal(JSON.parse(stored.get('amux_offline_queue')).length,1);
-  await ctx._mutateQueue(rows=>{delete rows[0].attempted_at});
-  await ctx._pendingCancel(ctx.offlineQueue[0].id);assert.equal(ctx.offlineQueue.length,0);
+  await ctx._outboxRemoveMessage(ctx.offlineQueue[0].id);
+  assert.equal(JSON.parse(stored.get('amux_offline_queue')).length,1,'declining the confirmation keeps it');
+  assert.match(asked[0],/may already be with worker/);
+  answer=true;await ctx._outboxRemoveMessage(ctx.offlineQueue[0].id);assert.equal(ctx.offlineQueue.length,0);
+  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"fresh","msg_id":"m2"}'});
+  asked.length=0;await ctx._outboxRemoveMessage(ctx.offlineQueue[0].id);
+  assert.equal(ctx.offlineQueue.length,0);assert.equal(asked.length,0,'an unattempted message needs no confirmation');
 });
 
+test('a refused message waits for a decision and no longer holds later messages to the same worker',async()=>{
+  const {ctx}=fixture();
+  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"refused","msg_id":"r1"}'});
+  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"later","msg_id":"r2"}'});
+  const posts=[];
+  ctx._origFetch=async (_url,init)=>{const id=JSON.parse(init.body).msg_id;posts.push(id);
+    return id==='r1'?new Response('{"error":"nothing was pasted"}',{status:409}):new Response('{"ok":true,"submitted":true}');};
+  await ctx.runSyncBanner(true);await ctx.runSyncBanner(true);
+  const head=ctx.offlineQueue.find(q=>JSON.parse(q.options.body).msg_id==='r1');
+  assert.equal(head.needs_decision,'refused');
+  assert.ok(posts.includes('r2'),'the later message was delivered: '+posts.join(','));
+  assert.equal(posts.filter(id=>id==='r1').length,1,'a refused message is not retried on its own');
+  assert.equal(ctx.offlineQueue.length,1);
+});
+
+test('a message refused in an earlier session (Ethan, 2026-10-03) stops blocking the ones queued after it',async()=>{
+  const {ctx}=fixture();
+  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"old refused","msg_id":"o1"}'});
+  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"note","msg_id":"o2"}'});
+  // The shape a phone kept for two days: a refused head, blocked, from a build before these rules.
+  await ctx._mutateQueue(rows=>{Object.assign(rows[0],{attempted_at:Date.now()-3600000,attempts:1,state:'blocked',
+    error:'409: nothing was pasted'});});
+  const posts=[];ctx._origFetch=async (_url,init)=>{posts.push(JSON.parse(init.body).msg_id);return new Response('{"ok":true,"submitted":true}');};
+  await ctx.runSyncBanner(true);
+  assert.deepEqual(posts,['o2'],'only the later note is sent; the refused head waits for the reader');
+  assert.equal(ctx.offlineQueue.length,1);assert.equal(ctx.offlineQueue[0].needs_decision,'refused');
+});
+
+test('an unconfirmed message stops being checked after the bound and Retry resends the same msg_id once',async()=>{
+  const {ctx}=fixture(['_outboxRetryNow']);ctx._peekMessagesRender=()=>{};
+  await ctx._queueOp('/api/sessions/worker/send',{method:'POST',body:'{"text":"unsure","msg_id":"u1"}'});
+  await ctx._mutateQueue(rows=>{Object.assign(rows[0],{attempted_at:Date.now(),delivery_uncertain:true,
+    checking_since:Date.now()-vm.runInContext('_OUTBOX_DECIDE_AFTER_MS',ctx)-1000});});
+  const reqs=[];ctx._origFetch=async (url,init)=>{reqs.push((init?.method||'GET')+' '+url);return new Response('{"ok":true,"submitted":true}');};
+  await ctx.runSyncBanner(true);
+  assert.equal(ctx.offlineQueue[0].needs_decision,'unconfirmed');assert.equal(reqs.length,0,'no further confirmation reads');
+  await ctx._outboxRetryNow(ctx.offlineQueue[0].id);await ctx._syncFlight;
+  const sends=reqs.filter(r=>r.startsWith('POST'));
+  assert.equal(sends.length,1,reqs.join(' | '));
+  assert.equal(ctx.offlineQueue.length,0);
+});
 
 test('new input during a replay starts next tick instead of waiting for outage backoff', async () => {
   const {ctx,timers,timerDelays}=fixture();
