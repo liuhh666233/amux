@@ -41,10 +41,15 @@ test('inside the app, Settings > Device turns location history on and opens it',
   await expect(page.locator('#map-tab-history')).toBeVisible();
 });
 
-test('in a plain browser there is no bridge, so the row stays hidden', async ({ page }) => {
+test('in a plain browser the row says where recording lives and still opens the history', async ({ page }) => {
   await boot(page, false);
   await openDevice(page);
-  await expect(page.locator('#settings-loc-native')).toBeHidden();
+  const row = page.locator('#settings-loc-native');
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('Recorded by the amux iPhone app');
+  await expect(row.locator('#settings-loc-toggle')).toHaveCount(0);
+  await row.getByRole('button', { name: 'Open location history' }).click();
+  await expect(page.locator('#map-history-pane')).toBeVisible();
 });
 
 test('an old app build with no bridge is told to update, not to find a missing switch', async ({ page }) => {

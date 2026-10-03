@@ -13672,7 +13672,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1228';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1229';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -31500,8 +31500,20 @@ let _locNativeLast = null;
 function _settingsLocRender() {
   const box = document.getElementById('settings-loc-native');
   if (!box) return;
-  if (!_locNativeAvailable()) { box.hidden = true; return; }
   box.hidden = false;
+  // Outside the iPhone app there is no recorder to switch, but the row stays:
+  // Ethan looked for it in the Mac dashboard's Device tab and found nothing
+  // (2026-10-03, "where is it"). Say where recording lives and link the history.
+  if (!_locNativeAvailable()) {
+    const inApp = /AmuxApp/.test(navigator.userAgent || '');
+    box.innerHTML = '<div class="settings-section-label">Location history</div>'
+      + '<div style="font-size:0.78rem;color:var(--dim);margin-bottom:6px;">'
+      + (inApp ? 'This version of the amux app cannot record. Update it in TestFlight (1.1.4 or later), then turn it on here.'
+               : 'Recorded by the amux iPhone app. On the phone: Settings &gt; Device &gt; Location history &gt; Turn on.')
+      + '</div>'
+      + '<button type="button" class="btn" style="width:100%;" onclick="event.stopPropagation();_settingsLocOpenHistory()">Open location history</button>';
+    return;
+  }
   const st = _locNativeLast;
   const on = !!(st && st.enabled);
   box.innerHTML = '<div class="settings-section-label">Location history</div>'
