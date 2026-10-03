@@ -52,7 +52,11 @@ test('removing an attempted message asks first; an unattempted one goes at once'
   await boot(page);
   // Freeze replay: a sync that never settles makes runSyncBanner return early,
   // so nothing is sent while the rows are being removed.
-  await page.evaluate(() => { (window as any).eval('online = false; _syncFlight = new Promise(() => {})'); });
+  // Freeze replay completely: this test is about the Remove buttons, not
+  // delivery. Setting `online = false` alone was not enough, since any
+  // successful background read flips it back and the queue flushed the fresh
+  // message before its Remove click (desktop CI runs 37134448148, 37140004258).
+  await page.evaluate(() => { (window as any).eval('online = false; _syncFlight = new Promise(() => {}); runSyncBanner = async () => {}; setOnline = () => {}'); });
   await seed(page);
   // The unattempted one first: removing the blocked head releases the queue,
   // and the released fresh message can be attempted before a later click
