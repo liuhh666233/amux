@@ -6764,7 +6764,7 @@ USAGE
 # check that times out (AMUX_LAND_PRECHECK_TIMEOUT_S, default 180) or cannot
 # run is logged as unmeasured and the ticket queues: the gate still runs.
 _land_precheck() {
-  local remote="$1" branch="$2" tip="$3" me="$4" log="$5" chk top out rc t0 full budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}"
+  local remote="$1" branch="$2" tip="$3" me="$4" log="$5" chk top out rc t0 full budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-900}"
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
   git fetch -q "$remote" "$branch" 2>/dev/null || true
   local _pc_chk _pc_tmp
@@ -6864,7 +6864,7 @@ _land_precheck_verdict() {
 # BATCH mode (AMUX_LAND_PRECHECK_MODE=batch: judge only, write nothing) and
 # print its output. rc 0 pass, 1 refused, 2 no check or unmeasured.
 _land_precheck_exec() {
-  local top chk out rc=0 budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-420}"
+  local top chk out rc=0 budget="${AMUX_LAND_PRECHECK_TIMEOUT_S:-900}"
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 2
   local _pc_chk _pc_tmp
   _land_precheck_resolve "$1"
@@ -6970,6 +6970,20 @@ _land_regenerate() {
   # output (gen_plane_artifacts reads zero-base's resources.yaml).
   cmd="$(git config --get-all amux.landRegenerate 2>/dev/null || true)"
   [ -n "$cmd" ] || { printf '%s\n' "$tip"; return 0; }
+  # Nothing to render when no declared input changed between origin and the
+  # stack: the generated files are a function of the inputs, so they cannot
+  # move. Measured 2026-10-03: the step cost 275 s of compute's 31-minute
+  # pre-gate window (mixpeek-override).
+  local _inputs_chk _changed
+  _inputs_chk="$(git config --get-all amux.landRegenerateInput 2>/dev/null || true)"
+  if [ -n "$_inputs_chk" ] && [ -n "${remote:-}" ] && [ -n "${branch:-}" ]; then
+    # shellcheck disable=SC2086  # one pathspec per line on purpose
+    _changed="$(git diff --name-only "$remote/$branch" "$tip" -- $_inputs_chk 2>/dev/null | head -1)"
+    if [ -z "$_changed" ]; then
+      _land_log "regenerate skipped: no declared input changed between $remote/$branch and $(git rev-parse --short "$tip")"
+      printf '%s\n' "$tip"; return 0
+    fi
+  fi
   globs="$(git config --get-all amux.landRegenerable 2>/dev/null || true)"
   inputs="$(git config --get-all amux.landRegenerateInput 2>/dev/null || true)"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/amux-land-regen.XXXXXX")"
@@ -7559,7 +7573,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.41"
+LAND_BEHAVIOR_VERSION="2026-10-02.42"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7678,6 +7692,17 @@ cmd_land() {
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "amux land: not inside a git checkout (diagnostics in ~/.amux/logs/land.log)"
   fi
   local url key lock log me common
+  # A land started from inside a git hook inherits GIT_DIR / GIT_WORK_TREE /
+  # GIT_INDEX_FILE, and so does everything it runs (the precheck, the hook,
+  # the generators, their tests). `git init` or a clone under GIT_DIR +
+  # GIT_WORK_TREE re-initialises the REAL repository and writes core.worktree
+  # into the shared config: reproduced 2026-10-03, and the value found at
+  # 14:26Z was the batch holder's own worktree (gs12-restore). Land resolves
+  # the repository from its cwd, so it clears them.
+  local _gv _gvs=""
+  for _gv in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; do
+    if [ -n "${!_gv:-}" ]; then _gvs="$_gvs $_gv=${!_gv}"; unset "$_gv"; fi
+  done
   url="$(git remote get-url "$remote" 2>/dev/null)" || die "amux land: no remote '$remote'"
   key="$(printf '%s %s' "$url" "$branch" | shasum | cut -c1-16)"
   lock="$HOME/.amux/locks/land-$key"
@@ -7802,6 +7827,7 @@ p.communicate(msg.encode())
       [ "$hit" = 1 ] || printf '%s\n' "$p"
     done | head -10 | tr '\n' ' '
   }
+  [ -n "$_gvs" ] && _land_log "cleared inherited git environment before landing:$_gvs (a git init or clone under it rewrites the shared config)"
   # SHARED-CONFIG GUARD (mixpeek-override, 2026-10-03 ~13:4xZ): a lane's
   # scratch script wrote core.worktree into the shared .git/config, pointing
   # at another lane's scratchpad, and every lane's git in the main checkout and
@@ -8491,7 +8517,7 @@ $f"
       # with AMUX_LAND_PRECHECK_RETRY_TIMEOUT_S (default twice the budget) and
       # AMUX_LAND_PRECHECK_ATTEMPT=2 before pushing anything.
       if [ "$_pc_rc" = 2 ] && grep -q . "${TMPDIR:-/tmp}/amux-precheck-rc.$$" 2>/dev/null && [ "$(cat "${TMPDIR:-/tmp}/amux-precheck-rc.$$")" != 0 ]; then
-        local _pc_rb="${AMUX_LAND_PRECHECK_RETRY_TIMEOUT_S:-$(( ${AMUX_LAND_PRECHECK_TIMEOUT_S:-420} * 2 ))}"
+        local _pc_rb="${AMUX_LAND_PRECHECK_RETRY_TIMEOUT_S:-$(( ${AMUX_LAND_PRECHECK_TIMEOUT_S:-900} * 2 ))}"
         _land_log "composed batch precheck unmeasured after $(( $(date +%s) - _pc_t0 ))s; re-running once with a ${_pc_rb}s budget before any gate run"
         _pc_rc=0; _pc_t0=$(date +%s)
         _pc_out="$(AMUX_LAND_PRECHECK_ATTEMPT=2 AMUX_LAND_PRECHECK_TIMEOUT_S="$_pc_rb" _land_precheck_exec "$remote/$branch" "$stack_tip")" || _pc_rc=$?
