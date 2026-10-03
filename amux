@@ -7246,6 +7246,12 @@ _land_status() {
     [ "${t:0:3}" = "000" ] && tag="priority "
     since_t=$((10#${t%%-*}))
     [ "$tag" = "priority " ] && since_t=$(( $(date +%s) / 1000000000 * 1000000000 + 10#${t:3:9} ))
+    # A ticket moved by --to-head carries no arrival time in its name ("waiting
+    # 13183349 min", 2026-10-03); its file's mtime is the best record left.
+    if [ "${t%%-*}" = 000000000000 ]; then
+      tag="at head (--to-head) "
+      since_t="$(stat -f %m "$q/$t" 2>/dev/null || stat -c %Y "$q/$t" 2>/dev/null || date +%s)"
+    fi
     # Batch flag and land code beside each ticket (gs12-compute, 2026-10-02:
     # --status could not answer "is my ticket batchable now?").
     local bflag="" bver
@@ -7553,7 +7559,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.37"
+LAND_BEHAVIOR_VERSION="2026-10-02.38"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
