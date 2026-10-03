@@ -2056,12 +2056,30 @@ function _sendContext() {
 /// Grant this device's geolocation, once, from a control the reader pressed.
 /// Returns the reason it did not happen, or '' on success, so the caller can
 /// say what went wrong rather than silently appearing to work.
+// The geolocation `timeout` option only starts AFTER permission is granted, so
+// an unanswered permission request waits forever. In an amux iPhone app build
+// without a location usage description iOS never shows the prompt at all, and
+// Settings sat at "Asking this device for permission…" (Ethan, 2026-10-03,
+// build 6261). This bound covers the whole request, prompt included.
+const _GEO_PERMISSION_WAIT_MS = 20_000;
+function _geoPermissionStuckHint() {
+  return /AmuxApp/.test(navigator.userAgent || '')
+    ? 'this iPhone did not answer. Update the amux app in TestFlight (1.1.4 or later), then check iOS Settings > amux > Location.'
+    : 'this browser did not answer the permission request. Check its site settings for location, then try again.';
+}
 async function _sendContextEnableGeo() {
   if (!navigator.geolocation) return 'this browser has no geolocation';
   try {
-    const pos = await new Promise((resolve, reject) =>
-      navigator.geolocation.getCurrentPosition(resolve, reject,
-        {enableHighAccuracy: false, timeout: _GEO_TIMEOUT_MS, maximumAge: _GEO_FIX_MAX_AGE_MS}));
+    const pos = await new Promise((resolve, reject) => {
+      const stuck = setTimeout(() => {
+        try { amuxTrack('geo_permission_unanswered', {measured: true, n_considered: 1, wait_ms: _GEO_PERMISSION_WAIT_MS}); } catch (e) {}
+        reject(new Error(_geoPermissionStuckHint()));
+      }, _GEO_PERMISSION_WAIT_MS);
+      navigator.geolocation.getCurrentPosition(
+        p => { clearTimeout(stuck); resolve(p); },
+        e => { clearTimeout(stuck); reject(e); },
+        {enableHighAccuracy: false, timeout: _GEO_TIMEOUT_MS, maximumAge: _GEO_FIX_MAX_AGE_MS});
+    });
     _geoFix = {lat: +pos.coords.latitude.toFixed(5), lon: +pos.coords.longitude.toFixed(5),
                accuracy_m: Math.round(pos.coords.accuracy || 0), at: Date.now()};
     try { localStorage.setItem('amux_geo_optin', '1'); } catch (e) {}
@@ -13672,7 +13690,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1229';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1230';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
