@@ -7358,12 +7358,35 @@ _land_refusal_spares() {
   # Failure lines plus the indented block under each (where a leg names its
   # files: "       1 schema(s)  server/scripts/ops/golden_known_item.py"), URLs
   # stripped so a remote like github.com/mixpeek/mixpeek.git is not a path.
+  # Also a pre-commit block: "<hook name>....Failed" then its "- hook id" lines
+  # and output (a traceback naming the check by its path inside the hook's
+  # temp tree) up to the next "....Passed/Failed/Skipped" line (02:07Z
+  # 2026-10-03: check-gcloudignore-allowlist crashed on a missing module and
+  # 12 tickets went solo; the old reader found no file in it).
   paths="$( { awk '
+      /\.\.\.+Failed[[:space:]]*$/ { inpc = 1; print; next }
+      inpc && /\.\.\.+(Passed|Skipped)[[:space:]]*$/ { inpc = 0; next }
+      inpc { print; next }
       /✗|FAIL|BLOCKED|REFUSED|refus|^error:|^fatal:/ && !/not refused|not a refusal/ { print; inb = 1; next }
       inb && /^[[:space:]]*$/ { next }
       inb && /^[[:space:]]+[^[:space:]]/ { print; next }
       { inb = 0 }' "$log" | sed -E 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+##g; s#[A-Za-z0-9.-]+\.(com|org|io|net|dev)/[^[:space:]]+##g' | grep -oE "$_pre" || true; } \
-     | grep -E '\.' | grep -vE '^(Users|private|var|tmp)/' | sort -u)"
+     | grep -E '\.' | sort -u)"
+  # An absolute path inside a temp tree names a repo file by its tail: keep the
+  # shortest suffix that exists at <base>, drop it if none does.
+  local q out="" i parts
+  while read -r q; do
+    [ -n "$q" ] || continue
+    case "$q" in Users/*|private/*|var/*|tmp/*)
+      IFS=/ read -r -a parts <<< "$q"
+      for ((i = ${#parts[@]} - 1; i >= 0; i--)); do
+        local suf; suf="$(IFS=/; echo "${parts[*]:i}")"
+        if git cat-file -e "$base:$suf" 2>/dev/null; then out="$out$suf"$'\n'; break; fi
+      done ;;
+    *) out="$out$q"$'\n' ;;
+    esac
+  done <<< "$paths"
+  paths="$(printf '%s' "$out" | awk 'NF' | sort -u)"
   [ -n "$paths" ] || return 1
   mine="$(git diff --name-only "$(git merge-base "$base" "$sha" 2>/dev/null || echo "$base")" "$sha" 2>/dev/null)" || return 1
   [ -n "$mine" ] || return 1
@@ -7507,7 +7530,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.33"
+LAND_BEHAVIOR_VERSION="2026-10-02.34"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
