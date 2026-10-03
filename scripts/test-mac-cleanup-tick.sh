@@ -27,6 +27,7 @@ export AMUX_CLEANUP_STATE_DIR="$FIX/assess-state" AMUX_CLEANUP_ESCALATE_CMD="tru
 # Library mode must define the decisions without running a single probe.
 export AMUX_CLEANUP_SCOPE_FILE=/dev/null   # the live global scope must not configure a test (DESKT-72)
 export AMUX_CLEANUP_VM_IMAGE_PRUNE_CMD=true     # never prune the live VMs' images from a test
+export AMUX_CLEANUP_USER_TMP=0                 # never reap the live per-user temp dir from a test
 export AMUX_CLEANUP_SESSIONS_CMD=false        # the VM-reference report must not read the live fleet (AMUX-5491)
 AMUX_CLEANUP_LIB_ONLY=1 . "$TICK"
 check "library mode defines should_purge" "yes" "$(type should_purge >/dev/null 2>&1 && echo yes || echo no)"

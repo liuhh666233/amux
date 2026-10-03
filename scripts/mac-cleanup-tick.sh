@@ -171,6 +171,12 @@ VM_TRIM_CMD=${AMUX_CLEANUP_VM_TRIM_CMD:-colima ssh -p PROFILE -- sudo fstrim -a}
 # host fell from 96 to 51 GB free in ~25 min. An image a container uses, or
 # one built within the age, is kept; the rest is rebuildable cache.
 VM_IMAGE_PRUNE_AGE=${AMUX_CLEANUP_VM_IMAGE_PRUNE_AGE:-6h}
+# The per-user temp dir ($TMPDIR, /var/folders/.../T): mktemp -d extracts that
+# a killed process never removed. 2026-10-03: 5,561 tmp.* dirs, 1,674 of them
+# over a day old holding 49 GB (full Mixpeek repo extracts left by hook runs a
+# land precheck had to kill), while the host fell toward 100 GB free.
+USER_TMP_ROOT=${AMUX_CLEANUP_USER_TMP_ROOT:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")}
+USER_TMP_IDLE_MIN=${AMUX_CLEANUP_USER_TMP_IDLE_MIN:-1440}
 VM_IMAGE_PRUNE_CMD=${AMUX_CLEANUP_VM_IMAGE_PRUNE_CMD:-docker --context colima-PROFILE image prune -a -f --filter until=AGE}
 VM_STEP_S=${AMUX_CLEANUP_VM_STEP_S:-120}
 # Idle colima VMs under pressure (DESKT-70). On 2026-10-01 eight goal-spec lanes
@@ -1168,6 +1174,25 @@ keep_docker_context() { # <profile>
   fi
 }
 
+# Remove tmp.* directories in the per-user temp dir untouched for
+# USER_TMP_IDLE_MIN minutes that no running process uses as its cwd.
+reap_user_tmp() { # <dry:0|1>
+  local dry=$1 root="${USER_TMP_ROOT%/}" d b n=0 kb=0 k inuse
+  [ -d "$root" ] || { echo "mac-cleanup: user tmp: no $root"; return 0; }
+  inuse=$(lsof -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | sed 's|^/private||' | grep -oE '/tmp\.[A-Za-z0-9]+' | sort -u)
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    b=${d##*/}
+    printf '%s\n' "$inuse" | grep -qx "/$b" && continue
+    k=$(du -sk "$d" 2>/dev/null | cut -f1)
+    if [ "$dry" = 1 ]; then n=$((n+1)); kb=$((kb+${k:-0})); continue; fi
+    rm -rf -- "${root:?}/${b:?}" 2>/dev/null && { n=$((n+1)); kb=$((kb+${k:-0})); }
+  done <<EOF
+$(find "$root" -maxdepth 1 -name 'tmp.*' -type d -mmin +"$USER_TMP_IDLE_MIN" 2>/dev/null)
+EOF
+  echo "mac-cleanup: user tmp: $([ "$dry" = 1 ] && echo 'would remove' || echo removed) $n tmp.* dir(s) idle over ${USER_TMP_IDLE_MIN} min, $(awk -v k="$kb" 'BEGIN{printf "%.1fG", k/1048576}') ($root)"
+}
+
 # Prune unused images older than VM_IMAGE_PRUNE_AGE in every running VM.
 prune_vm_images() { # <dry:0|1>
   local dry=$1 p cmd out rc n=0 total=""
@@ -1389,6 +1414,7 @@ reap_idle_cargo_targets "$TARGET_ROOTS" "$tgt_idle" "$DRY"
 VMS_PRUNED=0
 if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then prune_vm_build_caches "$DRY"; fi
 [ "${AMUX_CLEANUP_VM_IMAGE_PRUNE:-1}" = 1 ] && prune_vm_images "$DRY"
+[ "${AMUX_CLEANUP_USER_TMP:-1}" = 1 ] && reap_user_tmp "$DRY"
 VMS_STOPPED=0
 vm_level=$($PRESSURE_CMD 2>/dev/null); case "$vm_level" in ''|*[!0-9]*) vm_level=-1 ;; esac
 if [ "$vm_level" -ge 2 ]; then stop_idle_vms "$DRY" "memory pressure $vm_level"
