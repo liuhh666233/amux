@@ -7573,7 +7573,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.42"
+LAND_BEHAVIOR_VERSION="2026-10-02.43"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7891,6 +7891,26 @@ p.communicate(msg.encode())
     fi
     rm -f -- "$_rs"
   fi
+  # _land_heal_core_worktree <phase>: something inside a land hold writes
+  # core.worktree=<the holder's own worktree> into the SHARED .git/config
+  # (gc41 at 14:26Z, codegen-land/wt at 15:36Z, 2026-10-03), and while it is
+  # there every lane's git reads that worktree as its tree. A linked worktree
+  # never needs it, so the holder removes its own value after each phase and
+  # logs which phase it found it after: that both ends the fleet-wide window
+  # and narrows the writer down.
+  _land_heal_core_worktree() {
+    local phase="$1" cfg val top
+    cfg="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/config"
+    val="$(git config --file "$cfg" --get core.worktree 2>/dev/null || true)"
+    [ -n "$val" ] || return 0
+    top="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    if [ "$(cd "$val" 2>/dev/null && pwd -P)" = "$(cd "$top" 2>/dev/null && pwd -P)" ]; then
+      git config --file "$cfg" --unset-all core.worktree 2>/dev/null || true
+      _land_log "WARN removed core.worktree=$val from the shared $cfg after $phase (this hold's own worktree; it makes every lane's git read this tree)"
+    else
+      _land_log "WARN the shared $cfg holds core.worktree=$val (not this hold's worktree) after $phase; left for its owner"
+    fi
+  }
   # _land_mark_resume: a conflict stop keeps this lane's arrival time for its
   # rebased re-enqueue (see RESUME above).
   _land_mark_resume() {
@@ -8496,6 +8516,7 @@ $f"
       # Push unrendered and let the gate judge the render; a stale-render
       # refusal costs one lane, a stopped queue costs all of them.
       if _rg="$(_land_regenerate "$stack_tip")"; then
+        _land_heal_core_worktree "regenerate"
         stack_tip="$_rg"
       else
         _land_log "WARN regenerate failed on the composed stack; pushing it unrendered, the gate judges the render (see the regenerate log above)"
@@ -8511,6 +8532,7 @@ $f"
       local _pc_out _pc_rc=0 _pc_t0 _pc_named _pc_tk _pc_rest _pc_excl=""
       _pc_t0=$(date +%s)
       _pc_out="$(_land_precheck_exec "$remote/$branch" "$stack_tip")" || _pc_rc=$?
+      _land_heal_core_worktree "the composed precheck"
       # A check killed at its budget is UNMEASURED, and pushing an unmeasured
       # batch spends a whole gate run: both batches refused at the gate on
       # 2026-10-02 had timed out here first (mixpeek-override). Re-run it once
@@ -8521,6 +8543,7 @@ $f"
         _land_log "composed batch precheck unmeasured after $(( $(date +%s) - _pc_t0 ))s; re-running once with a ${_pc_rb}s budget before any gate run"
         _pc_rc=0; _pc_t0=$(date +%s)
         _pc_out="$(AMUX_LAND_PRECHECK_ATTEMPT=2 AMUX_LAND_PRECHECK_TIMEOUT_S="$_pc_rb" _land_precheck_exec "$remote/$branch" "$stack_tip")" || _pc_rc=$?
+        _land_heal_core_worktree "the composed precheck retry"
       fi
       # Keep EVERY composed check's output and its raw exit status: a pass in
       # 425 s against a 420 s budget (a killed check judged by its verdict
@@ -8565,6 +8588,7 @@ $f"
     # afternoon. gh's own stored login answers when the variables are unset,
     # and git's credential helper already ignores them.
     rc=0; out="$(env -u GH_TOKEN -u GITHUB_TOKEN AMUX_LAND_HOLDER_PID=$$ AMUX_LAND_LOCK="$lock" git push "$remote" "$stack_tip:$branch" 2>&1)" || rc=$?
+    _land_heal_core_worktree "the push and its hook (rc $rc)"
     # Keep the whole hook output for EVERY attempt, landed or refused
     # (gs12-spend, 2026-10-01: the deciding line sits above the ERROR list, so
     # a tail lost it; gs12-gates, 2026-10-02: a batch landed a stale
