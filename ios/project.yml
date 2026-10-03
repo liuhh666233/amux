@@ -43,6 +43,8 @@ targets:
       # Location history uploads through the same owner-authenticated client
       # the share extension uses (AMUX-5458).
       - path: AmuxShare/Sources/AmuxClient.swift
+      # The app drains shares queued offline by the extension.
+      - path: AmuxShare/Sources/ShareOutbox.swift
     info:
       path: AmuxApp/Info.plist
       properties:
@@ -113,6 +115,8 @@ targets:
     sources:
       - path: AmuxAppTests
       - path: AmuxShare/Sources/AmuxClient.swift
+      - path: AmuxShare/Sources/ShareOutbox.swift
+      - path: AmuxApp/Sources/AmuxStore.swift
       - path: AmuxApp/Sources/LocationHistory.swift
 
   # UI tests that drive the SYSTEM SHARE SHEET from another app (AMUX-4990).

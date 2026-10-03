@@ -608,6 +608,84 @@ final class ShareSheetUITests: XCTestCase {
         if let feedbackAt { XCTAssertLessThan(feedbackAt, 2.0, "feedback took \(feedbackAt)s") }
     }
 
+    /// Ethan, 2026-10-03: cached workers load instantly, Send queues offline
+    /// with feedback, last shared sorts first. One CASE per run, because the
+    /// runner changes the App Group server URL between cases:
+    ///   warm      real server: open, measure open-to-first-row, cancel (fills the cache)
+    ///   offline   dead server: the cached list must still paint; default sort is
+    ///             Recently shared; Send to TARGET must end in the Queued card
+    ///   sortcheck real server again: TARGET (just shared) is the first row
+    /// Results append to SHOT_DIR/queue.txt.
+    func testCachedListOfflineQueueAndSort() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let dir = env["SHOT_DIR"], let kase = env["CASE"], let target = env["TARGET"] else {
+            throw XCTSkip("set SHOT_DIR, CASE and TARGET to run the queue checks")
+        }
+        let marker = env["MARKER"] ?? "queue-check"
+        func shot(_ name: String) {
+            try? XCUIScreen.main.screenshot().pngRepresentation
+                .write(to: URL(fileURLWithPath: dir).appendingPathComponent("q-\(kase)-\(name).png"))
+        }
+        func result(_ line: String) {
+            let url = URL(fileURLWithPath: dir).appendingPathComponent("queue.txt")
+            let prev = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            try? (prev + "\(kase): \(line)\n").write(to: url, atomically: true, encoding: .utf8)
+        }
+        try openNewestPhoto()
+        tapShare()
+        let amux = photos.cells.matching(identifier: "shareCell")
+            .matching(NSPredicate(format: "label == %@", Self.expectedRowLabel)).firstMatch
+        guard amux.waitForExistence(timeout: 20) else { shot("no-amux"); return XCTFail("amux not in the share sheet") }
+        let opened = Date()
+        amux.tap()
+        let ext = XCUIApplication(bundleIdentifier: "com.EthanSteininger.nextup.Share")
+        let rows = ext.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'worker-'"))
+        let firstRow = rows.firstMatch
+        let painted = firstRow.waitForExistence(timeout: 30)
+        let ms = Int(Date().timeIntervalSince(opened) * 1000)
+        shot("open")
+        guard painted else { result("no rows after 30s"); return XCTFail("no worker rows") }
+        switch kase {
+        case "warm":
+            result("open-to-first-row \(ms) ms")
+            ext.buttons["cancel"].tap()
+        case "offline":
+            let sortLabel = ext.buttons["sortOrder"].exists ? ext.buttons["sortOrder"].label : (ext.otherElements["sortOrder"].label)
+            let search = ext.textFields["search"]
+            search.tap(); search.clearAndType(target)
+            let row = ext.buttons["worker-\(target)"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), "\(target) not in the cached list")
+            let to = ext.staticTexts["recipients"]
+            if !(to.exists && to.label.contains(target)) { row.tap() }
+            search.tap(); search.clearAndType("")
+            let note = ext.textFields["note"]
+            note.tap(); note.typeText(marker)
+            let tap = Date()
+            ext.buttons["send"].tap()
+            var feedbackAt: TimeInterval?
+            var queued = false
+            let until = Date().addingTimeInterval(60)
+            while Date() < until && !queued {
+                if feedbackAt == nil && (ext.otherElements["sendingCard"].exists || ext.buttons["sending"].exists) {
+                    feedbackAt = Date().timeIntervalSince(tap)
+                }
+                if ext.otherElements["queuedCard"].exists
+                    || ext.staticTexts["Queued, will send when online"].exists { queued = true; shot("queued") }
+            }
+            let fb = feedbackAt.map { String(format: "%.2fs", $0) } ?? "none"
+            result("cached open-to-first-row \(ms) ms (server unreachable); sort \"\(sortLabel)\"; feedback \(fb); queued card \(queued)")
+            XCTAssertTrue(queued, "an offline send did not end in the Queued card")
+            XCTAssertTrue(sortLabel.contains("Recently shared"), "default sort was \(sortLabel)")
+        case "sortcheck":
+            let first = firstRow.identifier
+            result("first row \(first) (want worker-\(target)); open-to-first-row \(ms) ms")
+            XCTAssertEqual(first, "worker-\(target)", "the worker just shared to is not first")
+            ext.buttons["cancel"].tap()
+        default:
+            XCTFail("unknown CASE \(kase)")
+        }
+    }
+
     private func historyText(session: String, containing text: String) throws -> String? {
         let base = ProcessInfo.processInfo.environment["AMUX_URL"] ?? "https://localhost:8824"
         let url = URL(string: base + "/api/history?session=\(session)&limit=10")!

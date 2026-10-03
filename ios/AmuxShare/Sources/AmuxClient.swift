@@ -345,12 +345,15 @@ enum AmuxClient {
     /// `waiting` is called once when the first attempt runs long.
     static func send(text: String, to worker: String, server: URL,
                      deadline: TimeInterval = 180,
+                     msgID givenID: String? = nil,
                      waiting: (() -> Void)? = nil) async throws {
         let encoded = worker.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? worker
         guard let url = URL(string: "api/sessions/\(encoded)/send", relativeTo: server) else {
             throw ClientError.malformed("could not build the send URL for \(worker)")
         }
-        let msgID = "share-" + UUID().uuidString.lowercased()
+        // The outbox passes a stable id per (share, worker), so a send replayed
+        // from the queue after a lost response is deduped by the server.
+        let msgID = givenID ?? ("share-" + UUID().uuidString.lowercased())
         // record_history: the owner's message, recorded in the worker's Messages
         // tab exactly like the dashboard composer's. Without it a share reached
         // the worker but never appeared in Messages (found on the simulator,

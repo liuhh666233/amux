@@ -156,78 +156,68 @@ final class ShareViewController: UIViewController {
 
     // MARK: - Delivery
 
-    /// `progress` names the step the sheet shows while sending; `done` is
-    /// called only on failure (success closes the extension), so the sheet
-    /// can unlock and the user can retry.
-    /// Several workers: attachments upload ONCE and the same message goes to
-    /// each in the order they were picked. A failure part-way says which
-    /// workers already have it, so a retry does not double-send silently.
+    /// `progress` names the step the sheet shows while sending; `done` reports
+    /// the outcome. Sent and Queued close the sheet after a moment; Failed
+    /// keeps it open so the user can retry.
+    ///
+    /// THE SHARE IS WRITTEN TO THE OUTBOX FIRST (ShareOutbox). Several workers:
+    /// attachments upload once and the same message goes to each in the order
+    /// picked. When the network fails part-way the item keeps the workers
+    /// still missing it, and the next drain finishes them, never resending to
+    /// one that already has it.
     private func deliver(to workers: [String], note: String,
                          progress: @escaping (String) -> Void,
-                         done: @escaping (String?) -> Void) {
+                         done: @escaping (ShareOutcome) -> Void) {
         guard let server = AmuxStore.serverURL else {
             let why = AmuxClient.ClientError.noServer.localizedDescription
-            done(why)
+            done(.failed(why))
             showFailure(why)
             return
         }
         Task { @MainActor in
+            if !input.ready {
+                progress("Preparing what you shared…")
+                await extraction?.value
+            }
+            let text = [note, sharedText].filter { !$0.isEmpty }.joined(separator: "\n")
+            guard !text.isEmpty || !fileURLs.isEmpty else {
+                done(.failed("Nothing to send."))
+                showFailure("Nothing to send.")
+                return
+            }
+            let item: ShareOutboxItem
             do {
-                if !input.ready {
-                    progress("Preparing what you shared…")
-                    await extraction?.value
-                }
-                var paths: [String] = []
-                for (i, url) in fileURLs.enumerated() {
-                    let label = fileURLs.count == 1
-                        ? "Uploading \(url.lastPathComponent)"
-                        : "Uploading \(i + 1) of \(fileURLs.count): \(url.lastPathComponent)"
-                    progress(label + "…")
-                    paths.append(try await AmuxClient.upload(fileURL: url, server: server) { fraction in
-                        progress("\(label) \(Int((fraction * 100).rounded()))%")
-                    })
-                }
-                // `@<abs path>` is how amux already inlines an attachment into a
-                // prompt; the dashboard composer produces the same shape.
-                var parts: [String] = []
-                if !note.isEmpty { parts.append(note) }
-                if !sharedText.isEmpty { parts.append(sharedText) }
-                parts.append(contentsOf: paths.map { "@\($0)" })
-                let text = parts.joined(separator: "\n")
-                guard !text.isEmpty else {
-                    done("Nothing to send.")
-                    await MainActor.run { showFailure("Nothing to send.") }
-                    return
-                }
-                var delivered: [String] = []
-                for (i, worker) in workers.enumerated() {
-                    progress(workers.count == 1
-                             ? "Delivering the message…"
-                             : "Delivering to \(worker) (\(i + 1) of \(workers.count))…")
-                    do {
-                        try await AmuxClient.send(text: text, to: worker, server: server, waiting: {
-                            progress("Starting \(worker)… (it was stopped; this can take a minute)")
-                        })
-                    } catch {
-                        let why = delivered.isEmpty
-                            ? error.localizedDescription
-                            : "Sent to \(delivered.joined(separator: ", ")); \(worker) failed: \(error.localizedDescription)"
-                        throw NSError(domain: "amux.share", code: 1, userInfo: [NSLocalizedDescriptionKey: why])
-                    }
-                    delivered.append(worker)
-                    AmuxStore.recordShare(worker)
-                }
-                AmuxStore.lastWorker = workers.first
-                // Show "Sent" before closing: a quick send used to close the
-                // sheet before the spinner was ever visible.
-                done(nil)
-                try? await Task.sleep(nanoseconds: 900_000_000)
-                await MainActor.run {
-                    extensionContext?.completeRequest(returningItems: nil)
-                }
+                item = try ShareOutbox.shared.enqueue(text: text, workers: workers, files: fileURLs)
             } catch {
-                done(error.localizedDescription)
-                await MainActor.run { showFailure(error.localizedDescription) }
+                let why = "Could not save the share on this iPhone: \(error.localizedDescription)"
+                done(.failed(why))
+                showFailure(why)
+                return
+            }
+            let outcome = await ShareOutbox.shared.deliver(item,
+                upload: { url, _, fraction in
+                    try await AmuxClient.upload(fileURL: url, server: server, progress: fraction)
+                },
+                send: { text, worker, msgID in
+                    try await AmuxClient.send(text: text, to: worker, server: server, msgID: msgID, waiting: {
+                        progress("Starting \(worker)… (it was stopped; this can take a minute)")
+                    })
+                },
+                progress: progress)
+            switch outcome {
+            case .sent, .queued:
+                // A queued share counts as shared: it will arrive, and "Last
+                // shared" should put that worker first next time.
+                for worker in workers { AmuxStore.recordShare(worker) }
+                AmuxStore.lastWorker = workers.first
+                done(outcome)
+                // Long enough to read "Sent" or "Queued" before the sheet closes.
+                let pause: UInt64 = { if case .queued = outcome { return 1_800_000_000 } else { return 900_000_000 } }()
+                try? await Task.sleep(nanoseconds: pause)
+                extensionContext?.completeRequest(returningItems: nil)
+            case .failed(let why):
+                done(outcome)
+                showFailure(why)
             }
         }
     }

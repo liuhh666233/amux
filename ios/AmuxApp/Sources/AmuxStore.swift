@@ -69,6 +69,13 @@ enum AmuxStore {
         set { defaults.set(newValue, forKey: shareWorkersCacheKey) }
     }
 
+    /// The sort the share sheet last used. Default "Recently shared".
+    static let shareSortKey = "shareSort"
+    static var shareSort: String? {
+        get { defaults.string(forKey: shareSortKey) }
+        set { defaults.set(newValue, forKey: shareSortKey) }
+    }
+
     /// How many times each worker has been shared to, and when last.
     static let shareCountsKey = "shareCounts"
     static let shareLastKey = "shareLastAt"

@@ -16,9 +16,43 @@ struct ShareView: View {
     /// the list loads while photos or videos are still being copied (Ethan,
     /// 2026-10-01: "make the workers load faster").
     @ObservedObject var input: ShareInput
-    /// workers, note, progress(step text), done(nil = sent, else the error)
-    let onSend: ([String], String, @escaping (String) -> Void, @escaping (String?) -> Void) -> Void
+    /// workers, note, progress(step text), done(sent / queued / failed)
+    let onSend: ([String], String, @escaping (String) -> Void, @escaping (ShareOutcome) -> Void) -> Void
     let onCancel: () -> Void
+
+    /// THE CACHED LIST IS IN THE FIRST FRAME (Ethan, 2026-10-03: "loading
+    /// workers should be instant"). It used to be read in `.task`, after the
+    /// first render, so every open showed a spinner frame before the rows.
+    init(input: ShareInput,
+         onSend: @escaping ([String], String, @escaping (String) -> Void, @escaping (ShareOutcome) -> Void) -> Void,
+         onCancel: @escaping () -> Void) {
+        self.input = input
+        self.onSend = onSend
+        self.onCancel = onCancel
+        let cached = AmuxStore.shareWorkersCache
+            .flatMap { try? JSONDecoder().decode([AmuxClient.Worker].self, from: $0) } ?? []
+        _workers = State(initialValue: cached)
+        _loading = State(initialValue: cached.isEmpty)
+        _refreshing = State(initialValue: !cached.isEmpty)
+        _frozenRank = State(initialValue: Self.activityRank(cached))
+        if let last = AmuxStore.lastWorker, cached.contains(where: { $0.name == last }) {
+            _selected = State(initialValue: [last])
+        }
+        _sort = State(initialValue: AmuxStore.shareSort.flatMap(SortOrder.init(rawValue:)) ?? .recentlyShared)
+    }
+
+    /// Each worker's place by activity when the list first painted. Used to
+    /// break ties for the whole life of the sheet, so a refresh that changes
+    /// activity cannot move a row out from under a finger about to tap it.
+    @State private var frozenRank: [String: Int] = [:]
+    static func activityRank(_ list: [AmuxClient.Worker]) -> [String: Int] {
+        let ordered = list.sorted {
+            if $0.running != $1.running { return $0.running }
+            if $0.lastActivity != $1.lastActivity { return $0.lastActivity > $1.lastActivity }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        return Dictionary(ordered.enumerated().map { ($1.name, $0) }, uniquingKeysWith: { a, _ in a })
+    }
 
     @State private var workers: [AmuxClient.Worker] = []
     /// In tap order, so a multi-send goes out in the order you chose.
@@ -39,6 +73,8 @@ struct ShareView: View {
     /// Sent: the card shows a check for a moment before the sheet closes, so a
     /// fast send is still visibly a send (Ethan, 2026-10-01).
     @State private var sent = false
+    /// The network failed: the share is in the outbox and will go when online.
+    @State private var queuedNote: String?
     @State private var sendStep = ""
     @FocusState private var focused: Field?
     enum Field { case search, note }
@@ -83,7 +119,11 @@ struct ShareView: View {
                 || $0.task.localizedCaseInsensitiveContains(filter)
                 || $0.workspace.localizedCaseInsensitiveContains(filter)
         }
+        let rank = frozenRank
         let byActivity: (AmuxClient.Worker, AmuxClient.Worker) -> Bool = {
+            // The order at first paint wins while the sheet is open (see
+            // frozenRank); only a worker new since then falls through.
+            if let a = rank[$0.name], let b = rank[$1.name], a != b { return a < b }
             // Running first, then most recent: a live but quiet lane must not
             // sort below a stopped one touched more recently.
             if $0.running != $1.running { return $0.running }
@@ -176,6 +216,7 @@ struct ShareView: View {
                 }
             }
             .overlay { if sending { sendingCard } }
+            .onChange(of: sort) { AmuxStore.shareSort = $0.rawValue }
             .onChange(of: selected) { _ in if !selected.isEmpty { pickHint = false } }
         }
         .navigationViewStyle(.stack)
@@ -371,13 +412,23 @@ struct ShareView: View {
                     .foregroundStyle(.green)
                 Text(selected.count == 1 ? "Sent to \(selected[0])" : "Sent to \(selected.count) workers")
                     .font(.headline)
+            } else if let queuedNote {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.orange)
+                Text("Queued, will send when online")
+                    .font(.headline)
+                Text(queuedNote)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             } else {
                 ProgressView()
                     .controlSize(.large)
                 Text(selected.count == 1 ? "Sending to \(selected[0])…" : "Sending to \(selected.count) workers…")
                     .font(.headline)
             }
-            if !sent && !sendStep.isEmpty {
+            if !sent && queuedNote == nil && !sendStep.isEmpty {
                 Text(sendStep)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -387,7 +438,7 @@ struct ShareView: View {
         .padding(24)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .combine)
-        .accessibilityIdentifier(sent ? "sentCard" : "sendingCard")
+        .accessibilityIdentifier(sent ? "sentCard" : (queuedNote != nil ? "queuedCard" : "sendingCard"))
     }
 
     private func send() {
@@ -405,16 +456,22 @@ struct ShareView: View {
         focused = nil
         sending = true
         sent = false
+        queuedNote = nil
         sendStep = ""
         onSend(selected, note, { step in
             DispatchQueue.main.async { sendStep = step }
-        }, { error in
+        }, { outcome in
             DispatchQueue.main.async {
-                if error == nil {
-                    // Success: the controller closes the sheet a moment later.
+                switch outcome {
+                case .sent:
+                    // The controller closes the sheet a moment later.
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                     sent = true
-                } else {
+                case .queued(let why):
+                    // Kept in the outbox: it goes when the network is back.
+                    UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                    queuedNote = "No connection to amux (\(why)). It is saved on this iPhone."
+                case .failed:
                     UINotificationFeedbackGenerator().notificationOccurred(.error)
                     sending = false
                     sendStep = ""
@@ -463,19 +520,14 @@ struct ShareView: View {
             loading = false
             return
         }
-        // CACHED FIRST (Ethan, 2026-09-29: "cache workers so it doesn't take a
-        // while"): paint the last list at once, refresh behind it.
-        if let data = AmuxStore.shareWorkersCache,
-           let cached = try? JSONDecoder().decode([AmuxClient.Worker].self, from: data),
-           !cached.isEmpty {
-            workers = cached
-            preselect(from: cached)
-            loading = false
-            refreshing = true
-        }
+        // The cached list is already on screen (see init). Deliver anything
+        // the outbox still holds from an earlier offline share, in the
+        // background: the picker never waits on it.
+        Task.detached { await ShareOutbox.drainShared() }
         do {
             let found = try await AmuxClient.workers(server: server)
             workers = found
+            if frozenRank.isEmpty { frozenRank = Self.activityRank(found) }
             AmuxStore.shareWorkersCache = try? JSONEncoder().encode(found)
             // A remembered selection that has since been deleted would look
             // selected and then fail at send time.
