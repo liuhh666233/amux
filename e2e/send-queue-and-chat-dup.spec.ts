@@ -15,7 +15,9 @@ async function boot(page: any) {
     && typeof (window as any)._chatRender === 'function');
 }
 
-test('Queue mode labels an idle worker Send and a busy one Queue', async ({ page }) => {
+// 58d7b9fe (Ethan): in Queue mode every card reads "Queue", so a re-render can
+// never flip one card's label; the tooltip still says whether it goes now.
+test('Queue mode labels every card Queue and the tooltip says idle goes now', async ({ page }) => {
   await boot(page);
   const r = await page.evaluate(() => {
     const g = globalThis as any;
@@ -28,7 +30,7 @@ test('Queue mode labels an idle worker Send and a busy one Queue', async ({ page
     out['sendMode'] = g._sendLabelFor('sq-busy');
     return out;
   });
-  expect(r.idle).toBe('Send');
+  expect(r.idle).toBe('Queue');
   expect(r.idleTitle).toMatch(/idle, so it is delivered now/);
   expect(r.busy).toBe('Queue');
   expect(r.busyTitle).toMatch(/finishes its current turn/);

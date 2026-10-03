@@ -2,6 +2,13 @@
 // day so no real location data is read or written.
 import { test, expect, Page } from './fixtures';
 
+// Recorder controls and Raw export sit in a collapsed <details> at the bottom
+// of the pane (5e35f6c3); open it before reaching for them.
+async function openLocSettings(page: import('@playwright/test').Page) {
+  const acc = page.locator('#map-loc-settings');
+  if (!(await acc.evaluate(e => (e as HTMLDetailsElement).open))) await acc.locator('summary').click();
+}
+
 // Open the Map sidebar and keep it open until its tabs are on screen. The map
 // applies settings that arrive from the server after load, which on a phone
 // can collapse the sidebar again (translateX off screen, still "visible").
@@ -100,6 +107,8 @@ test('Map > Location history says so when a day has nothing, and shows the iPhon
   await expect(page.locator('.map-loc-empty')).toContainText('Location history');
   // The native app calls back with its status; the switch and counts render.
   await page.evaluate(() => (window as any).__amuxNativeLocation({enabled: true, authorization: 'whenInUse', precise: false, motion: 'on', pending: 7}));
+  // 5e35f6c3: the recorder controls live in the collapsed Settings section.
+  await openLocSettings(page);
   const native = page.locator('#map-loc-native');
   await expect(native).toBeVisible();
   await expect(native).toContainText('While using the app only');
@@ -156,6 +165,7 @@ test('Map > Location history shows stats, a heatmap layer and raw export links',
   // Export asks for the shown window in the chosen format.
   await page.locator('#map-loc-view-day').click();
   const exported = page.waitForRequest(r => r.url().includes('/api/map/location/export'));
+  await openLocSettings(page);
   await page.locator('.map-loc-export').getByRole('button', {name: 'CSV'}).click();
   const eu = new URL((await exported).url());
   expect(eu.searchParams.get('format')).toBe('csv');
@@ -173,6 +183,8 @@ test('Map > Location history shows the iPhone recording detail and delivered vs 
   await page.evaluate(() => (window as any)._mapSidebarTab('history'));
   await page.evaluate(() => (window as any).__amuxNativeLocation({enabled: true, authorization: 'always', precise: true, motion: 'on',
     pending: 0, mode: 'full', delivered: 1200, stored: 1198}));
+  // 5e35f6c3: the recorder controls live in the collapsed Settings section.
+  await openLocSettings(page);
   const native = page.locator('#map-loc-native');
   await expect(native).toContainText('Fixes delivered / stored: 1200 / 1198');
   await expect(native).toContainText('2 not stored');
