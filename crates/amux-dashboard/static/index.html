@@ -558,8 +558,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
         </div>
         <div class="settings-tab-panel" id="stab-device" data-stab="device">
-        <!-- Location history switch, shown only inside the iPhone app (native bridge). -->
-        <div class="settings-section" id="settings-loc-native" hidden></div>
         <div class="settings-section" style="padding:10px 14px;">
           <button onclick="_wtRestart();closeSettings();" style="width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:0.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;">
             <span style="font-size:1rem;">?</span> Walkthrough
@@ -1220,7 +1218,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <button type="button" class="map-tab" id="map-tab-history" role="tab" aria-selected="false" onclick="_mapSidebarTab('history')">Location history</button>
     </div>
     <div class="map-loc-pane" id="map-history-pane" hidden>
-      <div class="map-loc-native" id="map-loc-native" hidden></div>
       <div class="map-loc-views" role="group" aria-label="Location history view">
         <button type="button" class="btn map-loc-view active" id="map-loc-view-day" aria-pressed="true" onclick="_locView('day')">Day</button>
         <button type="button" class="btn map-loc-view" id="map-loc-view-stats" aria-pressed="false" onclick="_locView('stats')">Stats</button>
@@ -1251,14 +1248,21 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
       </details>
       <div class="map-loc-summary" id="map-loc-summary"></div>
-      <div class="map-loc-export">
-        <span>Raw export</span>
-        <button type="button" class="btn" onclick="_locExport('geojson')">GeoJSON</button>
-        <button type="button" class="btn" onclick="_locExport('gpx')">GPX</button>
-        <button type="button" class="btn" onclick="_locExport('csv')">CSV</button>
-      </div>
       <div class="map-loc-list" id="map-loc-list"></div>
       </div>
+      <!-- Recorder controls and export, collapsed at the bottom (Ethan, 2026-10-03:
+           "be more conservative with real estate, accordion in the settings at the
+           bottom"). The summary keeps the recording state visible while closed. -->
+      <details class="map-loc-settings" id="map-loc-settings">
+        <summary><span class="map-loc-settings-title">Settings</span> <span class="map-loc-settings-sum" id="map-loc-settings-sum"></span></summary>
+        <div class="map-loc-native" id="map-loc-native" hidden></div>
+        <div class="map-loc-export">
+          <span>Raw export</span>
+          <button type="button" class="btn" onclick="_locExport('geojson')">GeoJSON</button>
+          <button type="button" class="btn" onclick="_locExport('gpx')">GPX</button>
+          <button type="button" class="btn" onclick="_locExport('csv')">CSV</button>
+        </div>
+      </details>
     </div>
     <div class="map-pins-pane" id="map-pins-pane">
     <div class="map-geocoder-wrap" id="map-geocoder-wrap">

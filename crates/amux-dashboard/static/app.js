@@ -31506,8 +31506,8 @@ async function _locExport(format) {
 // switch that does not exist (Ethan, 2026-10-03, on build 6261).
 function _locEmptyHint() {
   const inApp = /AmuxApp/.test(navigator.userAgent || '');
-  if (_locNativeAvailable()) return 'Nothing recorded here yet. Tap <b>Turn on</b> under <b>This iPhone</b> above (or Settings &gt; Device), then allow location <b>Always</b> and Motion.';
-  if (inApp) return 'This version of the amux app cannot record location history. Update it in <b>TestFlight</b> (1.1.4 or later), reopen it, then tap <b>Turn on</b> here.';
+  if (_locNativeAvailable()) return 'Nothing recorded here yet. Open <b>Settings</b> below and tap <b>Turn on</b> under <b>This iPhone</b>, then allow location <b>Always</b> and Motion.';
+  if (inApp) return 'This version of the amux app cannot record location history. Update it in <b>TestFlight</b> (1.1.4 or later), reopen it, then turn it on under <b>Settings</b> below.';
   return 'Nothing recorded here yet. Location history comes from the amux iPhone app: open Map &gt; Location history in the app and tap <b>Turn on</b>, then allow location <b>Always</b> and Motion.';
 }
 function _locNativeAvailable() {
@@ -31517,49 +31517,12 @@ function _locNative(op) {
   if (!_locNativeAvailable()) return;
   try { window.webkit.messageHandlers.amuxLocation.postMessage({op}); } catch (e) {}
 }
-// Settings > Device carries the same switch, because the Map tab and the app's
-// long-press sheet were too hidden (Ethan, 2026-10-03: "I dont see the location
-// history button in settings"). Shown only when the native bridge exists.
 let _locNativeLast = null;
-function _settingsLocRender() {
-  const box = document.getElementById('settings-loc-native');
-  if (!box) return;
-  box.hidden = false;
-  // Outside the iPhone app there is no recorder to switch, but the row stays:
-  // Ethan looked for it in the Mac dashboard's Device tab and found nothing
-  // (2026-10-03, "where is it"). Say where recording lives and link the history.
-  if (!_locNativeAvailable()) {
-    const inApp = /AmuxApp/.test(navigator.userAgent || '');
-    box.innerHTML = '<div class="settings-section-label">Location history</div>'
-      + '<div style="font-size:0.78rem;color:var(--dim);margin-bottom:6px;">'
-      + (inApp ? 'This version of the amux app cannot record. Update it in TestFlight (1.1.4 or later), then turn it on here.'
-               : 'Recorded by the amux iPhone app. On the phone: Settings &gt; Device &gt; Location history &gt; Turn on.')
-      + '</div>'
-      + '<button type="button" class="btn" style="width:100%;" onclick="event.stopPropagation();_settingsLocOpenHistory()">Open location history</button>';
-    return;
-  }
-  const st = _locNativeLast;
-  const on = !!(st && st.enabled);
-  box.innerHTML = '<div class="settings-section-label">Location history</div>'
-    + '<div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">'
-    + '<span style="font-size:0.8rem;">' + (st ? 'Recording on this iPhone: ' + (on ? 'on' : 'off') : 'Checking this iPhone…') + '</span>'
-    + '<button type="button" class="btn ' + (on ? '' : 'primary') + '" id="settings-loc-toggle" onclick="event.stopPropagation();_locNative(\'' + (on ? 'disable' : 'enable') + '\')"' + (st ? '' : ' disabled') + '>' + (on ? 'Turn off' : 'Turn on') + '</button></div>'
-    + '<button type="button" class="btn" style="margin-top:6px;width:100%;" onclick="event.stopPropagation();_settingsLocOpenHistory()">Open location history</button>';
-}
-function _settingsLocOpenHistory() {
-  closeSettings();
-  switchView('map');
-  // On a phone the Map side panel starts collapsed; the history tab lives in it.
-  const sb = document.getElementById('map-sidebar');
-  if (sb && sb.classList.contains('hidden') && typeof _mapToggleSidebar === 'function') _mapToggleSidebar();
-  _mapSidebarTab('history');
-}
-function _settingsLocRefresh() {
-  _settingsLocRender();
-  _locNative('status');   // any op makes the app push its current status back
-}
 window.__amuxNativeLocation = function(st) {
-  if (st) { _locNativeLast = st; _settingsLocRender(); }
+  if (st) _locNativeLast = st;
+  const sum = document.getElementById('map-loc-settings-sum');
+  if (sum && st) sum.textContent = '· This iPhone: recording ' + (st.enabled ? 'on' : 'off')
+    + ((st.pending || 0) > 0 ? ' · ' + st.pending + ' waiting' : '');
   const box = document.getElementById('map-loc-native');
   if (!box || !st) return;
   box.hidden = false;
@@ -40995,7 +40958,6 @@ async function _vaultSecretRemove(id, key) {
   _vaultSecretsLoad();
 }
 function _settingsTab(name) {
-  if (name === 'device') _settingsLocRefresh();
   if (name === 'integrations') setTimeout(() => { _vaultLoad(); _vaultSecretsLoad(); _vaultSecretScopeChanged(); _chatgptAppLoad(); }, 0);
   const menu = document.getElementById('settings-menu');
   if (!menu) return;

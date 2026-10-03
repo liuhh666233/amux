@@ -7864,3 +7864,12 @@ body.light .bd-answer-head { color: #bc4c00; }
   .map-loc-step, .map-loc-today, .map-loc-row, .map-loc-native .btn { min-height: 44px; }
   .map-loc-step { min-width: 44px; }
 }
+
+/* Location history: recorder controls + export collapsed at the bottom. */
+.map-loc-settings { border-top: 1px solid var(--border); padding: 6px 10px; flex-shrink: 0; }
+.map-loc-settings > summary { cursor: pointer; font-size: 0.78rem; color: var(--dim); padding: 4px 0; min-height: 32px; display: flex; align-items: center; gap: 6px; list-style: none; }
+.map-loc-settings > summary::-webkit-details-marker { display: none; }
+.map-loc-settings > summary::before { content: '\25B8'; font-size: 0.7rem; }
+.map-loc-settings[open] > summary::before { content: '\25BE'; }
+.map-loc-settings-title { font-weight: 600; color: var(--text); }
+.map-loc-settings .map-loc-native { margin: 4px 0 6px; }
