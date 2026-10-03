@@ -643,8 +643,14 @@ fi
   else
     DEPLOY_JOBS="${CARGO_BUILD_JOBS:-2}"
   fi
+  # NICED, so the fleet's own work wins the CPU when they contend
+  # (mixpeek-override, 2026-10-03 13:08Z: rustc at ~810% CPU and nice 0 beside
+  # a 13-member land hold at load 50-60 on 28 cores). An idle host still gives
+  # the build every core, so a quiet deploy is no slower. AMUX_DEPLOY_NICE
+  # (default 10; 0 disables).
+  DEPLOY_NICE="${AMUX_DEPLOY_NICE:-10}"
   DEPLOY_T0=$(date +%s)
-  echo "== deploy build settings incremental=1 jobs=$DEPLOY_JOBS"
+  echo "== deploy build settings incremental=1 jobs=$DEPLOY_JOBS nice=$DEPLOY_NICE load=$(/usr/sbin/sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
   BUILD_OK=0
   if [ -n "${AMUX_REMOTE_BUILD_HOST:-}" ]; then
     if "$REPO/scripts/rust-remote-build.sh" "$WORK" \
@@ -659,12 +665,12 @@ fi
       # this script's — this unit already gets one via systemd (defense in
       # depth for the case where rust-auto-build.sh is invoked directly
       # from an interactive pane instead of via the timer).
-      if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" CARGO_INCREMENTAL=1 CARGO_BUILD_JOBS="$DEPLOY_JOBS" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) >> "$BUILD_OUT" 2>&1; then
+      if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" CARGO_INCREMENTAL=1 CARGO_BUILD_JOBS="$DEPLOY_JOBS" nice -n "$DEPLOY_NICE" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) >> "$BUILD_OUT" 2>&1; then
         BUILD_OK=1
       fi
     fi
   else
-    if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" CARGO_INCREMENTAL=1 CARGO_BUILD_JOBS="$DEPLOY_JOBS" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) > "$BUILD_OUT" 2>&1; then
+    if (cd "$WORK" && CARGO_TARGET_DIR="$HOME/.amux/rust-build-target" CARGO_INCREMENTAL=1 CARGO_BUILD_JOBS="$DEPLOY_JOBS" nice -n "$DEPLOY_NICE" "$REPO/scripts/safe-cargo.sh" build --profile deploy -p amux-server) > "$BUILD_OUT" 2>&1; then
       BUILD_OK=1
     fi
   fi
