@@ -558,6 +558,8 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
         </div>
         <div class="settings-tab-panel" id="stab-device" data-stab="device">
+        <!-- Location history switch, shown only inside the iPhone app (native bridge). -->
+        <div class="settings-section" id="settings-loc-native" hidden></div>
         <div class="settings-section" style="padding:10px 14px;">
           <button onclick="_wtRestart();closeSettings();" style="width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:0.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;">
             <span style="font-size:1rem;">?</span> Walkthrough

@@ -13672,7 +13672,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1227';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1228';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -31260,7 +31260,7 @@ function _locRender(d) {
     ? d.n_considered + ' points · ' + trips.length + ' trip' + (trips.length === 1 ? '' : 's') + ' · ' + _locFmtDist(dist) + ' · ' + _locFmtDur(moving) + ' moving'
     : 'No points recorded' + (_locRange ? ' in this range.' : ' this day.');
   if (!_locSegments.length) {
-    list.innerHTML = '<div class="map-loc-empty">Nothing recorded here yet. Location history comes from the amux iPhone app: open Settings in the app, turn on <b>Location history</b>, and allow location <b>Always</b> and Motion.</div>';
+    list.innerHTML = '<div class="map-loc-empty">' + _locEmptyHint() + '</div>';
     return;
   }
   list.innerHTML = _locSegments.map((s, i) => {
@@ -31477,6 +31477,15 @@ async function _locExport(format) {
 // Native bridge (iPhone app only). The app answers by calling
 // window.__amuxNativeLocation(status) with {enabled, authorization, motion,
 // precise, pending, mode, delivered, stored, motion_pending, last_upload, last_error}.
+// Say what is actually missing. Inside an amux app build from before location
+// history there is no bridge at all, so "turn it on in Settings" points at a
+// switch that does not exist (Ethan, 2026-10-03, on build 6261).
+function _locEmptyHint() {
+  const inApp = /AmuxApp/.test(navigator.userAgent || '');
+  if (_locNativeAvailable()) return 'Nothing recorded here yet. Tap <b>Turn on</b> under <b>This iPhone</b> above (or Settings &gt; Device), then allow location <b>Always</b> and Motion.';
+  if (inApp) return 'This version of the amux app cannot record location history. Update it in <b>TestFlight</b> (1.1.4 or later), reopen it, then tap <b>Turn on</b> here.';
+  return 'Nothing recorded here yet. Location history comes from the amux iPhone app: open Map &gt; Location history in the app and tap <b>Turn on</b>, then allow location <b>Always</b> and Motion.';
+}
 function _locNativeAvailable() {
   return !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.amuxLocation);
 }
@@ -31484,7 +31493,37 @@ function _locNative(op) {
   if (!_locNativeAvailable()) return;
   try { window.webkit.messageHandlers.amuxLocation.postMessage({op}); } catch (e) {}
 }
+// Settings > Device carries the same switch, because the Map tab and the app's
+// long-press sheet were too hidden (Ethan, 2026-10-03: "I dont see the location
+// history button in settings"). Shown only when the native bridge exists.
+let _locNativeLast = null;
+function _settingsLocRender() {
+  const box = document.getElementById('settings-loc-native');
+  if (!box) return;
+  if (!_locNativeAvailable()) { box.hidden = true; return; }
+  box.hidden = false;
+  const st = _locNativeLast;
+  const on = !!(st && st.enabled);
+  box.innerHTML = '<div class="settings-section-label">Location history</div>'
+    + '<div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">'
+    + '<span style="font-size:0.8rem;">' + (st ? 'Recording on this iPhone: ' + (on ? 'on' : 'off') : 'Checking this iPhone…') + '</span>'
+    + '<button type="button" class="btn ' + (on ? '' : 'primary') + '" id="settings-loc-toggle" onclick="event.stopPropagation();_locNative(\'' + (on ? 'disable' : 'enable') + '\')"' + (st ? '' : ' disabled') + '>' + (on ? 'Turn off' : 'Turn on') + '</button></div>'
+    + '<button type="button" class="btn" style="margin-top:6px;width:100%;" onclick="event.stopPropagation();_settingsLocOpenHistory()">Open location history</button>';
+}
+function _settingsLocOpenHistory() {
+  closeSettings();
+  switchView('map');
+  // On a phone the Map side panel starts collapsed; the history tab lives in it.
+  const sb = document.getElementById('map-sidebar');
+  if (sb && sb.classList.contains('hidden') && typeof _mapToggleSidebar === 'function') _mapToggleSidebar();
+  _mapSidebarTab('history');
+}
+function _settingsLocRefresh() {
+  _settingsLocRender();
+  _locNative('status');   // any op makes the app push its current status back
+}
 window.__amuxNativeLocation = function(st) {
+  if (st) { _locNativeLast = st; _settingsLocRender(); }
   const box = document.getElementById('map-loc-native');
   if (!box || !st) return;
   box.hidden = false;
@@ -40911,6 +40950,7 @@ async function _vaultSecretRemove(id, key) {
   _vaultSecretsLoad();
 }
 function _settingsTab(name) {
+  if (name === 'device') _settingsLocRefresh();
   if (name === 'integrations') setTimeout(() => { _vaultLoad(); _vaultSecretsLoad(); _vaultSecretScopeChanged(); _chatgptAppLoad(); }, 0);
   const menu = document.getElementById('settings-menu');
   if (!menu) return;
