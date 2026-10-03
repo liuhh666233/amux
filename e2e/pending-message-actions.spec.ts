@@ -54,6 +54,12 @@ test('removing an attempted message asks first; an unattempted one goes at once'
   // so nothing is sent while the rows are being removed.
   await page.evaluate(() => { (window as any).eval('online = false; _syncFlight = new Promise(() => {})'); });
   await seed(page);
+  // The unattempted one first: removing the blocked head releases the queue,
+  // and the released fresh message can be attempted before a later click
+  // (desktop CI run 37134448148 then showed the attempted-message confirm).
+  await page.locator('#peek-messages-list .pending-msg[data-pending-id="fresh-1"]').locator('.pending-msg-remove').evaluate((b: HTMLElement) => b.click());
+  await expect.poll(() => page.evaluate(() => (window as any).eval('offlineQueue').some((q: any) => q.id === 'fresh-1'))).toBe(false);
+  await expect(page.locator('#modal-backdrop.open')).toHaveCount(0);
   const refused = page.locator('#peek-messages-list .pending-msg[data-pending-id="refused-1"]');
   await refused.locator('.pending-msg-remove').evaluate((b: HTMLElement) => b.click());
   await expect(page.locator('#modal-backdrop.open #modal-msg')).toContainText('may already be with');
@@ -63,6 +69,4 @@ test('removing an attempted message asks first; an unattempted one goes at once'
   await expect(page.locator('#modal-backdrop.open #modal-msg')).toContainText('may already be with');
   await page.locator('#modal-btns').getByRole('button', { name: 'Remove' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).eval('offlineQueue').some((q: any) => q.id === 'refused-1'))).toBe(false);
-  await page.locator('#peek-messages-list .pending-msg[data-pending-id="fresh-1"]').locator('.pending-msg-remove').evaluate((b: HTMLElement) => b.click());
-  await expect.poll(() => page.evaluate(() => (window as any).eval('offlineQueue').some((q: any) => q.id === 'fresh-1'))).toBe(false);
 });
