@@ -7559,7 +7559,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.38"
+LAND_BEHAVIOR_VERSION="2026-10-02.39"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7966,7 +7966,7 @@ p.communicate(msg.encode())
     # same ticket name, place and flags, and a foreground land keeps its
     # output. Checked every 30 s, never by a holder. AMUX_LAND_SELF_UPGRADE=0
     # opts out.
-    if [ "${AMUX_LAND_SELF_UPGRADE:-1}" = 1 ] && [ $(( $(date +%s) - ${_vchk:-0} )) -ge 30 ]; then
+    if [ "${AMUX_LAND_SELF_UPGRADE:-1}" = 1 ] && [ $(( $(date +%s) - ${_vchk:-0} )) -ge 60 ]; then
       _vchk=$(date +%s)
       _newv="$(grep -m1 '^LAND_BEHAVIOR_VERSION=' "$0" 2>/dev/null | cut -d'"' -f2 || true)"
       if [ -n "$_newv" ] && [ "$_newv" != "$LAND_BEHAVIOR_VERSION" ] && [ -e "${q:?}/${tname:?}" ]; then
@@ -8123,7 +8123,16 @@ p.communicate(msg.encode())
       fi
       announced=1
     fi
-    sleep 5; waited=$((waited + 5))
+    # Only the first two waiters need a 5 s poll (the head takes the lock, the
+    # next one is ready behind it). Every poll forks the whole interpreter a few
+    # dozen times, and at ~36 waiters that was about 4 cores of a 28-core host
+    # at load 40 (mixpeek-override, 2026-10-03 05:16Z; MO-3964), enough to push
+    # the composed precheck past its budget. The rest poll every
+    # AMUX_LAND_WAIT_POLL_S (default 30).
+    local _ps=5 _top2
+    _top2="$(ls "$q" 2>/dev/null | sort | head -2)"
+    case $'\n'"$_top2"$'\n' in *$'\n'"$tname"$'\n'*) ;; *) _ps="${AMUX_LAND_WAIT_POLL_S:-30}" ;; esac
+    sleep "$_ps"; waited=$((waited + _ps))
   done
   rm -f -- "${q:?}/${tname:?}"
   echo $$ > "$lock/pid"; date +%s > "$lock/since"; echo "$me" > "$lock/who"
