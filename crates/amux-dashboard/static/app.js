@@ -13799,7 +13799,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1237';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1238';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -31336,14 +31336,16 @@ let _locSegments = [];
 let _locLayer = null;
 let _locHighlight = null;
 let _locLoading = 0;
+// Colours follow Ethan's mockup (2026-10-03): drive blue, walk green, bike orange.
 const _LOC_MODE = {
-  walking: {label: 'Walking', color: '#3fb950', icon: '\u{1F6B6}'},
-  running: {label: 'Running', color: '#f0883e', icon: '\u{1F3C3}'},
-  cycling: {label: 'Cycling', color: '#58a6ff', icon: '\u{1F6B2}'},
-  driving: {label: 'Driving', color: '#d2a8ff', icon: '\u{1F697}'},
-  train:   {label: 'Train', color: '#f778ba', icon: '\u{1F686}'},
-  unknown: {label: 'Moving', color: '#8b949e', icon: '•'},
-  stop:    {label: 'Stop', color: '#e3b341', icon: '\u{1F4CD}'},
+  driving: {label: 'Driving', short: 'Drive', color: '#2f7bf5', icon: '\u{1F697}'},
+  walking: {label: 'Walking', short: 'Walk', color: '#2da44e', icon: '\u{1F6B6}'},
+  cycling: {label: 'Cycling', short: 'Bike', color: '#f5841f', icon: '\u{1F6B2}'},
+  running: {label: 'Running', short: 'Run', color: '#e5534b', icon: '\u{1F3C3}'},
+  train:   {label: 'Train', short: 'Train', color: '#a371f7', icon: '\u{1F686}'},
+  still:   {label: 'Stays', short: 'Stays', color: '#c69026', icon: '\u{1F4CD}'},
+  unknown: {label: 'Moving', short: 'Moving', color: '#8b949e', icon: '•'},
+  stop:    {label: 'Stop', short: 'Stop', color: '#e3b341', icon: '\u{1F4CD}'},
 };
 function _mapSidebarTab(tab) {
   _mapTab = tab === 'history' ? 'history' : 'pins';
@@ -31359,12 +31361,10 @@ function _mapSidebarTab(tab) {
   }
   if (_mapTab === 'history') {
     _locNative('status');
-    if (!_locDayStart) _locSetDay('');
-    else _locLoad();
+    if (_locPane === 'day') _locShowDay(); else _locShowOverview();
   } else if (_map) {
     if (_locLayer) { _map.removeLayer(_locLayer); _locLayer = null; }
-    if (_locHeatLayer) { _map.removeLayer(_locHeatLayer); _locHeatLayer = null; }
-    if (_locHeatOn) { _locHeatOn = false; const b = document.getElementById('map-loc-heat'); if (b) { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); } }
+    _locHeatClear();
   }
 }
 function _locDateValue(d) {
@@ -31404,9 +31404,20 @@ function _locFmtDur(s) {
   const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
   return h ? h + ' h ' + m + ' min' : m + ' min';
 }
+// Miles where the reader's region uses them (US, UK, Liberia, Myanmar),
+// kilometres elsewhere.
+const _locMiles = (() => {
+  try { return ['US', 'GB', 'LR', 'MM'].includes(new Intl.Locale(navigator.language || 'en-US').maximize().region); }
+  catch (e) { return true; }
+})();
 function _locFmtDist(m) {
   if (!m) return '';
-  return m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1) + ' km' : Math.round(m) + ' m';
+  if (_locMiles) {
+    const mi = m / 1609.344;
+    if (mi < 0.1) return Math.round(m * 3.28084).toLocaleString() + ' ft';
+    return (mi >= 100 ? Math.round(mi).toLocaleString() : mi.toFixed(1)) + ' mi';
+  }
+  return m >= 1000 ? (m >= 100000 ? Math.round(m / 1000).toLocaleString() : (m / 1000).toFixed(1)) + ' km' : Math.round(m) + ' m';
 }
 function _locFmtTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
@@ -31498,144 +31509,208 @@ function _locFocus(i) {
     setTimeout(function() { if (_map) _map.invalidateSize(); }, 310);
   }
 }
-// Stats, heatmap and raw export (raw capture, 2026-10-01). Stats and the
-// heatmap read the server's cleaned view; export returns every raw field.
-let _locViewMode = 'day';
-let _locHeatOn = false;
+// OVERVIEW (Ethan, 2026-10-03, with a mockup: "make the amux map location tab
+// contents look more like this heat map view"). Mode switches filter both the
+// distance totals and a per-mode heatmap; a period control; Top Places are
+// ~5 km areas the server names once and caches. Every figure is from the
+// server's cleaned view and the panel says how many points it measured.
+let _locPane = 'overview';
 let _locHeatLayer = null;
-let _locStatsLoading = 0;
-function _locView(v) {
-  _locViewMode = v === 'stats' ? 'stats' : 'day';
-  for (const [id, on] of [['map-loc-view-day', _locViewMode === 'day'], ['map-loc-view-stats', _locViewMode === 'stats']]) {
-    const b = document.getElementById(id);
-    if (b) { b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); }
-  }
-  const day = document.getElementById('map-loc-daypane'), stats = document.getElementById('map-loc-stats');
-  if (day) day.hidden = _locViewMode !== 'day';
-  if (stats) stats.hidden = _locViewMode !== 'stats';
-  if (_locViewMode === 'stats') _locStats();
-}
-function _locPeriod() {
-  const p = document.getElementById('map-loc-period')?.value || 'month';
+let _locLegend = null;
+let _locOverviewTicket = 0;
+let _locLastStats = null, _locLastHeat = null;
+let _locPlacesAll = false;
+let _locNamesRetry = 0;
+const _LOC_PERIODS = {'7d': [7, 'the last 7 days'], '1m': [30, 'the last month'], '3m': [91, 'the last 3 months'], '1y': [365, 'the last year'], 'all': [3650, 'any period']};
+let _locPeriodKey = (() => { try { const p = localStorage.getItem('amux_loc_period'); return _LOC_PERIODS[p] ? p : 'all'; } catch (e) { return 'all'; } })();
+const _locModesOff = new Set((() => { try { return JSON.parse(localStorage.getItem('amux_loc_modes_off') || '[]'); } catch (e) { return []; } })());
+function _locPeriodWindow() {
   const to = Math.ceil(Date.now() / 1000);
-  const days = {week: 7, month: 30, year: 365, all: 3650}[p] || 30;
-  return {from: to - days * 86400, to, bucket: p === 'year' || p === 'all' ? 'month' : 'day'};
+  return {from: to - _LOC_PERIODS[_locPeriodKey][0] * 86400, to};
 }
-async function _locStats() {
-  const body = document.getElementById('map-loc-stats-body');
-  if (!body) return;
-  const {from, to, bucket} = _locPeriod();
-  const ticket = ++_locStatsLoading;
-  body.textContent = 'Loading…';
+function _locShowOverview() {
+  _locPane = 'overview';
+  const ov = document.getElementById('map-loc-overview'), day = document.getElementById('map-loc-daypane');
+  if (ov) ov.hidden = false;
+  if (day) day.hidden = true;
+  if (_map && _locLayer) { _map.removeLayer(_locLayer); _locLayer = null; }
+  _locOverview();
+}
+function _locShowDay() {
+  _locPane = 'day';
+  const ov = document.getElementById('map-loc-overview'), day = document.getElementById('map-loc-daypane');
+  if (ov) ov.hidden = true;
+  if (day) day.hidden = false;
+  _locHeatClear();
+  if (!_locDayStart) _locSetDay(''); else _locLoad();
+}
+function _locSetPeriod(p) {
+  if (!_LOC_PERIODS[p]) return;
+  _locPeriodKey = p;
+  try { localStorage.setItem('amux_loc_period', p); } catch (e) {}
+  _locOverview();
+}
+function _locToggleMode(mode) {
+  if (_locModesOff.has(mode)) _locModesOff.delete(mode); else _locModesOff.add(mode);
+  try { localStorage.setItem('amux_loc_modes_off', JSON.stringify([..._locModesOff])); } catch (e) {}
+  _locRenderOverview();
+  _locHeatDraw();
+}
+function _locAllPlaces() { _locPlacesAll = !_locPlacesAll; _locRenderPlaces(); }
+async function _locOverview() {
+  const ticket = ++_locOverviewTicket;
+  for (const b of document.querySelectorAll('#map-loc-seg button')) {
+    const on = b.dataset.p === _locPeriodKey;
+    b.classList.toggle('active', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+  const meas = document.getElementById('map-loc-measured');
+  if (meas) meas.textContent = 'Loading…';
+  const {from, to} = _locPeriodWindow();
+  const tz = -new Date().getTimezoneOffset();
+  const days = _LOC_PERIODS[_locPeriodKey][0];
+  const cell = days <= 7 ? 40 : days <= 31 ? 60 : days <= 92 ? 90 : 140;
   try {
-    const tz = -new Date().getTimezoneOffset();
-    const r = await fetch(API + '/api/map/location/stats?from=' + from + '&to=' + to + '&bucket=' + bucket + '&tz_offset_min=' + tz);
-    const d = await r.json().catch(() => ({}));
-    if (ticket !== _locStatsLoading) return;
-    if (!r.ok || d.measured !== true) throw new Error(d.why_unmeasured || d.error || ('HTTP ' + r.status));
-    _locStatsRender(d);
+    const [rs, rh] = await Promise.all([
+      fetch(API + '/api/map/location/stats?from=' + from + '&to=' + to + '&bucket=' + (days > 92 ? 'month' : 'day') + '&tz_offset_min=' + tz),
+      fetch(API + '/api/map/location/heatmap?from=' + from + '&to=' + to + '&cell_m=' + cell),
+    ]);
+    const st = await rs.json().catch(() => ({})), hm = await rh.json().catch(() => ({}));
+    if (ticket !== _locOverviewTicket) return;
+    if (!rs.ok || st.measured !== true) throw new Error(st.why_unmeasured || st.error || ('HTTP ' + rs.status));
+    _locLastStats = st;
+    _locLastHeat = rh.ok && hm.measured === true ? hm : null;
+    _locRenderOverview();
+    _locHeatDraw();
+    // Area names are resolved in the background; ask again for the ones pending.
+    const pending = (st.areas || []).slice(0, 10).some(a => a.name_status === 'pending');
+    if (pending && _locNamesRetry < 4) { _locNamesRetry++; setTimeout(() => { if (ticket === _locOverviewTicket && _locPane === 'overview' && _mapTab === 'history') _locOverview(); }, 6000); }
+    else if (!pending) _locNamesRetry = 0;
   } catch (e) {
-    if (ticket !== _locStatsLoading) return;
-    body.textContent = 'Could not load stats: ' + (e.message || e);
+    if (ticket !== _locOverviewTicket) return;
+    if (meas) meas.textContent = 'Could not load: ' + (e.message || e);
   }
 }
-function _locSpeed(mps) {
-  return mps ? (mps * 3.6).toFixed(1) + ' km/h' : '';
+// Modes shown: drive, walk and bike always; running, train and stays only when
+// this period has them.
+function _locModesShown() {
+  const st = _locLastStats || {}, hm = _locLastHeat || {};
+  const present = new Set([...Object.keys(st.totals || {}), ...Object.keys(hm.points_by_mode || {})]);
+  return ['driving', 'walking', 'cycling', 'running', 'train', 'still'].filter(m => ['driving', 'walking', 'cycling'].includes(m) || present.has(m));
 }
-function _locStatsRender(d) {
-  const body = document.getElementById('map-loc-stats-body');
-  if (!body) return;
-  if (!d.n_considered) {
-    body.innerHTML = '<div class="map-loc-empty">No points recorded in this period.</div>';
+// Rewrite only when the markup changes, so a periodic refresh does not replace
+// a control under the reader's finger.
+function _locSetHTML(el, html) {
+  if (el && el.dataset.markup !== html) { el.innerHTML = html; el.dataset.markup = html; }
+}
+function _locRenderOverview() {
+  const st = _locLastStats;
+  if (!st) return;
+  const modesEl = document.getElementById('map-loc-modes'), dist = document.getElementById('map-loc-dist');
+  const shown = _locModesShown();
+  // The whole row is the switch: a phone tap anywhere on it toggles the mode.
+  _locSetHTML(modesEl, shown.map(k => {
+    const m = _LOC_MODE[k], on = !_locModesOff.has(k);
+    return '<button type="button" role="switch" class="map-loc-mode-row" aria-checked="' + on + '" aria-label="Show ' + esc(m.label) + '"'
+      + ' data-mode="' + k + '" onclick="_locToggleMode(\'' + k + '\')">'
+      + '<span class="map-loc-mode-ico" style="color:' + m.color + '">' + m.icon + '</span>'
+      + '<span class="map-loc-mode-label">' + esc(m.short) + '</span>'
+      + '<span class="map-loc-switch' + (on ? ' on' : '') + '" style="--sw:' + m.color + '" aria-hidden="true"><span></span></span></button>';
+  }).join(''));
+  const label = _LOC_PERIODS[_locPeriodKey][1];
+  if (dist) {
+    if (!st.n_considered) {
+      _locSetHTML(dist, '<div class="map-loc-empty">Nothing recorded in ' + esc(label) + '.</div>');
+    } else {
+      const totals = st.totals || {};
+      const rows = shown.filter(k => k !== 'still' && !_locModesOff.has(k)).map(k => {
+        const m = _LOC_MODE[k], t = totals[k];
+        return '<div class="map-loc-dist-row"><span class="map-loc-dot" style="background:' + m.color + '"></span><span class="map-loc-dist-label">' + esc(m.short) + '</span>'
+          + '<span class="map-loc-dist-val">' + (t && t.distance_m ? esc(_locFmtDist(t.distance_m)) : '<span class="map-loc-none">none</span>') + '</span></div>';
+      });
+      _locSetHTML(dist, rows.join('') || '<div class="map-loc-empty">Every mode is switched off.</div>');
+    }
+  }
+  _locRenderPlaces();
+  const meas = document.getElementById('map-loc-measured');
+  if (meas) {
+    const hm = _locLastHeat;
+    meas.textContent = st.n_considered
+      ? 'Measured from ' + st.n_considered.toLocaleString() + ' points over ' + (st.days_with_data || 0) + ' day' + (st.days_with_data === 1 ? '' : 's')
+        + (hm && hm.truncated ? ' · heatmap shows the busiest areas' : '')
+      : 'No points in ' + label + '.';
+  }
+}
+function _locRenderPlaces() {
+  const box = document.getElementById('map-loc-places'), more = document.getElementById('map-loc-allplaces');
+  const st = _locLastStats;
+  if (!box || !st) return;
+  const areas = st.areas || [];
+  if (!areas.length) {
+    _locSetHTML(box, '<div class="map-loc-empty">' + (st.n_considered ? 'No stops long enough to count as a visit yet.' : 'No places in ' + esc(_LOC_PERIODS[_locPeriodKey][1]) + '.') + '</div>');
+    if (more) more.hidden = true;
     return;
   }
-  const totals = d.totals || {};
-  const modes = Object.keys(totals).sort((a, b) => (totals[b].distance_m || 0) - (totals[a].distance_m || 0));
-  const allDist = modes.reduce((a, k) => a + (totals[k].distance_m || 0), 0);
-  const allTime = modes.reduce((a, k) => a + (totals[k].moving_s || 0), 0);
-  let h = '<div class="map-loc-summary">' + d.n_considered + ' points · ' + (d.days_with_data || 0) + ' day' + (d.days_with_data === 1 ? '' : 's')
-    + ' · ' + (_locFmtDist(allDist) || '0 m') + ' · ' + _locFmtDur(allTime) + ' moving</div>';
-  h += '<div class="map-loc-stat-hdr">By mode</div>';
-  h += modes.map(k => {
-    const m = _LOC_MODE[k] || _LOC_MODE.unknown, t = totals[k];
-    const pct = allDist ? Math.max(2, Math.round(100 * (t.distance_m || 0) / allDist)) : 0;
-    return '<div class="map-loc-stat-row"><span class="map-loc-row-title">' + m.icon + ' ' + esc(m.label) + '</span>'
-      + '<span class="map-loc-row-meta">' + esc([_locFmtDist(t.distance_m), _locFmtDur(t.moving_s), t.trips + ' trip' + (t.trips === 1 ? '' : 's'), _locSpeed(t.avg_speed_mps)].filter(Boolean).join(' · ')) + '</span>'
-      + '<span class="map-loc-bar"><span style="width:' + pct + '%;background:' + m.color + '"></span></span></div>';
-  }).join('');
-  const lt = d.longest_trip;
-  if (lt) {
-    const m = _LOC_MODE[lt.mode] || _LOC_MODE.unknown;
-    h += '<div class="map-loc-stat-hdr">Longest trip</div>'
-      + '<button type="button" class="map-loc-row" onclick="_locOpenDay(' + lt.start + ')"><span class="map-loc-dot" style="background:' + m.color + '"></span>'
-      + '<span class="map-loc-row-main"><span class="map-loc-row-title">' + m.icon + ' ' + esc(m.label) + ' · ' + esc(_locFmtDist(lt.distance_m)) + '</span>'
-      + '<span class="map-loc-row-meta">' + esc(new Date(lt.start * 1000).toLocaleDateString([], {month: 'short', day: 'numeric'}) + ' · ' + _locFmtTime(lt.start) + ' · ' + _locFmtDur(lt.duration_s)) + '</span></span></button>';
+  const list = _locPlacesAll ? areas : areas.slice(0, 5);
+  _locSetHTML(box, '<div class="map-loc-card">' + list.map(a => {
+    const name = a.name || (a.name_status === 'pending' ? 'Naming this area…' : a.lat.toFixed(3) + ', ' + a.lon.toFixed(3));
+    return '<button type="button" class="map-loc-place" onclick="_locGoPlace(' + a.lat + ',' + a.lon + ')">'
+      + '<span class="map-loc-pin" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg></span>'
+      + '<span class="map-loc-place-main"><span class="map-loc-place-name">' + esc(name) + '</span>'
+      + '<span class="map-loc-place-meta">' + a.visits.toLocaleString() + ' visit' + (a.visits === 1 ? '' : 's') + '</span></span></button>';
+  }).join('') + '</div>');
+  if (more) {
+    more.hidden = areas.length <= 5;
+    more.firstChild.textContent = _locPlacesAll ? 'Fewer places ' : 'All Places (' + areas.length + ') ';
   }
-  const place = (p, i, kind) => '<button type="button" class="map-loc-row" onclick="_locGoPlace(' + p.lat + ',' + p.lon + ')">'
-    + '<span class="map-loc-dot" style="background:' + _LOC_MODE.stop.color + '"></span><span class="map-loc-row-main">'
-    + '<span class="map-loc-row-title">' + (kind === 'new' ? 'New place' : 'Place ' + (i + 1)) + ' · ' + esc(_locFmtDur(p.time_s)) + '</span>'
-    + '<span class="map-loc-row-meta">' + p.visits + ' visit' + (p.visits === 1 ? '' : 's') + ' · ' + p.lat.toFixed(4) + ', ' + p.lon.toFixed(4) + '</span></span></button>';
-  const top = d.top_places || [], fresh = d.new_places || [];
-  if (top.length) h += '<div class="map-loc-stat-hdr">Top places by time</div>' + top.map((p, i) => place(p, i, 'top')).join('');
-  h += '<div class="map-loc-stat-hdr">New places: ' + fresh.length + '</div>' + fresh.slice(0, 10).map((p, i) => place(p, i, 'new')).join('');
-  const buckets = d.buckets || [];
-  if (buckets.length) {
-    const sum = b => Object.values(b.modes || {}).reduce((a, t) => a + (t.distance_m || 0), 0);
-    const max = Math.max(1, ...buckets.map(sum));
-    h += '<div class="map-loc-stat-hdr">Distance per ' + esc(d.bucket || 'day') + '</div>'
-      + buckets.slice().reverse().map(b => '<div class="map-loc-stat-row"><span class="map-loc-row-meta">' + esc(b.bucket) + ' · ' + esc(_locFmtDist(sum(b)) || '0 m') + '</span>'
-        + '<span class="map-loc-bar">' + Object.entries(b.modes || {}).map(([k, t]) => '<span style="width:' + (100 * (t.distance_m || 0) / max) + '%;background:' + (_LOC_MODE[k] || _LOC_MODE.unknown).color + '"></span>').join('') + '</span></div>').join('');
-  }
-  body.innerHTML = h;
-}
-function _locOpenDay(ts) {
-  const d = new Date(ts * 1000); d.setHours(0, 0, 0, 0);
-  _locView('day');
-  _locSetDay(_locDateValue(d));
 }
 function _locGoPlace(lat, lon) {
   if (!_map) return;
-  _map.setView([lat, lon], Math.max(_map.getZoom(), 16));
+  _map.setView([lat, lon], Math.max(_map.getZoom(), 13));
   if (window.innerWidth <= 600 && _mapSettings.sidebarOpen) {
     _mapSettings.sidebarOpen = false;
     _mapApplySidebarState();
     setTimeout(function() { if (_map) _map.invalidateSize(); }, 310);
   }
 }
-async function _locHeatToggle() {
-  _locHeatOn = !_locHeatOn;
-  const b = document.getElementById('map-loc-heat');
-  if (b) { b.classList.toggle('active', _locHeatOn); b.setAttribute('aria-pressed', _locHeatOn ? 'true' : 'false'); }
-  if (!_locHeatOn) {
-    if (_locHeatLayer && _map) _map.removeLayer(_locHeatLayer);
-    _locHeatLayer = null;
-    return;
-  }
-  try {
-    const r = await fetch(API + '/api/map/location/heatmap?cell_m=50');
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.measured !== true) throw new Error(d.why_unmeasured || d.error || ('HTTP ' + r.status));
-    if (!_locHeatOn) return;
-    _locHeatDraw(d);
-    showToast(d.n_considered ? (d.n_cells + ' places on the heatmap' + (d.truncated ? ' (busiest shown)' : '')) : 'Nothing recorded yet');
-  } catch (e) {
-    showToast('Heatmap failed: ' + (e.message || e));
-    _locHeatOn = false;
-    if (b) { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); }
-  }
+function _locHeatClear() {
+  if (_map && _locHeatLayer) _map.removeLayer(_locHeatLayer);
+  if (_map && _locLegend) _map.removeControl(_locLegend);
+  _locHeatLayer = null; _locLegend = null;
 }
-function _locHeatDraw(d) {
-  if (typeof L === 'undefined' || !_map) return;
-  if (_locHeatLayer) _map.removeLayer(_locHeatLayer);
-  const cells = Array.isArray(d.cells) ? d.cells : [];
-  const max = Math.log(1 + Math.max(1, ...cells.map(c => c[2])));
+// One canvas dot per cell, coloured by mode; brighter and bigger where there
+// was more activity. The legend lists only the modes switched on.
+function _locHeatDraw() {
+  _locHeatClear();
+  if (typeof L === 'undefined' || !_map || _locPane !== 'overview' || _mapTab !== 'history') return;
+  const d = _locLastHeat;
+  const cells = (d && Array.isArray(d.cells) ? d.cells : []).filter(c => !_locModesOff.has(c[3] || 'still'));
+  const max = {};
+  for (const c of cells) { const m = c[3] || 'still'; max[m] = Math.max(max[m] || 1, c[2]); }
   const renderer = L.canvas({padding: 0.5});
   _locHeatLayer = L.featureGroup();
-  for (const [lat, lon, n] of cells) {
-    const k = Math.log(1 + n) / max;
-    L.circleMarker([lat, lon], {renderer, radius: 4 + 4 * k, stroke: false, fillColor: k > 0.66 ? '#f85149' : k > 0.33 ? '#f0883e' : '#e3b341', fillOpacity: 0.25 + 0.5 * k, interactive: false}).addTo(_locHeatLayer);
+  // Stays first so travel draws on top.
+  cells.sort((a, b) => (a[3] === 'still' ? -1 : 0) - (b[3] === 'still' ? -1 : 0) || a[2] - b[2]);
+  for (const [lat, lon, n, mode] of cells) {
+    const m = mode || 'still', k = Math.log(1 + n) / Math.log(1 + max[m]);
+    L.circleMarker([lat, lon], {renderer, radius: 3 + 5 * k, stroke: false, fillColor: (_LOC_MODE[m] || _LOC_MODE.unknown).color,
+      fillOpacity: 0.18 + 0.62 * k, interactive: false}).addTo(_locHeatLayer);
   }
   _locHeatLayer.addTo(_map);
+  const modes = [...new Set(cells.map(c => c[3] || 'still'))];
+  const order = ['driving', 'walking', 'cycling', 'running', 'still'];
+  modes.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  if (!modes.length) return;
+  _locLegend = L.control({position: 'bottomleft'});
+  _locLegend.onAdd = () => {
+    const el = L.DomUtil.create('div', 'map-loc-legend');
+    el.id = 'map-loc-legend';
+    el.innerHTML = '<div class="map-loc-legend-ends"><span>Less activity</span><span>More activity</span></div>'
+      + modes.map(m => { const c = (_LOC_MODE[m] || _LOC_MODE.unknown).color;
+        return '<div class="map-loc-legend-row" title="' + esc((_LOC_MODE[m] || _LOC_MODE.unknown).label) + '"><span class="map-loc-dot" style="background:' + c + '"></span>'
+          + '<span class="map-loc-legend-bar" style="background:linear-gradient(to right,' + c + '22,' + c + ')"></span></div>'; }).join('');
+    return el;
+  };
+  _locLegend.addTo(_map);
 }
 // Through fetch, not a plain link: fetch carries the owner bearer the
 // dashboard's auth wrapper adds, which a link navigation would not.

@@ -7818,6 +7818,7 @@ body.light .bd-answer-head { color: #bc4c00; }
   #peek-messages-count { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #peek-messages-panel .pm-date-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; font-size: .8rem; color: var(--text); min-height: 44px; }
   #peek-messages-panel .pm-date-item input { font-size: .8rem; padding: 4px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+}
 
 /* Map details tabs: Pins | Location history (AMUX-5458). */
 .map-tabs { display: flex; gap: 4px; padding: 6px 10px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -7827,7 +7828,7 @@ body.light .bd-answer-head { color: #bc4c00; }
 .map-pins-pane[hidden], .map-loc-pane[hidden] { display: none; }
 .map-loc-daypane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .map-loc-stats { flex: 1; min-height: 0; overflow-y: auto; }
-.map-loc-daypane[hidden], .map-loc-stats[hidden] { display: none; }
+.map-loc-daypane[hidden], .map-loc-stats[hidden], .map-loc-overview[hidden] { display: none; }
 .map-loc-views { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
 .map-loc-view.active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .map-loc-period { width: 100%; margin-bottom: 6px; }
@@ -7882,3 +7883,53 @@ body.light .bd-answer-head { color: #bc4c00; }
 .list-acc > summary::-webkit-details-marker { display: none; }
 .list-acc > summary::before { content: '\25B8'; font-size: 0.7rem; }
 .list-acc[open] > summary::before { content: '\25BE'; }
+
+/* Location history overview (Ethan's mockup, 2026-10-03): light cards, mode
+   switches, a segmented period control, distance per mode, Top Places. */
+.map-loc-overview { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px 4px; display: flex; flex-direction: column; gap: 10px; }
+/* Cards keep their height and the panel scrolls. As shrinking flex items on a
+   short phone they collapsed (overflow:hidden makes their min-height 0) and the
+   mode rows sat over the period control. */
+.map-loc-overview > * { flex-shrink: 0; }
+.map-loc-card { background: var(--card, #fff); border: 1px solid var(--border); border-radius: 12px; }
+.map-loc-modes { display: flex; flex-direction: column; overflow: hidden; }
+.map-loc-mode-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 0 12px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.map-loc-mode-row + .map-loc-mode-row { border-top: 1px solid var(--border); }
+.map-loc-mode-ico { font-size: 1.2rem; width: 24px; text-align: center; }
+.map-loc-mode-label { flex: 1; font-size: 0.9rem; font-weight: 500; }
+.map-loc-switch { --sw: var(--accent); position: relative; display: inline-block; width: 48px; height: 28px; min-width: 48px; border-radius: 14px;
+  background: var(--border); transition: background 0.15s; }
+.map-loc-switch > span { position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.25); transition: transform 0.15s; }
+.map-loc-switch.on { background: var(--sw); }
+.map-loc-switch.on > span { transform: translateX(20px); }
+.map-loc-seg { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--bg2, rgba(127,127,127,0.12)); }
+.map-loc-seg > button { flex: 1; min-height: 36px; border: 0; border-radius: 8px; background: transparent; color: var(--dim); font: inherit; font-size: 0.8rem; font-weight: 500; cursor: pointer; }
+.map-loc-seg > button.active { background: var(--card, #fff); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+.map-loc-dist { padding: 2px 12px; }
+.map-loc-dist-row { display: flex; align-items: center; gap: 10px; min-height: 40px; }
+.map-loc-dist-row + .map-loc-dist-row { border-top: 1px solid var(--border); }
+.map-loc-dist-row .map-loc-dot { margin-top: 0; }
+.map-loc-dist-label { flex: 1; font-size: 0.86rem; }
+.map-loc-dist-val { font-size: 0.95rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.map-loc-none { font-weight: 400; color: var(--dim); font-size: 0.8rem; }
+.map-loc-card-hdr { font-size: 0.9rem; font-weight: 700; margin: 2px 2px 6px; }
+.map-loc-place { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 6px 12px; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.map-loc-place + .map-loc-place { border-top: 1px solid var(--border); }
+.map-loc-pin { color: var(--dim); display: flex; }
+.map-loc-place-main { display: flex; flex-direction: column; min-width: 0; }
+.map-loc-place-name { font-size: 0.86rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-loc-place-meta { font-size: 0.74rem; color: var(--dim); }
+.map-loc-more { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; margin-top: 8px; padding: 0 14px; color: inherit; font: inherit; font-size: 0.86rem; cursor: pointer; }
+.map-loc-more[hidden] { display: none; }
+.map-loc-more > span { color: var(--dim); font-size: 1.1rem; }
+.map-loc-measured { font-size: 0.7rem; color: var(--dim); text-align: center; padding: 0 4px 6px; }
+.map-loc-back { align-self: flex-start; margin: 6px 10px 0; min-height: 36px; padding: 0 10px; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 0.82rem; cursor: pointer; }
+.map-loc-legend { background: var(--card, #fff); border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; min-width: 200px; font-size: 0.7rem; color: var(--dim); box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
+.map-loc-legend-ends { display: flex; justify-content: space-between; margin-bottom: 6px; }
+.map-loc-legend-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.map-loc-legend-row .map-loc-dot { margin-top: 0; width: 8px; height: 8px; }
+.map-loc-legend-bar { flex: 1; height: 7px; border-radius: 4px; }
+@media (max-width: 600px) {
+  .map-loc-seg > button, .map-loc-back { min-height: 44px; }
+  .map-loc-legend { min-width: 160px; }
+}

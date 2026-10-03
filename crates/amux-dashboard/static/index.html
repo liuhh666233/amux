@@ -1218,21 +1218,29 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <button type="button" class="map-tab" id="map-tab-history" role="tab" aria-selected="false" onclick="_mapSidebarTab('history')">Location history</button>
     </div>
     <div class="map-loc-pane" id="map-history-pane" hidden>
-      <div class="map-loc-views" role="group" aria-label="Location history view">
-        <button type="button" class="btn map-loc-view active" id="map-loc-view-day" aria-pressed="true" onclick="_locView('day')">Day</button>
-        <button type="button" class="btn map-loc-view" id="map-loc-view-stats" aria-pressed="false" onclick="_locView('stats')">Stats</button>
-        <button type="button" class="btn map-loc-view" id="map-loc-heat" aria-pressed="false" onclick="_locHeatToggle()">Heatmap</button>
+      <!-- Overview (Ethan's mockup, 2026-10-03): mode switches that filter the
+           stats and the heatmap, a period control, distance per mode, and the
+           areas visited most. The day timeline is one tap away. -->
+      <div class="map-loc-overview" id="map-loc-overview">
+        <div class="map-loc-card map-loc-modes" id="map-loc-modes" role="group" aria-label="Travel modes"></div>
+        <div class="map-loc-seg" id="map-loc-seg" role="radiogroup" aria-label="Period">
+          <button type="button" role="radio" data-p="7d" onclick="_locSetPeriod('7d')">7D</button>
+          <button type="button" role="radio" data-p="1m" onclick="_locSetPeriod('1m')">1M</button>
+          <button type="button" role="radio" data-p="3m" onclick="_locSetPeriod('3m')">3M</button>
+          <button type="button" role="radio" data-p="1y" onclick="_locSetPeriod('1y')">1Y</button>
+          <button type="button" role="radio" data-p="all" onclick="_locSetPeriod('all')">All</button>
+        </div>
+        <div class="map-loc-card map-loc-dist" id="map-loc-dist"></div>
+        <div class="map-loc-places-card">
+          <div class="map-loc-card-hdr">Top Places</div>
+          <div id="map-loc-places"></div>
+          <button type="button" class="map-loc-card map-loc-more" id="map-loc-allplaces" onclick="_locAllPlaces()" hidden>All Places <span aria-hidden="true">&#x203A;</span></button>
+        </div>
+        <button type="button" class="map-loc-card map-loc-more" id="map-loc-open-day" onclick="_locShowDay()">Day by day <span aria-hidden="true">&#x203A;</span></button>
+        <div class="map-loc-measured" id="map-loc-measured"></div>
       </div>
-      <div class="map-loc-stats" id="map-loc-stats" hidden>
-        <select id="map-loc-period" class="input map-loc-period" onchange="_locStats()" aria-label="Period">
-          <option value="week">Last 7 days</option>
-          <option value="month" selected>Last 30 days</option>
-          <option value="year">Last 12 months</option>
-          <option value="all">All time</option>
-        </select>
-        <div id="map-loc-stats-body"></div>
-      </div>
-      <div class="map-loc-daypane" id="map-loc-daypane">
+      <div class="map-loc-daypane" id="map-loc-daypane" hidden>
+      <button type="button" class="map-loc-back" id="map-loc-back" onclick="_locShowOverview()">&#x2039; Overview</button>
       <div class="map-loc-day">
         <button type="button" class="btn map-loc-step" onclick="_locShift(-1)" aria-label="Previous day">&#x2039;</button>
         <input type="date" id="map-loc-date" class="input map-loc-date" onchange="_locSetDay(this.value)" aria-label="Day">

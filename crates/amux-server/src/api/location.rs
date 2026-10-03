@@ -917,7 +917,21 @@ struct HeatQ {
     /// Cell size in metres (default 50).
     #[serde(default)]
     cell_m: Option<f64>,
+    /// Comma-separated modes to keep (driving,walking,cycling,running,still).
+    #[serde(default)]
+    modes: Option<String>,
 }
+
+/// One fix's travel mode, for the per-mode heatmap. Core Motion's activity
+/// wins; without it the fix's own speed decides (m/s, the same thresholds as
+/// `speed_mode`), and a fix with no usable speed is `still`. Per fix, so it is
+/// cheap over years of points; trips use the segment classifier instead.
+pub(crate) const MODE_SQL: &str = "CASE \
+    WHEN activity = 'automotive' THEN 'driving' WHEN activity = 'cycling' THEN 'cycling' \
+    WHEN activity = 'running' THEN 'running' WHEN activity = 'walking' THEN 'walking' \
+    WHEN speed >= 7.0 THEN 'driving' WHEN speed >= 2.5 THEN 'cycling' WHEN speed >= 0.6 THEN 'walking' \
+    ELSE 'still' END";
+const HEAT_MODES: [&str; 5] = ["driving", "walking", "cycling", "running", "still"];
 
 const HEAT_MAX_CELLS: i64 = 20_000;
 
@@ -925,33 +939,49 @@ async fn heatmap(State(state): State<AppState>, Query(q): Query<HeatQ>) -> Respo
     let from = q.from.unwrap_or(0.0);
     let to = q.to.unwrap_or(f64::MAX);
     let deg = q.cell_m.unwrap_or(50.0).clamp(10.0, 5000.0) / 111_320.0;
+    // Only known mode names reach the SQL, so the list is safe to inline.
+    let wanted: Vec<&'static str> = match q.modes.as_deref() {
+        Some(list) => HEAT_MODES.iter().copied().filter(|m| list.split(',').any(|x| x.trim() == *m)).collect(),
+        None => HEAT_MODES.to_vec(),
+    };
+    let mode_filter = format!("m IN ({})", wanted.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(","));
     match state
         .store
         .read_async(move |c| {
-            // Integer grid cells; the +1e7 offset makes CAST round down for negatives too.
+            // Integer grid cells per mode; the +1e7 offset makes CAST round down for negatives too.
             let sql = format!(
-                "SELECT CAST(lat/?3 + 10000000 AS INTEGER) - 10000000 AS a, CAST(lon/?3 + 10000000 AS INTEGER) - 10000000 AS b, COUNT(*) AS n
-                   FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL}
-                  GROUP BY a, b ORDER BY n DESC LIMIT ?4"
+                "SELECT a, b, m, COUNT(*) AS n FROM (
+                   SELECT CAST(lat/?3 + 10000000 AS INTEGER) - 10000000 AS a, CAST(lon/?3 + 10000000 AS INTEGER) - 10000000 AS b,
+                          {MODE_SQL} AS m
+                     FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL})
+                  WHERE {mode_filter} GROUP BY a, b, m ORDER BY n DESC LIMIT ?4"
             );
             let mut stmt = c.prepare(&sql)?;
             let cells = stmt
                 .query_map(params![from, to, deg, HEAT_MAX_CELLS + 1], |r| {
-                    let (a, b, n): (i64, i64, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
-                    Ok(json!([(a as f64 + 0.5) * deg, (b as f64 + 0.5) * deg, n]))
+                    let (a, b, m, n): (i64, i64, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+                    Ok(json!([(a as f64 + 0.5) * deg, (b as f64 + 0.5) * deg, n, m]))
                 })?
                 .collect::<rusqlite::Result<Vec<Value>>>()?;
-            let n: i64 = c.query_row(&format!("SELECT COUNT(*) FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL}"),
-                params![from, to], |r| r.get(0))?;
-            Ok((n, cells))
+            let mut per_mode = serde_json::Map::new();
+            let mut stmt = c.prepare(&format!(
+                "SELECT {MODE_SQL} AS m, COUNT(*) FROM location_points WHERE ts >= ?1 AND ts < ?2 AND {CLEAN_SQL} GROUP BY m"))?;
+            let mut n: i64 = 0;
+            for row in stmt.query_map(params![from, to], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+                let (m, k) = row?;
+                n += k;
+                per_mode.insert(m, json!(k));
+            }
+            Ok((n, cells, per_mode))
         })
         .await
     {
-        Ok((n, mut cells)) => {
+        Ok((n, mut cells, per_mode)) => {
             let truncated = cells.len() as i64 > HEAT_MAX_CELLS;
             cells.truncate(HEAT_MAX_CELLS as usize);
             Json(json!({"ok": true, "measured": true, "n_considered": n, "cell_deg": deg, "cells": cells,
-                "n_cells": cells.len(), "truncated": truncated})).into_response()
+                "n_cells": cells.len(), "truncated": truncated, "points_by_mode": per_mode,
+                "modes": wanted})).into_response()
         }
         Err(e) => server_error(e),
     }
@@ -972,6 +1002,43 @@ struct StatsQ {
 /// clustering can replace it without touching storage or callers.
 pub(crate) fn place_key(lat: f64, lon: f64) -> (i64, i64) {
     ((lat / 0.00135).floor() as i64, (lon / 0.0018).floor() as i64)
+}
+
+/// An area: places grouped on a ~5 km grid, the unit "Top Places" counts
+/// visits in and names ("New York, NY"). Coarse on purpose: one reverse geocode
+/// per area, cached in location_place_names.
+pub(crate) fn area_key(lat: f64, lon: f64) -> String {
+    format!("a_{}_{}", (lat / 0.05).floor() as i64, (lon / 0.05).floor() as i64)
+}
+
+/// A failed lookup is retried after this long; a successful one is kept.
+const AREA_RETRY_S: f64 = 86_400.0;
+
+/// (name, status, fetched_at) of a cached area name.
+type CachedAreaName = (Option<String>, String, f64);
+
+/// (visits, time_s, lat * visits, lon * visits, weight) while grouping places into areas.
+type AreaAcc = (i64, f64, f64, f64, i64);
+
+/// "New York, NY" from a Nominatim reverse result (zoom 10). The place is the
+/// city, town or village; the region is the ISO subdivision code where the
+/// country uses short codes (US, CA, AU), else the state, else the country.
+pub(crate) fn area_name(v: &Value) -> Option<String> {
+    let a = v.get("address")?;
+    let place = ["city", "town", "village", "municipality", "hamlet", "county"]
+        .iter()
+        .find_map(|k| a.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty()))?;
+    let cc = a.get("country_code").and_then(Value::as_str).unwrap_or("");
+    let iso = a.get("ISO3166-2-lvl4").and_then(Value::as_str).unwrap_or("");
+    let region = if matches!(cc, "us" | "ca" | "au") && iso.contains('-') {
+        iso.rsplit('-').next().map(str::to_string)
+    } else {
+        a.get("state").or_else(|| a.get("country")).and_then(Value::as_str).map(str::to_string)
+    };
+    Some(match region.filter(|r| !r.is_empty() && r != place) {
+        Some(r) => format!("{place}, {r}"),
+        None => place.to_string(),
+    })
 }
 
 fn bucket_label(day: i64, bucket: &str) -> String {
@@ -1081,12 +1148,43 @@ pub(crate) fn compute_stats(c: &Connection, from: f64, to: f64, bucket: &str, of
             top.push(j);
         }
     }
+    // Areas: places grouped on the ~5 km grid, ranked by visits, named from the
+    // cache. A name the cache lacks reads "pending" and the stats handler
+    // resolves it in the background; nothing here calls the geocoder.
+    let mut areas: std::collections::HashMap<String, AreaAcc> = Default::default();
+    for (_, p) in &ranked {
+        let (lat, lon) = (p.lat_sum / p.visits as f64, p.lon_sum / p.visits as f64);
+        let e = areas.entry(area_key(lat, lon)).or_default();
+        e.0 += p.visits;
+        e.1 += p.time_s;
+        e.2 += lat * p.visits as f64;
+        e.3 += lon * p.visits as f64;
+        e.4 += p.visits;
+    }
+    let mut area_rows: Vec<(String, AreaAcc)> = areas.into_iter().collect();
+    area_rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(b.1 .1.total_cmp(&a.1 .1)));
+    let mut areas_json = Vec::new();
+    for (key, (visits, time_s, lat_w, lon_w, w)) in &area_rows {
+        let cached: Option<CachedAreaName> = c
+            .query_row("SELECT name, status, fetched_at FROM location_place_names WHERE key = ?1", params![key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .ok();
+        let (name, status) = match cached {
+            Some((Some(n), st, _)) if st == "named" => (Some(n), "named"),
+            Some((_, st, _)) if st == "none" => (None, "unnamed"),
+            Some((_, _, at)) if now - at < AREA_RETRY_S => (None, "unavailable"),
+            _ => (None, "pending"),
+        };
+        areas_json.push(json!({"key": key, "name": name, "name_status": status, "visits": visits,
+            "time_s": time_s.round(), "lat": lat_w / *w as f64, "lon": lon_w / *w as f64}));
+    }
     let buckets_json: Vec<Value> = buckets.iter().map(|(label, m)| json!({"bucket": label, "modes": modes(m)})).collect();
     Ok(json!({
         "ok": true, "measured": true, "n_considered": n_points, "days_with_data": days.len(),
         "bucket": bucket, "from": from, "to": to,
         "totals": modes(&totals), "buckets": buckets_json, "top_places": top, "new_places": new_places,
         "places_considered": ranked.len(), "longest_trip": longest,
+        "areas": areas_json, "areas_considered": area_rows.len(),
     }))
 }
 
@@ -1101,9 +1199,87 @@ async fn stats(State(state): State<AppState>, Query(q): Query<StatsQ>) -> Respon
     let (from, to) = (q.from, q.to);
     let t = now();
     match state.store.read_async(move |c| compute_stats(c, from, to, bucket, off_s, t)).await {
-        Ok(v) => Json(v).into_response(),
+        Ok(v) => {
+            let pending: Vec<(String, f64, f64)> = v["areas"].as_array().map(|a| a.iter()
+                .filter(|x| x["name_status"] == "pending")
+                .filter_map(|x| Some((x["key"].as_str()?.to_string(), x["lat"].as_f64()?, x["lon"].as_f64()?)))
+                .take(AREA_NAMES_PER_CALL).collect()).unwrap_or_default();
+            if !pending.is_empty() {
+                spawn_area_names(state.clone(), pending);
+            }
+            Json(v).into_response()
+        }
         Err(e) => server_error(e),
     }
+}
+
+const AREA_NAMES_PER_CALL: usize = 20;
+
+/// Keys being resolved right now, so overlapping stats calls do not ask twice.
+fn area_names_in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Name areas in the background: one Nominatim reverse lookup per area, about
+/// one a second (its usage policy), each cached in location_place_names.
+/// AMUX_REVERSE_GEOCODE=0 turns it off; AMUX_NOMINATIM_URL points it elsewhere.
+fn spawn_area_names(state: AppState, wanted: Vec<(String, f64, f64)>) {
+    if std::env::var("AMUX_REVERSE_GEOCODE").as_deref() == Ok("0") {
+        return;
+    }
+    let mine: Vec<(String, f64, f64)> = {
+        let mut set = area_names_in_flight().lock().unwrap_or_else(|e| e.into_inner());
+        wanted.into_iter().filter(|(k, _, _)| set.insert(k.clone())).collect()
+    };
+    if mine.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let base = std::env::var("AMUX_NOMINATIM_URL").unwrap_or_else(|_| "https://nominatim.openstreetmap.org".into());
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build();
+        let (mut named, mut failed) = (0usize, 0usize);
+        for (i, (key, lat, lon)) in mine.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            }
+            let url = format!("{base}/reverse?format=jsonv2&lat={lat:.5}&lon={lon:.5}&zoom=10&addressdetails=1");
+            let got: Option<Value> = match &client {
+                Ok(cl) => match cl.get(&url).header("User-Agent", "amux/1.0 (location history)").header("Accept-Language", "en").send().await {
+                    Ok(r) if r.status().is_success() => r.json().await.ok(),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            let (name, status) = match &got {
+                Some(v) => match area_name(v) { Some(n) => (Some(n), "named"), None => (None, "none") },
+                None => (None, "failed"),
+            };
+            if status == "failed" { failed += 1 } else { named += 1 }
+            let (k, la, lo, t) = (key.clone(), *lat, *lon, now());
+            let res = write_value(&state, move |c| c.execute(
+                "INSERT INTO location_place_names (key, name, status, lat, lon, fetched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(key) DO UPDATE SET name = excluded.name, status = excluded.status, lat = excluded.lat,
+                   lon = excluded.lon, fetched_at = excluded.fetched_at",
+                params![k, name, status, la, lo, t])).await;
+            if let Err(e) = res {
+                tracing::warn!(verdict = "location_area_name_store_failed", key = %key, error = %e, "area name not cached");
+            }
+        }
+        {
+            let mut set = area_names_in_flight().lock().unwrap_or_else(|e| e.into_inner());
+            for (k, _, _) in &mine {
+                set.remove(k);
+            }
+        }
+        if failed > 0 {
+            tracing::warn!(verdict = "location_area_names_partial", measured = true, n_considered = mine.len(), named, failed,
+                "some areas could not be named; retried after a day");
+        } else {
+            tracing::info!(verdict = "location_area_names_resolved", measured = true, n_considered = mine.len(), named,
+                "areas named for Top Places");
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1196,6 +1372,73 @@ mod tests {
         // Asked again for a later range only, the same place is no longer new.
         let later = compute_stats(&c, t + 1000.0, t + 7200.0, "day", 0.0, t + 5000.0).unwrap();
         assert!(later["new_places"].as_array().unwrap().iter().all(|p| p["id"] != v["new_places"][0]["id"]), "{later}");
+    }
+
+    #[test]
+    fn area_names_read_like_city_and_region() {
+        let ny = json!({"address": {"city": "New York", "state": "New York", "ISO3166-2-lvl4": "US-NY", "country_code": "us"}});
+        assert_eq!(area_name(&ny).as_deref(), Some("New York, NY"));
+        let bath = json!({"address": {"town": "Bath", "state": "England", "country_code": "gb"}});
+        assert_eq!(area_name(&bath).as_deref(), Some("Bath, England"));
+        let paris = json!({"address": {"city": "Paris", "country": "France", "country_code": "fr"}});
+        assert_eq!(area_name(&paris).as_deref(), Some("Paris, France"));
+        assert_eq!(area_name(&json!({"address": {"road": "I-87"}})), None);
+        assert_eq!(area_name(&json!({"error": "Unable to geocode"})), None);
+    }
+
+    #[test]
+    fn per_fix_mode_uses_motion_first_then_speed() {
+        let c = crate::db::migrate::test_memdb();
+        let t = 1_790_000_000.0;
+        let pts = vec![
+            InPoint { activity: Some("automotive".into()), speed: Some(1.0), ..inp("auto", t) },
+            InPoint { activity: Some("cycling".into()), ..inp("bike", t + 1.0) },
+            InPoint { activity: None, speed: Some(12.0), ..inp("fast", t + 2.0) },
+            InPoint { activity: None, speed: Some(4.0), ..inp("mid", t + 3.0) },
+            InPoint { activity: None, speed: Some(1.3), ..inp("slow", t + 4.0) },
+            InPoint { activity: Some("stationary".into()), speed: Some(-1.0), ..inp("still", t + 5.0) },
+        ];
+        db_ingest_points(&c, "iphone", &pts, t + 10.0).unwrap();
+        let mut stmt = c.prepare(&format!("SELECT id, {MODE_SQL} FROM location_points ORDER BY ts")).unwrap();
+        let got: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect();
+        let want = [("auto", "driving"), ("bike", "cycling"), ("fast", "driving"), ("mid", "cycling"), ("slow", "walking"), ("still", "still")];
+        assert_eq!(got, want.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn areas_group_stops_into_named_areas_ranked_by_visits() {
+        let c = crate::db::migrate::test_memdb();
+        let t = 1_790_049_600.0;
+        let stay = |id: &str, lat: f64, lon: f64, at: f64| vec![
+            InPoint { activity: Some("stationary".into()), speed: Some(0.0), lat, lon, ..inp(&format!("{id}1"), at) },
+            InPoint { activity: Some("stationary".into()), speed: Some(0.0), lat: lat + 0.00002, lon, ..inp(&format!("{id}2"), at + 1200.0) },
+        ];
+        // Area A (two places ~1 km apart, three stays) and area B (one stay).
+        let mut pts = Vec::new();
+        pts.extend(stay("a", 40.712, -73.99, t));
+        pts.extend(stay("b", 40.721, -73.99, t + 4000.0));
+        pts.extend(stay("c", 40.712, -73.99, t + 8000.0));
+        pts.extend(stay("d", 41.512, -74.5, t + 12000.0));
+        db_ingest_points(&c, "iphone", &pts, t + 20000.0).unwrap();
+        let ka = area_key(40.712, -73.99);
+        let kb = area_key(41.512, -74.5);
+        assert_eq!(ka, area_key(40.721, -73.99), "both A places share one area");
+        c.execute("INSERT INTO location_place_names (key, name, status, lat, lon, fetched_at) VALUES (?1, 'New York, NY', 'named', 40.7, -74.0, ?2)",
+            params![ka, t]).unwrap();
+        let v = compute_stats(&c, t - 3600.0, t + 20000.0, "day", 0.0, t + 20000.0).unwrap();
+        let areas = v["areas"].as_array().unwrap();
+        assert_eq!(areas.len(), 2, "{v}");
+        assert_eq!((areas[0]["name"].as_str(), areas[0]["visits"].as_i64(), areas[0]["name_status"].as_str()),
+            (Some("New York, NY"), Some(3), Some("named")), "{v}");
+        assert_eq!((areas[1]["key"].as_str(), areas[1]["name_status"].as_str()), (Some(kb.as_str()), Some("pending")));
+        // A recent failed lookup reads "unavailable"; an old one is retried ("pending").
+        c.execute("INSERT INTO location_place_names (key, name, status, lat, lon, fetched_at) VALUES (?1, NULL, 'failed', 0, 0, ?2)",
+            params![kb, t + 19000.0]).unwrap();
+        let v = compute_stats(&c, t - 3600.0, t + 20000.0, "day", 0.0, t + 20000.0).unwrap();
+        assert_eq!(v["areas"][1]["name_status"], "unavailable");
+        let v = compute_stats(&c, t - 3600.0, t + 20000.0, "day", 0.0, t + 19000.0 + AREA_RETRY_S + 1.0).unwrap();
+        assert_eq!(v["areas"][1]["name_status"], "pending");
+        assert_eq!(v["areas_considered"], 2);
     }
 
     #[test]

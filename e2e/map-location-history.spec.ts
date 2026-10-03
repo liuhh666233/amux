@@ -64,6 +64,9 @@ test('Map > Location history lists a day, draws it, and focuses a trip', async (
   await tab.click();
   await expect(tab).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#map-pins-pane')).toBeHidden();
+  // The overview is the default; the day timeline is one tap away.
+  await page.locator('#map-loc-open-day').click();
+  await expect(page.locator('#map-loc-daypane')).toBeVisible();
   await expect(page.locator('#map-loc-summary')).toContainText('212 points');
   await expect(page.locator('#map-loc-summary')).toContainText('2 trips');
   const rows = page.locator('.map-loc-row');
@@ -104,7 +107,8 @@ test('Map > Location history says so when a day has nothing, and shows the iPhon
   await page.waitForFunction(() => typeof (window as any)._mapSidebarTab === 'function');
   await openMapSidebar(page);
   await page.evaluate(() => (window as any)._mapSidebarTab('history'));
-  await expect(page.locator('.map-loc-empty')).toContainText('Location history');
+  await page.evaluate(() => (window as any)._locShowDay());
+  await expect(page.locator('#map-loc-list .map-loc-empty')).toContainText('Location history');
   // The native app calls back with its status; the switch and counts render.
   await page.evaluate(() => (window as any).__amuxNativeLocation({enabled: true, authorization: 'whenInUse', precise: false, motion: 'on', pending: 7}));
   // 5e35f6c3: the recorder controls live in the collapsed Settings section.
@@ -120,62 +124,111 @@ test('Map > Location history says so when a day has nothing, and shows the iPhon
 const STATS = {
   ok: true, measured: true, n_considered: 5400, days_with_data: 3, bucket: 'day',
   totals: {
-    walking: {distance_m: 6200, moving_s: 4400, trips: 5, avg_speed_mps: 1.41},
-    driving: {distance_m: 48000, moving_s: 3600, trips: 2, avg_speed_mps: 13.3},
+    walking: {distance_m: 1609.344 * 12.5, moving_s: 4400, trips: 5, avg_speed_mps: 1.41},
+    driving: {distance_m: 1609.344 * 300, moving_s: 3600, trips: 2, avg_speed_mps: 13.3},
   },
-  buckets: [{bucket: '2026-09-29', modes: {walking: {distance_m: 3000, moving_s: 2000, trips: 2, avg_speed_mps: 1.5}}},
-    {bucket: '2026-09-30', modes: {driving: {distance_m: 48000, moving_s: 3600, trips: 2, avg_speed_mps: 13.3}}}],
-  top_places: [{id: 'place_1_2', lat: 40.7411, lon: -73.9897, time_s: 86000, visits: 3, new: false}],
-  new_places: [{id: 'place_3_4', lat: 40.9, lon: -73.9, time_s: 3600, visits: 1, new: true}],
-  places_considered: 2,
-  longest_trip: {id: 'trip_d1', kind: 'trip', mode: 'driving', start: 1790866800, end: 1790868600, duration_s: 1800, distance_m: 30000},
+  buckets: [], top_places: [], new_places: [], places_considered: 7, longest_trip: null,
+  areas: [
+    {key: 'a_1', name: 'New York, NY', name_status: 'named', visits: 1842, time_s: 9e5, lat: 40.71, lon: -73.99},
+    {key: 'a_2', name: null, name_status: 'pending', visits: 312, time_s: 2e5, lat: 47.6, lon: -122.3},
+    {key: 'a_3', name: 'Hudson Valley, NY', name_status: 'named', visits: 188, time_s: 1e5, lat: 41.7, lon: -74.0},
+    {key: 'a_4', name: 'Los Angeles, CA', name_status: 'named', visits: 142, time_s: 9e4, lat: 34.05, lon: -118.24},
+    {key: 'a_5', name: 'San Francisco, CA', name_status: 'named', visits: 128, time_s: 8e4, lat: 37.77, lon: -122.42},
+    {key: 'a_6', name: 'Boston, MA', name_status: 'named', visits: 40, time_s: 5e4, lat: 42.36, lon: -71.06},
+  ],
+  areas_considered: 6,
 };
+const HEAT = {ok: true, measured: true, n_considered: 900, cell_deg: 0.00045, n_cells: 4, truncated: false,
+  points_by_mode: {driving: 600, walking: 250, still: 50},
+  cells: [[40.7411, -73.9897, 600, 'driving'], [40.75, -73.99, 250, 'walking'], [40.9, -73.9, 50, 'still'], [40.76, -73.98, 20, 'driving']]};
 
-test('Map > Location history shows stats, a heatmap layer and raw export links', async ({ page }) => {
-  let statsAsked = '';
-  await page.route('**/api/map/location/timeline**', route => route.fulfill({json: {ok: true, measured: true, n_considered: 0, segments: []}}));
-  await page.route('**/api/map/location/stats**', async route => { statsAsked = route.request().url(); await route.fulfill({json: STATS}); });
-  await page.route('**/api/map/location/heatmap**', route => route.fulfill({json: {ok: true, measured: true, n_considered: 900, cell_deg: 0.00045,
-    n_cells: 3, truncated: false, cells: [[40.7411, -73.9897, 600], [40.75, -73.99, 250], [40.9, -73.9, 50]]}}));
+test('Map > Location history overview: mode switches, period, distances, top places and a per-mode heatmap', async ({ page }) => {
+  const statsAsked: string[] = [], heatAsked: string[] = [];
+  await page.route('**/api/map/location/stats**', async route => {
+    statsAsked.push(route.request().url());
+    await route.fulfill({json: STATS});
+  });
+  await page.route('**/api/map/location/heatmap**', async route => { heatAsked.push(route.request().url()); await route.fulfill({json: HEAT}); });
   await page.route('**/api/map/location/export**', route => route.fulfill({body: 'id,ts\na,1\nb,2\n', contentType: 'text/csv',
     headers: {'content-disposition': 'attachment; filename="amux-location-1-2.csv"', 'x-amux-rows': '2', 'x-amux-truncated': '0'}}));
-  await page.addInitScript(() => { localStorage.setItem('amux_walkthrough_done', '1'); localStorage.setItem('amux_map_tab', 'history'); });
+  await page.addInitScript(() => { localStorage.setItem('amux_walkthrough_done', '1'); localStorage.setItem('amux_map_tab', 'history');
+    localStorage.removeItem('amux_loc_period'); localStorage.removeItem('amux_loc_modes_off'); });
   await page.goto('/');
   await page.waitForFunction(() => typeof (window as any)._mapSidebarTab === 'function');
   await openMapSidebar(page);
   await page.evaluate(() => (window as any)._mapSidebarTab('history'));
-  // Stats: per-mode distance and speed, places, longest trip.
-  await page.locator('#map-loc-view-stats').click();
-  await expect(page.locator('#map-loc-view-stats')).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('#map-loc-daypane')).toBeHidden();
-  const body = page.locator('#map-loc-stats-body');
-  await expect(body).toContainText('5400 points');
-  await expect(body).toContainText('Driving');
-  await expect(body).toContainText('47.9 km/h');
-  await expect(body).toContainText('Longest trip');
-  await expect(body).toContainText('New places: 1');
-  const q = new URL(statsAsked).searchParams;
-  expect(Number(q.get('to')) - Number(q.get('from'))).toBe(30 * 86400);
-  expect(q.get('tz_offset_min')).not.toBeNull();
-  // Heatmap: one canvas circle per cell on the map.
-  await openMapSidebar(page);
-  await page.locator('#map-loc-heat').click();
-  await expect(page.locator('#map-loc-heat')).toHaveAttribute('aria-pressed', 'true');
-  await expect.poll(() => page.evaluate(() => { const l = (globalThis as any).eval('_locHeatLayer'); return l ? l.getLayers().length : 0; })).toBe(3);
-  // Export asks for the shown window in the chosen format.
-  await page.locator('#map-loc-view-day').click();
-  const exported = page.waitForRequest(r => r.url().includes('/api/map/location/export'));
+  // Default period is All; the request spans ten years.
+  await expect(page.locator('#map-loc-seg button[data-p="all"]')).toHaveAttribute('aria-checked', 'true');
+  await expect.poll(() => statsAsked.length).toBeGreaterThan(0);
+  let q = new URL(statsAsked.at(-1)!).searchParams;
+  expect(Number(q.get('to')) - Number(q.get('from'))).toBe(3650 * 86400);
+  // Mode switches: Drive, Walk, Bike always; Stays because the heatmap has it.
+  const modes = page.locator('#map-loc-modes [role="switch"]');
+  await expect(modes).toHaveCount(4);
+  await expect(page.locator('#map-loc-modes')).toContainText('Drive');
+  await expect(page.locator('#map-loc-modes')).toContainText('Bike');
+  // Distances in the reader's units (miles for en-US), "none" for a mode with nothing.
+  const dist = page.locator('#map-loc-dist');
+  await expect(dist).toContainText(/Drive\s*300 mi/);
+  await expect(dist).toContainText(/Walk\s*12\.5 mi/);
+  await expect(dist).toContainText(/Bike\s*none/);
+  // Top places: five, named or pending, then All Places.
+  const places = page.locator('#map-loc-places .map-loc-place');
+  await expect(places).toHaveCount(5);
+  await expect(places.first()).toContainText('New York, NY');
+  await expect(places.first()).toContainText('1,842 visits');
+  await expect(places.nth(1)).toContainText('Naming this area');
+  await page.locator('#map-loc-allplaces').click();
+  await expect(places).toHaveCount(6);
+  // Heatmap: one dot per cell, a legend per mode shown.
+  const dots = () => page.evaluate(() => { const l = (globalThis as any).eval('_locHeatLayer'); return l ? l.getLayers().length : 0; });
+  await expect.poll(dots).toBe(4);
+  await expect(page.locator('#map-loc-legend .map-loc-legend-row')).toHaveCount(3);
+  await expect(page.locator('#map-loc-legend')).toContainText('More activity');
+  // Every mode row is a full-height tap target that is not overlapped: on a
+  // short phone the cards once shrank and the rows sat over the period control.
+  for (const r of await page.locator('#map-loc-modes [role="switch"]').all()) {
+    const hit = await r.evaluate(el => { el.scrollIntoView({block: 'center'}); const b = el.getBoundingClientRect();
+      return {h: b.height, own: el.contains(document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2))}; });
+    expect(hit.h).toBeGreaterThanOrEqual(44);
+    expect(hit.own).toBe(true);
+  }
+  // Switching Drive off filters the distances and the heatmap.
+  await page.locator('#map-loc-modes [data-mode="driving"]').click();
+  await expect(page.locator('#map-loc-modes [data-mode="driving"]')).toHaveAttribute('aria-checked', 'false');
+  await expect(dist).not.toContainText('Drive');
+  await expect.poll(dots).toBe(2);
+  await expect(page.locator('#map-loc-legend .map-loc-legend-row')).toHaveCount(2);
+  // Period: 7D asks for seven days.
+  await page.locator('#map-loc-seg button[data-p="7d"]').click();
+  await expect.poll(() => new URL(statsAsked.at(-1)!).searchParams.get('from')).not.toBe(q.get('from'));
+  q = new URL(statsAsked.at(-1)!).searchParams;
+  expect(Number(q.get('to')) - Number(q.get('from'))).toBe(7 * 86400);
+  expect(new URL(heatAsked.at(-1)!).searchParams.get('from')).toBe(q.get('from'));
+  // Export lives in the Settings section at the bottom and goes through fetch.
   await openLocSettings(page);
+  const exported = page.waitForRequest(r => r.url().includes('/api/map/location/export'));
   await page.locator('.map-loc-export').getByRole('button', {name: 'CSV'}).click();
-  const eu = new URL((await exported).url());
-  expect(eu.searchParams.get('format')).toBe('csv');
-  expect(Number(eu.searchParams.get('to')) - Number(eu.searchParams.get('from'))).toBeGreaterThanOrEqual(23 * 3600);
-  // It went through fetch (which carries the owner bearer) and says how many rows.
+  expect(new URL((await exported).url()).searchParams.get('format')).toBe('csv');
   await expect(page.getByText('Exported 2 raw points')).toBeVisible();
 });
 
+test('Map > Location history overview says when a period has nothing', async ({ page }) => {
+  await page.route('**/api/map/location/stats**', route => route.fulfill({json: {ok: true, measured: true, n_considered: 0, days_with_data: 0,
+    totals: {}, buckets: [], top_places: [], new_places: [], places_considered: 0, areas: [], areas_considered: 0}}));
+  await page.route('**/api/map/location/heatmap**', route => route.fulfill({json: {ok: true, measured: true, n_considered: 0, cells: [], n_cells: 0, points_by_mode: {}}}));
+  await page.addInitScript(() => { localStorage.setItem('amux_walkthrough_done', '1'); localStorage.setItem('amux_map_tab', 'history'); localStorage.setItem('amux_loc_period', '7d'); });
+  await page.goto('/');
+  await page.waitForFunction(() => typeof (window as any)._mapSidebarTab === 'function');
+  await openMapSidebar(page);
+  await page.evaluate(() => (window as any)._mapSidebarTab('history'));
+  await expect(page.locator('#map-loc-dist')).toHaveText('Nothing recorded in the last 7 days.');
+  await expect(page.locator('#map-loc-places')).toContainText('No places in the last 7 days.');
+  await expect(page.locator('#map-loc-measured')).toHaveText('No points in the last 7 days.');
+  await expect(page.locator('#map-loc-legend')).toHaveCount(0);
+});
+
 test('Map > Location history shows the iPhone recording detail and delivered vs stored', async ({ page }) => {
-  await page.route('**/api/map/location/timeline**', route => route.fulfill({json: {ok: true, measured: true, n_considered: 0, segments: []}}));
   await page.addInitScript(() => { localStorage.setItem('amux_walkthrough_done', '1'); localStorage.setItem('amux_map_tab', 'history'); });
   await page.goto('/');
   await page.waitForFunction(() => typeof (window as any)._mapSidebarTab === 'function');

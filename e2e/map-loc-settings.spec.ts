@@ -30,7 +30,7 @@ test('recorder controls live in a collapsed Settings section at the bottom of Lo
   await expect(page.locator('#map-loc-settings-sum')).toHaveText('· This iPhone: recording off · 51 waiting');
   // Below the day view, not above it.
   const accTop = await acc.evaluate(e => e.getBoundingClientRect().top);
-  const viewsTop = await page.locator('#map-loc-view-day').evaluate(e => e.getBoundingClientRect().top);
+  const viewsTop = await page.locator('#map-loc-overview').evaluate(e => e.getBoundingClientRect().top);
   expect(accTop).toBeGreaterThan(viewsTop);
   await acc.locator('summary').click();
   await page.locator('#map-loc-native').getByRole('button', { name: 'Turn on' }).click();
