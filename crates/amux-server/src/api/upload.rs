@@ -28,6 +28,11 @@ const STALE_SECS: u64 = 3600;
 /// authoritative and `elided` says how many were not named, so a large backlog
 /// cannot flood the log while the claim stays auditable (the AF-179 shape).
 const SWEEP_LOG_DIRS: usize = 12;
+/// The chunk size every client is expected to use (app.js CHUNK_SIZE), and the
+/// most a single chunk PUT may carry. `start` raises a client's chunk count so
+/// no chunk can exceed `CHUNK_BYTES`; the body limit leaves protocol slack.
+const CHUNK_BYTES: u64 = 5 * 1024 * 1024;
+const CHUNK_BODY_LIMIT: usize = 8 * 1024 * 1024;
 
 struct InFlight {
     operation: Arc<tokio::sync::Mutex<()>>,
@@ -172,7 +177,7 @@ pub fn routes() -> Router<AppState> {
                 // 2026-08-09, found via /api/logs/analyze in one call). 8MB =
                 // chunk + protocol slack; anything larger is a client bug and
                 // the 413 is then honest.
-                axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024),
+                axum::extract::DefaultBodyLimit::max(CHUNK_BODY_LIMIT),
             ),
         )
         .route(
@@ -191,9 +196,11 @@ pub fn serve_routes() -> Router<AppState> {
 
 #[derive(Deserialize)]
 struct StartReq {
+    /// `filename` is what the iOS share extension sends. Before the alias it
+    /// was dropped and every shared file was stored as `upload`.
+    #[serde(alias = "filename")]
     name: Option<String>,
     #[serde(default = "default_size")]
-    #[allow(dead_code)]
     size: u64,
     #[serde(default = "default_chunks")]
     chunks: usize,
@@ -221,7 +228,20 @@ async fn start(state: UploadState, Json(body): Json<StartReq>) -> Response {
         .chars()
         .take(120)
         .collect();
-    let total_chunks = body.chunks.max(1);
+    // A client that sends `size` but no (or too few) `chunks` would otherwise
+    // PUT more than CHUNK_BODY_LIMIT in one chunk. axum answers 413 only after
+    // the client has streamed ~9MB, then drops the connection, which iOS
+    // reports as "The network connection was lost" (the AmuxShare extension,
+    // 2026-10-03: it sent no `chunks`, so every file over 8MB failed). Raise
+    // the count here; clients already slice by the `chunks` this returns.
+    let min_chunks = body.size.div_ceil(CHUNK_BYTES) as usize;
+    let total_chunks = body.chunks.max(min_chunks).max(1);
+    if total_chunks > body.chunks.max(1) {
+        tracing::warn!(target: "amux::upload", size = body.size, requested = body.chunks,
+                       chunks = total_chunks, name = %raw_name,
+                       "upload/start: client asked for chunks larger than {CHUNK_BYTES} bytes; \
+                        raised the chunk count so no chunk PUT exceeds the body limit");
+    }
     let uid = format!("{:012x}", rand_id());
 
     let dir = uploads_dir().join(format!(".chunked-{uid}"));
@@ -741,6 +761,83 @@ mod tests {
             build_hash: "test".into(),
             auth_token: None,
             reconciled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+
+    /// The iOS share extension's exact start body: `filename`, `size`, no
+    /// `chunks`. Before the fix this returned `chunks: 1`, the extension PUT a
+    /// 20MB file as one chunk, and the 413 dropped the connection mid-stream.
+    #[tokio::test]
+    async fn start_without_chunks_never_asks_for_an_oversized_chunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::api::settings::test_env::set_home(tmp.path());
+        let app: Router = Router::new()
+            .nest("/api/upload", routes())
+            .with_state(test_state());
+        let size: u64 = 20 * 1024 * 1024 + 1;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/upload/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"filename":"location.json","size":{size}}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let chunks = v["chunks"].as_u64().unwrap();
+        assert_eq!(chunks, 5);
+        assert!(size.div_ceil(chunks) as usize <= CHUNK_BODY_LIMIT);
+
+        // And the name survives: `filename` used to be dropped, so the file
+        // was stored as `<id>-upload`.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/upload/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"filename":"a.txt","size":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        for (method, uri, payload) in [
+            ("PUT", format!("/api/upload/{id}/chunk/0"), "hi"),
+            ("POST", format!("/api/upload/{id}/finish"), ""),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::from(payload))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            if method == "POST" {
+                let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let v: Value = serde_json::from_slice(&body).unwrap();
+                assert!(v["path"].as_str().unwrap().ends_with("-a.txt"), "{v}");
+            }
         }
     }
 
