@@ -13799,7 +13799,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1239';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1240';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -31346,6 +31346,9 @@ const _LOC_MODE = {
   still:   {label: 'Stays', short: 'Stays', color: '#c69026', icon: '\u{1F4CD}'},
   unknown: {label: 'Moving', short: 'Moving', color: '#8b949e', icon: '•'},
   stop:    {label: 'Stop', short: 'Stop', color: '#e3b341', icon: '\u{1F4CD}'},
+  // The server's "gap": two places with no fixes between them (the phone
+  // stopped recording). Straight-line distance, drawn dashed, never a trip.
+  gap:     {label: 'Moved, not recorded', short: 'Gap', color: '#8b949e', icon: '\u{2754}'},
 };
 function _mapSidebarTab(tab) {
   _mapTab = tab === 'history' ? 'history' : 'pins';
@@ -31451,18 +31454,21 @@ function _locRender(d) {
   const trips = _locSegments.filter(s => s.kind === 'trip');
   const dist = trips.reduce((a, s) => a + (s.distance_m || 0), 0);
   const moving = trips.reduce((a, s) => a + (s.duration_s || 0), 0);
-  if (summary) summary.textContent = d.n_considered
+  const gaps = _locSegments.filter(s => s.kind === 'gap').length;
+  if (summary) summary.textContent = (d.n_considered || _locSegments.length)
     ? d.n_considered + ' points · ' + trips.length + ' trip' + (trips.length === 1 ? '' : 's') + ' · ' + _locFmtDist(dist) + ' · ' + _locFmtDur(moving) + ' moving'
+      + (gaps ? ' · ' + gaps + ' move' + (gaps === 1 ? '' : 's') + ' not recorded' : '')
     : 'No points recorded' + (_locRange ? ' in this range.' : ' this day.');
   if (!_locSegments.length) {
     list.innerHTML = '<div class="map-loc-empty">' + _locEmptyHint() + '</div>';
     return;
   }
   list.innerHTML = _locSegments.map((s, i) => {
-    const m = _LOC_MODE[s.kind === 'stop' ? 'stop' : (s.mode || 'unknown')] || _LOC_MODE.unknown;
+    const m = _LOC_MODE[s.kind === 'stop' || s.kind === 'gap' ? s.kind : (s.mode || 'unknown')] || _LOC_MODE.unknown;
     const title = s.kind === 'stop' ? 'Stop' : m.label + (s.mode_confidence === 'inferred' ? ' (inferred)' : '');
     const meta = _locFmtTime(s.start) + '–' + _locFmtTime(s.end) + ' · ' + _locFmtDur(s.duration_s)
-      + (s.kind === 'trip' && s.distance_m ? ' · ' + _locFmtDist(s.distance_m) : '');
+      + (s.kind === 'trip' && s.distance_m ? ' · ' + _locFmtDist(s.distance_m) : '')
+      + (s.kind === 'gap' && s.distance_m ? ' · ~' + _locFmtDist(s.distance_m) + ' apart, phone sent no GPS' : '');
     return '<button type="button" class="map-loc-row" data-loc-i="' + i + '" onclick="_locFocus(' + i + ')">'
       + '<span class="map-loc-dot" style="background:' + m.color + '"></span>'
       + '<span class="map-loc-row-main"><span class="map-loc-row-title">' + m.icon + ' ' + esc(title) + '</span>'
@@ -31480,6 +31486,9 @@ function _locDraw(fit) {
     if (s.kind === 'trip' && Array.isArray(s.path) && s.path.length > 1) {
       const m = _LOC_MODE[s.mode] || _LOC_MODE.unknown;
       L.polyline(s.path, {color: m.color, weight: 5, opacity: 0.85}).on('click', () => _locFocus(i)).addTo(_locLayer);
+    } else if (s.kind === 'gap' && Array.isArray(s.from) && Array.isArray(s.to)) {
+      L.polyline([s.from, s.to], {color: _LOC_MODE.gap.color, weight: 3, opacity: 0.8, dashArray: '6 8'})
+        .bindTooltip('Not recorded · ' + _locFmtTime(s.start) + '–' + _locFmtTime(s.end)).on('click', () => _locFocus(i)).addTo(_locLayer);
     } else if (s.kind === 'stop') {
       L.circleMarker([s.lat, s.lon], {radius: 7, color: _LOC_MODE.stop.color, fillOpacity: 0.7, weight: 2})
         .bindTooltip('Stop · ' + _locFmtTime(s.start) + '–' + _locFmtTime(s.end)).on('click', () => _locFocus(i)).addTo(_locLayer);
@@ -31499,6 +31508,8 @@ function _locFocus(i) {
   if (s.kind === 'trip' && Array.isArray(s.bbox)) {
     _map.fitBounds([[s.bbox[0], s.bbox[1]], [s.bbox[2], s.bbox[3]]], {padding: [30, 30], maxZoom: 17});
     if (Array.isArray(s.path)) _locHighlight = L.polyline(s.path, {color: '#ffffff', weight: 9, opacity: 0.35}).addTo(_map);
+  } else if (s.kind === 'gap' && Array.isArray(s.from) && Array.isArray(s.to)) {
+    _map.fitBounds([s.from, s.to], {padding: [30, 30], maxZoom: 17});
   } else if (s.kind === 'stop') {
     _map.setView([s.lat, s.lon], Math.max(_map.getZoom(), 16));
   }

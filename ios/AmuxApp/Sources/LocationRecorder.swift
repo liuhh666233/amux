@@ -48,6 +48,17 @@ final class LocationRecorder: NSObject, ObservableObject {
     private var serviceSession: AnyObject?         // CLServiceSession on iOS 18+
     private var uploadTimer: Timer?
     private var uploading = false
+    /// Live-stream health (AMUX-5549). 2026-10-03: live fixes stopped at 9:31
+    /// and nothing restarted them; only wake-up fixes and visits arrived until
+    /// evening, so every move that day went unrecorded. The stream is now
+    /// checked on every wake-up, foreground and timer tick, and restarted.
+    private var lastLiveFix: Double = 0
+    private var liveStationary = false
+    private var lastLiveRestart: Double = 0
+    @Published private(set) var liveRestarts = 0
+    /// Standard updates run as a backstop after a stall until live fixes resume.
+    private var backstop = false
+    private static let liveStallS: Double = 180
 
     let points: DurableBuffer<LocationSample>
     let visits: DurableBuffer<VisitSample>
@@ -68,6 +79,10 @@ final class LocationRecorder: NSObject, ObservableObject {
         NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.uploadInBackgroundTask() }
+        }
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.ensureLive(moved: false, why: "foreground") }
         }
     }
 
@@ -116,7 +131,10 @@ final class LocationRecorder: NSObject, ObservableObject {
         startContinuous()
         if uploadTimer == nil {
             uploadTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-                Task { @MainActor in await self?.upload() }
+                Task { @MainActor in
+                    self?.ensureLive(moved: false, why: "timer")
+                    await self?.upload()
+                }
             }
         }
         publish()
@@ -142,6 +160,7 @@ final class LocationRecorder: NSObject, ObservableObject {
     private func stopContinuous() {
         liveTask?.cancel()
         liveTask = nil
+        backstop = false
         if #available(iOS 17.0, *) {
             (backgroundSession as? CLBackgroundActivitySession)?.invalidate()
         }
@@ -171,16 +190,83 @@ final class LocationRecorder: NSObject, ObservableObject {
             serviceSession = CLServiceSession(authorization: .always, fullAccuracyPurposeKey: "history")
         }
         liveTask = Task { [weak self] in
+            var why = "live updates ended"
             do {
                 for try await update in CLLocationUpdate.liveUpdates(.otherNavigation) {
-                    if Task.isCancelled { break }
-                    guard let loc = update.location else { continue }
-                    await self?.record([loc], source: "live")
+                    if Task.isCancelled { return }
+                    let still: Bool
+                    if #available(iOS 18.0, *) {
+                        still = update.stationary
+                        // iOS 18 says why a stream carries no location; keep it visible.
+                        let blocked = [(update.authorizationDenied, "authorization denied"),
+                                       (update.authorizationDeniedGlobally, "Location Services off"),
+                                       (update.insufficientlyInUse, "needs Always or an active session"),
+                                       (update.serviceSessionRequired, "service session required"),
+                                       (update.locationUnavailable, "location unavailable")]
+                            .filter(\.0).map(\.1)
+                        if !blocked.isEmpty { await self?.noteError("live updates: " + blocked.joined(separator: ", ")) }
+                    } else {
+                        still = update.isStationary
+                    }
+                    await self?.noteLive(stationary: still, fix: update.location)
                 }
             } catch {
-                await self?.noteError("live updates stopped: \(error.localizedDescription)")
+                why = "live updates stopped: \(error.localizedDescription)"
             }
+            if Task.isCancelled { return }
+            // The stream ended by itself: clear it so the next check restarts it.
+            await self?.liveEnded(why)
         }
+    }
+
+    private func noteLive(stationary: Bool, fix: CLLocation?) {
+        liveStationary = stationary
+        guard let fix else { return }
+        lastLiveFix = Date().timeIntervalSince1970
+        if backstop {
+            backstop = false
+            manager.stopUpdatingLocation()
+        }
+        record([fix], source: "live")
+    }
+
+    private func liveEnded(_ why: String) {
+        liveTask = nil
+        noteError(why)
+        ensureLive(moved: true, why: "stream ended")
+    }
+
+    /// Restart the live stream when it is missing, or silent while the phone
+    /// moves. `moved` is true for a significant-change or visit wake-up, which
+    /// iOS only sends after real movement, so a stale stationary flag is ignored.
+    func ensureLive(moved: Bool, why: String) {
+        guard enabled, mode == .full else { return }
+        guard #available(iOS 17.0, *) else { return }
+        let now = Date().timeIntervalSince1970
+        let silent = now - lastLiveFix > Self.liveStallS
+        let stalled = liveTask == nil || (silent && (moved || !liveStationary))
+        guard stalled, now - lastLiveRestart > 120 else { return }
+        lastLiveRestart = now
+        liveRestarts += 1
+        liveTask?.cancel()
+        liveTask = nil
+        // The CLBackgroundActivitySession is kept: it can only be created in the
+        // foreground, and holding it is what lets the new stream run here.
+        startLiveUpdates()
+        if moved && UIApplication.shared.applicationState != .active {
+            // Backstop until live fixes come back: standard updates keep a
+            // woken app running and recording in the background.
+            backstop = true
+            manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+            manager.distanceFilter = kCLDistanceFilterNone
+            manager.activityType = .otherNavigation
+            manager.pausesLocationUpdatesAutomatically = false
+            manager.allowsBackgroundLocationUpdates = true
+            manager.showsBackgroundLocationIndicator = true
+            manager.startUpdatingLocation()
+        }
+        lastError = "live stream restarted (\(why))"
+        publish()
     }
 
     private func startMotion() {
@@ -328,7 +414,9 @@ final class LocationRecorder: NSObject, ObservableObject {
         }
         var s: [String: Any] = ["enabled": enabled, "authorization": auth, "precise": precise,
                                 "motion": motionState, "pending": pending, "mode": mode.rawValue,
-                                "delivered": delivered, "stored": stored, "motion_pending": motionPending]
+                                "delivered": delivered, "stored": stored, "motion_pending": motionPending,
+                                "live_restarts": liveRestarts, "live_stationary": liveStationary, "backstop": backstop]
+        if lastLiveFix > 0 { s["last_live_fix"] = lastLiveFix }
         if lastUpload > 0 { s["last_upload"] = lastUpload }
         if let lastError { s["last_error"] = lastError }
         return s
@@ -356,8 +444,11 @@ extension LocationRecorder: CLLocationManagerDelegate {
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         Task { @MainActor in
-            // iOS 16 standard updates, and significant-change wake-ups on every iOS.
+            // iOS 16 standard updates, the stall backstop, and significant-change
+            // wake-ups on every iOS. A wake-up means the phone moved: make sure
+            // the live stream is running to record the rest of the move.
             self.record(locations, source: "manager")
+            self.ensureLive(moved: true, why: "location wake-up")
         }
     }
 
@@ -371,6 +462,7 @@ extension LocationRecorder: CLLocationManagerDelegate {
                             h_acc: visit.horizontalAccuracy)
         Task { @MainActor in
             self.visits.append([v])
+            if departure != nil { self.ensureLive(moved: true, why: "visit ended") }
             await self.upload()
         }
     }

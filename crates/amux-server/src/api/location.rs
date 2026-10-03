@@ -48,6 +48,8 @@ const MAX_BATCH: usize = 5000;
 const STOP_RADIUS_M: f64 = 100.0;
 /// ... for at least this long.
 const STOP_MIN_S: f64 = 300.0;
+/// Wake-up fixes this long after the last live fix mean the live stream stalled.
+const LIVE_STALL_S: f64 = 1800.0;
 /// Longest gap between two fixes counted as moving time when weighting modes.
 const PAIR_CAP_S: f64 = 120.0;
 /// Most points a trip path carries in a timeline response.
@@ -223,8 +225,30 @@ async fn ingest_points(
     let n = batch.points.len();
     let device = batch.device.chars().take(100).collect::<String>();
     let t = now();
-    match write_value(&state, move |c| db_ingest_points(c, &device, &batch.points, t)).await {
-        Ok((accepted, duplicate, rejected)) => {
+    // A batch of only wake-up fixes ("manager": significant change, visit
+    // relaunch) from a phone that has streamed live fixes before means its
+    // continuous recording stalled. 2026-10-03: live stopped at 9:31 and the
+    // day's moves went unrecorded with nothing in the log to say so.
+    let wake_newest = batch.points.iter().filter(|p| p.source.as_deref() == Some("manager")).map(|p| p.ts).fold(f64::NAN, f64::max);
+    let batch_has_live = batch.points.iter().any(|p| p.source.as_deref() == Some("live"));
+    let dev = device.clone();
+    match write_value(&state, move |c| {
+        let out = db_ingest_points(c, &device, &batch.points, t)?;
+        let last_live: Option<f64> = if batch_has_live || wake_newest.is_nan() {
+            None
+        } else {
+            c.query_row("SELECT MAX(ts) FROM location_points WHERE device=?1 AND source='live'", [&device], |r| r.get(0))?
+        };
+        Ok((out, last_live))
+    })
+    .await
+    {
+        Ok(((accepted, duplicate, rejected), last_live)) => {
+            if let Some(live) = last_live.filter(|l| wake_newest - l > LIVE_STALL_S) {
+                tracing::warn!(target: "amux::location", verdict = "location_live_stalled", device = %dev,
+                    stalled_s = (wake_newest - live).round(), measured = true, n_considered = n,
+                    "location: phone sends only wake-up fixes; its live stream stopped (expected only in battery saver mode)");
+            }
             tracing::info!(target: "amux::location", verdict = "location_ingest", accepted, duplicate,
                 rejected = rejected.len(), measured = true, n_considered = n, "location points ingested");
             Json(json!({
@@ -505,7 +529,13 @@ pub(crate) fn segment(points: &[Pt], visits: &[Visit], now: f64) -> Vec<Value> {
         }
     }
     for &(a, b) in &trips {
-        out.push(trip_json(&points[a..b]));
+        let t = trip_json(&points[a..b]);
+        // A few fixes in seconds between two stops (9:18:09 to 9:18:16, 10 m)
+        // is the anchor rule handing over, not a trip.
+        if t["distance_m"].as_f64().unwrap_or(0.0) < 50.0 && t["duration_s"].as_f64().unwrap_or(0.0) < 60.0 {
+            continue;
+        }
+        out.push(t);
     }
     for s in &stops {
         out.push(json!({
@@ -514,6 +544,44 @@ pub(crate) fn segment(points: &[Pt], visits: &[Visit], now: f64) -> Vec<Value> {
         }));
     }
     out.sort_by(|a, b| a["start"].as_f64().unwrap_or(0.0).total_cmp(&b["start"].as_f64().unwrap_or(0.0)));
+    // 4. Gaps: travel the phone did not record (Ethan, 2026-10-03, "capturing
+    //    movements is wrong": live fixes stopped at 9:31 and the day read as
+    //    four stops back to back). Two neighbours that end and start at
+    //    different places with no fixes between them were joined by a move
+    //    nobody measured, so the timeline says so instead of hiding it.
+    let place = |s: &Value, end: bool| -> Option<(f64, f64)> {
+        if s["kind"] == "stop" {
+            Some((s["lat"].as_f64()?, s["lon"].as_f64()?))
+        } else {
+            let k = if end { "to" } else { "from" };
+            Some((s[k][0].as_f64()?, s[k][1].as_f64()?))
+        }
+    };
+    let fixes_between = |a: f64, b: f64| {
+        points.partition_point(|p| p.ts < b) - points.partition_point(|p| p.ts <= a)
+    };
+    let mut gaps = Vec::new();
+    for w in out.windows(2) {
+        let (Some(a), Some(b)) = (place(&w[0], true), place(&w[1], false)) else { continue };
+        let d = haversine_m(a.0, a.1, b.0, b.1);
+        let (s, e) = (w[0]["end"].as_f64().unwrap_or(0.0), w[1]["start"].as_f64().unwrap_or(0.0));
+        // Two point-derived stops seconds apart were recorded continuously;
+        // an iOS visit is coarse, so a move next to one counts at any length.
+        let visit = |v: &Value| v["id"].as_str().is_some_and(|id| id.starts_with("stop_visit_"));
+        let unrecorded = fixes_between(s, e) < 2 && (e - s >= 120.0 || visit(&w[0]) || visit(&w[1]));
+        if d <= STOP_RADIUS_M || !unrecorded {
+            continue;
+        }
+        gaps.push(json!({
+            "id": format!("gap_{}", w[0]["id"].as_str().unwrap_or("")), "kind": "gap",
+            "start": s, "end": e.max(s), "duration_s": (e - s).max(0.0),
+            "from": [a.0, a.1], "to": [b.0, b.1], "distance_m": d.round(), "point_count": 0,
+        }));
+    }
+    if !gaps.is_empty() {
+        out.extend(gaps);
+        out.sort_by(|a, b| a["start"].as_f64().unwrap_or(0.0).total_cmp(&b["start"].as_f64().unwrap_or(0.0)));
+    }
     out
 }
 
@@ -1158,7 +1226,7 @@ pub(crate) fn compute_stats(c: &Connection, from: f64, to: f64, bucket: &str, of
                     }
                     longest = Some(l);
                 }
-            } else {
+            } else if s["kind"] == "stop" {
                 let (lat, lon) = (s["lat"].as_f64().unwrap_or(0.0), s["lon"].as_f64().unwrap_or(0.0));
                 let p = places.entry(place_key(lat, lon)).or_default();
                 if p.visits == 0 {
@@ -1620,5 +1688,45 @@ mod tests {
         let segs = segment(&pts, &visits, t + 1000.0);
         assert_eq!(segs.len(), 1, "{segs:#?}");
         assert_eq!(segs[0]["id"], "stop_visit_v1");
+    }
+
+    #[test]
+    fn two_stops_at_different_places_with_no_fixes_between_have_an_unrecorded_gap() {
+        // The 2026-10-03 shape: live fixes stop, then only iOS visits arrive.
+        let t = 1_790_000_000.0;
+        let visits = vec![
+            Visit { id: "a".into(), arrival: t, departure: Some(t + 3600.0), lat: 40.73492, lon: -74.00258 },
+            Visit { id: "b".into(), arrival: t + 3601.0, departure: Some(t + 4300.0), lat: 40.73852, lon: -74.00286 },
+            // Same place as b: no move, so no gap.
+            Visit { id: "c".into(), arrival: t + 5000.0, departure: Some(t + 6000.0), lat: 40.73853, lon: -74.00287 },
+        ];
+        let segs = segment(&[], &visits, t + 7000.0);
+        let kinds: Vec<&str> = segs.iter().map(|s| s["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["stop", "gap", "stop", "stop"], "{segs:#?}");
+        let d = segs[1]["distance_m"].as_f64().unwrap();
+        assert!((350.0..450.0).contains(&d), "straight-line gap distance {d}");
+        assert_eq!(segs[1]["start"], json!(t + 3600.0));
+    }
+
+    #[test]
+    fn recorded_fixes_between_stops_are_never_a_gap_and_a_seconds_long_stub_is_not_a_trip() {
+        let t = 1_790_000_000.0;
+        let mut pts = Vec::new();
+        // Stop A, ten minutes still.
+        for k in 0..20 {
+            pts.push(pt(&format!("a{k}"), t + k as f64 * 30.0, 40.7000, -74.0000, Some(0.0), None));
+        }
+        // Seven fixes in seven seconds that shuffle 10 m: the anchor rule handing over.
+        for k in 0..7 {
+            pts.push(pt(&format!("s{k}"), t + 600.0 + k as f64, 40.70005 + k as f64 * 0.00001, -74.0, Some(1.5), None));
+        }
+        // Stop B 150 m north, ten minutes still.
+        for k in 0..20 {
+            pts.push(pt(&format!("b{k}"), t + 610.0 + k as f64 * 30.0, 40.70135, -74.0000, Some(0.0), None));
+        }
+        let segs = segment(&pts, &[], t + 2000.0);
+        let kinds: Vec<&str> = segs.iter().map(|s| s["kind"].as_str().unwrap()).collect();
+        assert!(!kinds.contains(&"gap"), "recorded fixes sit between the stops: {segs:#?}");
+        assert!(!kinds.contains(&"trip"), "a 7 s, 10 m shuffle is not a trip: {segs:#?}");
     }
 }

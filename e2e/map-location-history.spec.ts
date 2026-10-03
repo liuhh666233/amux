@@ -260,3 +260,36 @@ test('Map > Location history shows the iPhone recording detail and delivered vs 
   await expect(native.getByRole('button', {name: 'Battery saver'})).toHaveAttribute('aria-pressed', 'true');
   await expect(native).not.toContainText('not stored');
 });
+
+// AMUX-5550: a day whose live fixes stopped (2026-10-03) read as stops back to
+// back. The server now returns a "gap" between two places with no fixes, and
+// the timeline must say the move happened and was not recorded.
+test('Map > Location history shows an unrecorded move as a gap row and a dashed line', async ({ page }) => {
+  const GAP_DAY = {
+    ok: true, measured: true, n_considered: 4, visits_considered: 2, from: 0, to: 0,
+    segments: [
+      {id: 'stop_visit_a', kind: 'stop', start: 1791043856, end: 1791051308, duration_s: 7452, lat: 40.73492, lon: -74.00258, point_count: 1},
+      {id: 'gap_stop_visit_a', kind: 'gap', start: 1791051308, end: 1791051309, duration_s: 1,
+        from: [40.73492, -74.00258], to: [40.73852, -74.00286], distance_m: 401, point_count: 0},
+      {id: 'stop_visit_b', kind: 'stop', start: 1791051309, end: 1791052051, duration_s: 742, lat: 40.73852, lon: -74.00286, point_count: 0},
+    ],
+  };
+  await page.route('**/api/map/location/timeline**', route => route.fulfill({json: GAP_DAY}));
+  await page.addInitScript(() => { localStorage.setItem('amux_walkthrough_done', '1'); localStorage.removeItem('amux_map_tab'); });
+  await page.goto('/');
+  await page.waitForFunction(() => typeof (window as any).switchView === 'function' && typeof (window as any)._mapSidebarTab === 'function');
+  await openMapSidebar(page);
+  await page.locator('#map-tab-history').click();
+  await page.locator('#map-loc-open-day').click();
+  await expect(page.locator('#map-loc-summary')).toContainText('1 move not recorded');
+  const rows = page.locator('.map-loc-row');
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(1)).toContainText('Moved, not recorded');
+  await expect(rows.nth(1)).toContainText('phone sent no GPS');
+  // Drawn as a dashed line, never as a measured trip.
+  const dashed = await page.evaluate(() => {
+    const l = (globalThis as any).eval('_locLayer');
+    return l ? l.getLayers().filter((x: any) => x.options && x.options.dashArray).length : -1;
+  });
+  expect(dashed).toBe(1);
+});
