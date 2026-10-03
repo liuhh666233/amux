@@ -7078,12 +7078,31 @@ _land_priority_check() {
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority allowed: range touches gate path $hit; reason: $reason" >> "$log"
     return 0
   fi
+  # Fix forward of a red on main: allowed with no grant when a card the reason
+  # cites names this lane as the red's owner on one line (mixpeek-override,
+  # 2026-10-03: a grant per CI red made every fix a round trip through it).
+  if printf '%s' "$reason" | grep -qiE -- "${AMUX_LAND_PRIORITY_FIXFWD_RE:-fix[- ]?forward}"; then
+    local card url text owner_re="${AMUX_LAND_PRIORITY_OWNER_RE:-owns|owner|routed to|fix[- ]?forward}"
+    url="${AMUX_URL:-$(amux url 2>/dev/null || true)}"
+    for card in $(printf '%s' "$reason" | grep -oE '\b[A-Z][A-Z0-9]*-[0-9]+\b' | sort -u); do
+      [ -n "$url" ] || break
+      text="$(curl -sk --max-time 10 "$url/api/board/$card" 2>/dev/null | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+print(d.get("title") or ""); print(d.get("desc") or "")' 2>/dev/null)"
+      if printf '%s\n' "$text" | grep -F -- "$me" | grep -qiE -- "$owner_re"; then
+        printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority allowed: fix forward, $card names $me as the red's owner; reason: $reason" >> "$log"
+        return 0
+      fi
+    done
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority fix-forward unproven: no card in the reason names $me as an owner$([ -n "$url" ] || echo " (no amux url to read cards)"); reason: $reason" >> "$log"
+  fi
   if printf '%s' "$reason" | grep -qiE -- "${AMUX_LAND_PRIORITY_GRANT_RE:-grant}"; then
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority allowed by grant; reason: $reason" >> "$log"
     return 0
   fi
   printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "priority refused: range touches no gate path and the reason names no grant; reason: $reason" >> "$log"
-  echo "amux land: --priority refused: this range touches no gate path (${AMUX_LAND_PRIORITY_PATHS:-.githooks/ scripts/ci/ .github/workflows/ scripts/graft-push.sh}) and --reason names no grant. Queue it without --priority, or ask the orchestrator for a grant and name it in --reason." >&2
+  echo "amux land: --priority refused: this range touches no gate path (${AMUX_LAND_PRIORITY_PATHS:-.githooks/ scripts/ci/ .github/workflows/ scripts/graft-push.sh}) and --reason names no grant. Queue it without --priority, ask the orchestrator for a grant and name it in --reason, or for a fix forward of a red on main cite the card that names you as its owner (--reason \"fix forward <CARD>\")." >&2
   return 1
 }
 
@@ -7573,7 +7592,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.46"
+LAND_BEHAVIOR_VERSION="2026-10-02.47"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
