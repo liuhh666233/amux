@@ -166,6 +166,12 @@ TARGET_TIGHT_IDLE_H=${AMUX_CLEANUP_TARGET_TIGHT_IDLE_H:-6}
 VM_LIST_CMD=${AMUX_CLEANUP_VM_LIST_CMD:-colima list --json}
 VM_PRUNE_CMD=${AMUX_CLEANUP_VM_PRUNE_CMD:-docker --context colima-PROFILE builder prune -f}
 VM_TRIM_CMD=${AMUX_CLEANUP_VM_TRIM_CMD:-colima ssh -p PROFILE -- sudo fstrim -a}
+# Unused IMAGES in running colima VMs, past an age, every tick (MF-4043):
+# goal-shared reached 39 images / 148 GB (137 GB unused) on 2026-10-03 and the
+# host fell from 96 to 51 GB free in ~25 min. An image a container uses, or
+# one built within the age, is kept; the rest is rebuildable cache.
+VM_IMAGE_PRUNE_AGE=${AMUX_CLEANUP_VM_IMAGE_PRUNE_AGE:-6h}
+VM_IMAGE_PRUNE_CMD=${AMUX_CLEANUP_VM_IMAGE_PRUNE_CMD:-docker --context colima-PROFILE image prune -a -f --filter until=AGE}
 VM_STEP_S=${AMUX_CLEANUP_VM_STEP_S:-120}
 # Idle colima VMs under pressure (DESKT-70). On 2026-10-01 eight goal-spec lanes
 # had each started a private VM (16-32G apiece); with five running the Mac hit
@@ -1162,6 +1168,27 @@ keep_docker_context() { # <profile>
   fi
 }
 
+# Prune unused images older than VM_IMAGE_PRUNE_AGE in every running VM.
+prune_vm_images() { # <dry:0|1>
+  local dry=$1 p cmd out rc n=0 total=""
+  local profiles; profiles=$(running_vm_profiles)
+  [ -n "$profiles" ] || { echo "mac-cleanup: vm images: no running colima VM"; return 0; }
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ "$dry" = 1 ]; then echo "mac-cleanup:   would prune unused images older than $VM_IMAGE_PRUNE_AGE in colima VM $p (dry run)"; continue; fi
+    cmd=${VM_IMAGE_PRUNE_CMD//PROFILE/$p}; cmd=${cmd//AGE/$VM_IMAGE_PRUNE_AGE}; rc=0
+    out=$(perl -e 'alarm shift; exec @ARGV' "$VM_STEP_S" $cmd 2>&1) || rc=$?
+    if [ "$rc" != 0 ]; then
+      echo "mac-cleanup:   vm $p image prune FAILED (rc $rc): $(printf '%s' "$out" | tail -1 | cut -c1-120)"; continue
+    fi
+    n=$((n+1)); total=$(printf '%s' "$out" | grep -i 'total' | tail -1 | tr -s ' \t' ' ' | cut -c1-60)
+    echo "mac-cleanup:   vm $p unused images older than $VM_IMAGE_PRUNE_AGE: ${total:-nothing to prune}"
+  done <<EOF
+$profiles
+EOF
+  echo "mac-cleanup: vm images: swept $n running VM(s) (in-use images and anything newer than $VM_IMAGE_PRUNE_AGE kept)"
+}
+
 # Stop every idle running VM. Sets VMS_STOPPED. Records each stop.
 stop_idle_vms() { # <dry:0|1> <why>
   local dry=$1 why=$2 p rc n_busy=0 n_unk=0 profiles cmd
@@ -1361,6 +1388,7 @@ fi
 reap_idle_cargo_targets "$TARGET_ROOTS" "$tgt_idle" "$DRY"
 VMS_PRUNED=0
 if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then prune_vm_build_caches "$DRY"; fi
+[ "${AMUX_CLEANUP_VM_IMAGE_PRUNE:-1}" = 1 ] && prune_vm_images "$DRY"
 VMS_STOPPED=0
 vm_level=$($PRESSURE_CMD 2>/dev/null); case "$vm_level" in ''|*[!0-9]*) vm_level=-1 ;; esac
 if [ "$vm_level" -ge 2 ]; then stop_idle_vms "$DRY" "memory pressure $vm_level"
