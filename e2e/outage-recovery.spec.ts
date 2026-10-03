@@ -66,7 +66,11 @@ test(`${failure.reason} retains gate and title intent across reload then retries
   expect(JSON.parse(persisted.options.body).gate).toEqual(['Verify the durable write']);
   if (failure.status === 500) {
     // Queued WITH the refusal, so the pill counts it before any retry runs.
-    expect(persisted.error).toContain('Server did not save the change (500)');
+    // The refusal is recorded at queue time ("Server did not save the change
+    // (500)"); a background retry may already have replaced it with its own
+    // wording ("500: pool timeout") before this read (mobile CI run 37138559576).
+    // Either way the entry carries the 500 and counts as attempted.
+    expect(persisted.error).toMatch(/Server did not save the change \(500\)|^500: /);
     expect(persisted.not_attempted).toBe(false);
   }
   await page.reload();
