@@ -2115,7 +2115,13 @@ function _geoRefresh() {
 function _settingsGeoOptedIn() {
   try { return localStorage.getItem('amux_geo_optin') === '1'; } catch (e) { return false; }
 }
+// The last outcome note sticks until the next toggle replaces it: the identity
+// refresh redraws this line with no note, which wiped "Not enabled: ..." back
+// to the generic "Off." seconds after it appeared (live check, 2026-10-03).
+let _geoNote = '';
 function _settingsRenderGeo(note) {
+  if (note !== undefined) _geoNote = note;
+  note = _geoNote;
   const btn = document.getElementById('settings-geo-btn');
   const status = document.getElementById('settings-geo-status');
   if (!btn) return;
@@ -13690,7 +13696,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1230';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1231';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -16203,10 +16209,11 @@ function _peekToggleTool(id, ev) {
   _peekToggleToolNow(id);
 }
 function _peekToggleToolNow(id) {
-  _peekToolCollapsed[id] = !_peekToolCollapsed[id];
   const el = document.getElementById('ptc-' + id);
-  if (!el) return;
-  el.classList.toggle('collapsed', !!_peekToolCollapsed[id]);
+  // Flip what is SHOWN: a tool call starts collapsed with no entry in the map.
+  const now = el ? el.classList.contains('collapsed') : !!_peekToolCollapsed[id];
+  _peekToolCollapsed[id] = !now;
+  if (el) el.classList.toggle('collapsed', !now);
 }
 let _peekToolSeq = 0;
 function _wrapToolCalls(html) {
@@ -16227,7 +16234,12 @@ function _wrapToolCalls(html) {
       break;
     }
     const hasBody = end > i + 1;
-    const collapsed = _peekToolCollapsed[id];
+    // Tool calls ("⏺ Bash(…)", "⏺ Read(…)") start collapsed: their command and
+    // output are detail (Ethan, 2026-10-03: "make these not expanded by
+    // default"). A reply ("⏺ Done. The fix…") stays open, since it is the
+    // answer. A block the reader toggled keeps their choice.
+    const isToolCall = /^\s*⏺\s+[\w:.-]+(?:\s*\(MCP\))?\(/.test(t);
+    const collapsed = id in _peekToolCollapsed ? _peekToolCollapsed[id] : isToolCall;
     if (hasBody) {
       out.push('<div class="ptc' + (collapsed ? ' collapsed' : '') + '" id="ptc-' + id + '">'
         + '<div class="ptc-head" onclick="_peekToggleTool(' + id + ', event)">'

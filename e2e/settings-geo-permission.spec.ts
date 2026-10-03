@@ -18,5 +18,8 @@ test('an unanswered location permission ends with advice instead of hanging', as
   await expect(page.locator('#settings-geo-status')).toHaveText('Asking this device for permission…');
   await page.clock.fastForward(21_000);
   await expect(page.locator('#settings-geo-status')).toContainText('Not enabled: this browser did not answer the permission request');
+  // The identity refresh redraws this line; the reason must survive it.
+  await page.evaluate(() => (window as any)._settingsRenderGeo());
+  await expect(page.locator('#settings-geo-status')).toContainText('Not enabled: this browser did not answer the permission request');
   await expect(page.locator('#settings-geo-btn')).toHaveText('Attach location to my messages');
 });
