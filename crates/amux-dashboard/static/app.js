@@ -13696,7 +13696,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1233';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1234';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -18835,18 +18835,16 @@ if (!localStorage.getItem('amux_send_mode_v2')) {
 }
 // THE LABEL SAYS WHAT A PRESS WILL DO (2026-10-01, MSG-72091: Queue mode
 // stuck on from an earlier choice read "Queue" on an IDLE worker, and the
-// message then waited). A queued message to an idle worker is delivered at
-// once (the server tries the lane's boundary at enqueue), so for an idle target
-// the press IS a send and says so; "Queue" shows only while the worker is busy,
-// which is the one case where queueing changes anything.
-function _sendLabelFor(session) {
-  if (_sendMode !== 'queue') return 'Send';
-  const s = (typeof sessions !== 'undefined' && sessions.find(x => x.name === session)) || {};
-  return s.status === 'active' ? 'Queue' : 'Send';
+// The label is purely visual: the mode is global, so every card says the same
+// thing. Delivery semantics (idle workers get the message immediately even in
+// queue mode) are handled server-side; the tooltip explains what will happen.
+function _sendLabelFor(_session) {
+  return _sendMode === 'queue' ? 'Queue' : 'Send';
 }
 function _sendTitleFor(session) {
   if (_sendMode !== 'queue') return 'Send now';
-  return _sendLabelFor(session) === 'Queue'
+  const s = (typeof sessions !== 'undefined' && sessions.find(x => x.name === session)) || {};
+  return s.status === 'active'
     ? 'Queue mode: delivered when this worker finishes its current turn'
     : 'Queue mode: this worker is idle, so it is delivered now';
 }
