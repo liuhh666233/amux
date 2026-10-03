@@ -101,9 +101,9 @@
     position: sticky; top: 0; z-index: 100;
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
     padding: 0 24px; height: 60px;
-    background: oklch(0.145 0.004 80 / 0.82);
+    background: color-mix(in oklab, var(--bg) 82%, transparent);
     backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    border-bottom: 1px solid oklch(0.26 0.006 80 / 0.6);
+    border-bottom: 1px solid color-mix(in oklab, var(--line) 60%, transparent);
   }
   .site-header a.logo {
     display: flex; align-items: center; gap: 10px;
@@ -167,7 +167,7 @@
   .hero-badge {
     display: inline-flex; align-items: center; gap: 9px;
     padding: 7px 14px; border: 1px solid var(--line-2); border-radius: 999px;
-    background: oklch(0.175 0.005 80 / 0.7);
+    background: color-mix(in oklab, var(--bg-2) 70%, transparent);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px; color: var(--fg-2); letter-spacing: .02em;
     margin-bottom: 30px;
@@ -689,6 +689,34 @@
     .foot-grid { grid-template-columns: 1fr; }
     .container { padding: 0 18px; }
   }
+
+  /* ===== LIGHT MODE ===== */
+  [data-theme="light"] {
+    --bg:        oklch(0.97 0.004 90);
+    --bg-2:      oklch(0.93 0.006 90);
+    --bg-3:      oklch(0.88 0.008 90);
+    --card:      oklch(0.93 0.006 90);
+    --line:      oklch(0.80 0.008 90);
+    --line-2:    oklch(0.72 0.010 90);
+    --fg:        oklch(0.18 0.012 250);
+    --fg-2:      oklch(0.35 0.012 250);
+    --fg-3:      oklch(0.48 0.010 250);
+    --accent:    oklch(0.42 0.18 65);
+    --green:     oklch(0.36 0.18 145);
+    --blue:      oklch(0.38 0.18 240);
+    --danger:    oklch(0.44 0.20 25);
+  }
+  /* hero grid and glow look better staying subtle in light mode */
+  [data-theme="light"] .hero-grid-bg { opacity: 0.3; }
+  [data-theme="light"] .hero-glow { opacity: 0.15; }
+  /* keep terminal mockup, phone, and code-block dark — they're device/terminal UI */
+  [data-theme="light"] .mockup-wrap,
+  [data-theme="light"] .phone,
+  [data-theme="light"] .code-block { filter: none; }
+  /* headline gradient stays visible on light bg */
+  [data-theme="light"] .accent { color: var(--accent); }
+  /* section dividers */
+  [data-theme="light"] .section-label { color: var(--fg-3); }
 </style>
 <script src="/site.js"></script>
 </head>
