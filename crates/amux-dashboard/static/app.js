@@ -13048,12 +13048,17 @@ function _peekBoardPolicySync() {
     const on = !iso && s[c.value] !== false;
     const own = c.own ? !!s[c.own] : false;
     const dis = iso ? ' disabled' : '';
-    h += '<label class="pbc-row' + (iso ? ' pbc-disabled' : '') + '">'
+    // Checkbox FIRST, beside its own label (Ethan, 2026-10-04: "when I
+    // uncheck these they revert back"). It sat at the far right of its half
+    // of the two-column panel, which on a wide screen is directly left of the
+    // NEXT row's label: the box beside "Auto-pickup" was Auto-drain's, so the
+    // click changed a different setting and the one he meant never moved.
+    h += '<label class="pbc-row' + (iso ? ' pbc-disabled' : '') + '" data-field="' + esc(c.field) + '">'
+      + '<input type="checkbox"' + (on ? ' checked' : '') + dis
+      + ' onchange="togglePeekBoardPolicy(\'' + escJs(c.field) + '\',this.checked)">'
       + '<span class="pbc-label">' + esc(c.label)
       + (own ? ' <span class="pbc-own">override</span>' : '')
       + '</span>'
-      + '<input type="checkbox"' + (on ? ' checked' : '') + dis
-      + ' onchange="togglePeekBoardPolicy(\'' + escJs(c.field) + '\',this.checked)">'
       + '</label>';
   }
   el.innerHTML = h;
@@ -13812,7 +13817,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1245';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1246';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}

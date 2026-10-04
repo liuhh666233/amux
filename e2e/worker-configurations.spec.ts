@@ -131,6 +131,18 @@ test('worker Configurations edits the full board lifecycle and every scoped capa
     for (const label of ['Auto-drain backlog', 'Auto-pickup', 'Continue non-terminal', 'Pickup / continue master']) {
       await expect(boardConfig).toContainText(label);
     }
+    // Each checkbox sits directly before ITS OWN label (Ethan, 2026-10-04:
+    // "when I uncheck these they revert back"). It used to sit at the far
+    // right of its half of the two-column panel, next to the NEXT row's label,
+    // so the box beside "Auto-pickup" toggled Auto-drain.
+    const pairing = await boardConfig.evaluate(el => [...el.querySelectorAll('.pbc-row')].map(r => {
+      const box = r.querySelector('input')!.getBoundingClientRect();
+      const lab = r.querySelector('.pbc-label')!.getBoundingClientRect();
+      return { label: r.textContent?.trim(), gap: Math.round(lab.left - box.right),
+        sameLine: Math.abs((box.top + box.bottom) / 2 - (lab.top + lab.bottom) / 2) < 8 };
+    }));
+    expect(pairing.length).toBeGreaterThan(3);
+    for (const p of pairing) expect(p.gap >= 0 && p.gap <= 20 && p.sameLine, JSON.stringify(p)).toBe(true);
     const backlog = boardConfig.locator('.pbc-row', { hasText: 'Auto-drain backlog' }).locator('input[type=checkbox]');
     await expect(backlog).not.toBeChecked();
     await Promise.all([configWrite(), backlog.check()]);

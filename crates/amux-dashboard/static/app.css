@@ -7573,7 +7573,7 @@ select.input { height:var(--control-height); }
 .project-path-link:hover{text-decoration:underline}.project-path-link:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}.project-card-path{display:block;min-width:0}.project-card-path .project-path-link{display:block}
 
 .peek-board-config{display:flex;flex-wrap:wrap;gap:4px 16px;padding:4px 10px 8px;font-size:0.78rem;color:var(--dim);}
-.pbc-row{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px;cursor:pointer;flex:1 1 calc(50% - 16px);min-width:180px;}
+.pbc-row{display:flex;align-items:center;justify-content:flex-start;gap:10px;min-height:36px;cursor:pointer;flex:1 1 calc(50% - 16px);min-width:180px;}
 .pbc-row input{width:18px;height:18px;margin:0;flex:0 0 auto;}
 .pbc-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .pbc-own{font-size:0.6rem;color:var(--accent);vertical-align:middle;}
