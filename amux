@@ -7651,7 +7651,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.53"
+LAND_BEHAVIOR_VERSION="2026-10-02.54"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -8351,7 +8351,20 @@ p.communicate(msg.encode())
   # concluded that day. Priority holders do not wait. Unset or 0: unchanged.
   local _win; _win="$(git config --get amux.landMinIntervalS 2>/dev/null || true)"
   case "$_win" in ''|*[!0-9]*) _win=0 ;; esac
-  if [ "$_win" -gt 0 ] && [ "$priority" != 1 ] && [ -f "$lock.lastpush" ]; then
+  # Which priority holders skip the window: grants and fix-forwards always;
+  # a gate-path-only priority too unless `amux.landWindowExemptGatePath` is
+  # false (mixpeek-override narrowed it on 2026-10-04 after 5 gate-path
+  # priority pushes in one hour went around a 15-minute window).
+  local _win_skip=0
+  if [ "$priority" = 1 ]; then
+    if [ "$(git config --bool --get amux.landWindowExemptGatePath 2>/dev/null || echo true)" != false ] \
+       || printf '%s' "${prio_reason:-}" | grep -qiE -- "${AMUX_LAND_PRIORITY_GRANT_RE:-grant}|${AMUX_LAND_PRIORITY_FIXFWD_RE:-fix[- ]?forward}"; then
+      _win_skip=1
+    else
+      _land_log "landing window applies to this --priority push: amux.landWindowExemptGatePath is false and its reason names no grant or fix-forward"
+    fi
+  fi
+  if [ "$_win" -gt 0 ] && [ "$_win_skip" = 0 ] && [ -f "$lock.lastpush" ]; then
     local _lp _rem; _lp="$(cat "$lock.lastpush" 2>/dev/null || echo 0)"
     case "$_lp" in ''|*[!0-9]*) _lp=0 ;; esac
     _rem=$(( _lp + _win - $(date +%s) ))
