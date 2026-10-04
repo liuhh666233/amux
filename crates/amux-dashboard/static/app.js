@@ -13031,6 +13031,11 @@ const _PEEK_BOARD_ALL_CONFIGS = [
   { field: 'board_force_adherence', value: 'board_force_adherence', own: null,
     label: 'Force board adherence', note: 'Board drives this worker; messages become cards.' },
 ];
+// A toggle being saved keeps the value the owner just set. Every board refresh
+// re-ran this render from `sessions`, which still held the OLD value until the
+// save and the session refetch came back, so an unchecked box flipped back
+// (Ethan, 2026-10-04: "when I uncheck these they revert back").
+const _pbcPending = {};
 function _peekBoardPolicySync() {
   const el = document.getElementById('peek-board-config');
   if (!el) return;
@@ -13045,7 +13050,7 @@ function _peekBoardPolicySync() {
     h += '<div class="pbc-note">Isolated worker: board automation is off. Turn off isolation to use these.</div>';
   }
   for (const c of _PEEK_BOARD_ALL_CONFIGS) {
-    const on = !iso && s[c.value] !== false;
+    const on = !iso && (c.field in _pbcPending ? _pbcPending[c.field] : s[c.value] !== false);
     const own = c.own ? !!s[c.own] : false;
     const dis = iso ? ' disabled' : '';
     // Checkbox FIRST, beside its own label (Ethan, 2026-10-04: "when I
@@ -13061,20 +13066,28 @@ function _peekBoardPolicySync() {
       + '</span>'
       + '</label>';
   }
-  el.innerHTML = h;
+  // Rebuild only when something changed: the panel was replaced on every board
+  // refresh, several times a second, so a click could land on a box that was
+  // about to be thrown away (an e2e click saw the node replaced 13 times).
+  if (el._pbcHtml !== h) { el.innerHTML = h; el._pbcHtml = h; }
 }
 async function togglePeekBoardPolicy(field, on) {
   const name = peekSession;
   if (!name) return;
-  const r = await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/config', {
-    method: 'PATCH', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ [field]: !!on })
-  });
-  if (r) {
-    try { const d = await r.json(); showToast(d.message || 'Saved'); } catch (e) {}
+  _pbcPending[field] = !!on;
+  try {
+    const r = await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/config', {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ [field]: !!on })
+    });
+    if (r) {
+      try { const d = await r.json(); showToast(d.message || 'Saved'); } catch (e) {}
+    }
+    await fetchSessions();
+  } finally {
+    delete _pbcPending[field];
+    _peekBoardPolicySync();
   }
-  await fetchSessions();
-  _peekBoardPolicySync();
 }
 function _renderPeekIssuesBody() {
   // Don't rebuild mid-drag — a board SSE refresh would destroy the active Sortable.
@@ -13817,7 +13830,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1246';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1247';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
