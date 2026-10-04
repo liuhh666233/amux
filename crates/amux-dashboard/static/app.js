@@ -13799,7 +13799,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1241';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1242';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -31425,6 +31425,17 @@ function _locFmtDist(m) {
 function _locFmtTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
 }
+// A stop that began yesterday (an overnight stay) read "12:10 PM–12:41 PM ·
+// 24 h 31 min" on 2026-10-04: times alone cannot say which day. Any edge not
+// on the day being shown carries its date.
+function _locFmtSpan(start, end) {
+  const day = d => new Date(d * 1000).toDateString();
+  const shown = _locRange ? null : (_locDayStart ? _locDayStart.toDateString() : null);
+  const edge = ts => (shown && day(ts) !== shown) || (!shown && day(start) !== day(end))
+    ? new Date(ts * 1000).toLocaleDateString([], {month: 'short', day: 'numeric'}) + ', ' + _locFmtTime(ts)
+    : _locFmtTime(ts);
+  return edge(start) + '–' + edge(end);
+}
 async function _locLoad() {
   const list = document.getElementById('map-loc-list');
   const summary = document.getElementById('map-loc-summary');
@@ -31456,7 +31467,7 @@ function _locRender(d) {
   const moving = trips.reduce((a, s) => a + (s.duration_s || 0), 0);
   const gaps = _locSegments.filter(s => s.kind === 'gap').length;
   if (summary) summary.textContent = (d.n_considered || _locSegments.length)
-    ? d.n_considered + ' points · ' + trips.length + ' trip' + (trips.length === 1 ? '' : 's') + ' · ' + _locFmtDist(dist) + ' · ' + _locFmtDur(moving) + ' moving'
+    ? d.n_considered + ' points · ' + trips.length + ' trip' + (trips.length === 1 ? '' : 's') + ' · ' + (_locFmtDist(dist) || (_locMiles ? '0 mi' : '0 km')) + ' · ' + _locFmtDur(moving) + ' moving'
       + (gaps ? ' · ' + gaps + ' move' + (gaps === 1 ? '' : 's') + ' not recorded' : '')
     : 'No points recorded' + (_locRange ? ' in this range.' : ' this day.');
   if (!_locSegments.length) {
@@ -31466,7 +31477,7 @@ function _locRender(d) {
   list.innerHTML = _locSegments.map((s, i) => {
     const m = _LOC_MODE[s.kind === 'stop' || s.kind === 'gap' ? s.kind : (s.mode || 'unknown')] || _LOC_MODE.unknown;
     const title = s.kind === 'stop' ? 'Stop' : m.label + (s.mode_confidence === 'inferred' ? ' (inferred)' : '');
-    const meta = _locFmtTime(s.start) + '–' + _locFmtTime(s.end) + ' · ' + _locFmtDur(s.duration_s)
+    const meta = _locFmtSpan(s.start, s.end) + ' · ' + _locFmtDur(s.duration_s)
       + (s.kind === 'trip' && s.distance_m ? ' · ' + _locFmtDist(s.distance_m) : '')
       + (s.kind === 'gap' && s.distance_m ? ' · ~' + _locFmtDist(s.distance_m) + ' apart, phone sent no GPS' : '');
     return '<button type="button" class="map-loc-row" data-loc-i="' + i + '" onclick="_locFocus(' + i + ')">'

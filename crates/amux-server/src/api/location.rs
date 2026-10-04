@@ -421,10 +421,34 @@ fn count_raw(c: &Connection, from: f64, to: f64) -> rusqlite::Result<i64> {
     c.query_row("SELECT COUNT(*) FROM location_points WHERE ts >= ?1 AND ts < ?2", params![from, to], |r| r.get(0))
 }
 
+/// Visits as they happened, read so that an arrival report that never closed
+/// cannot become a stop running to now.
+///
+/// iOS reports a visit twice, on arrival (open) and on departure, and the two
+/// reports carry slightly different coordinates. The phone built the visit id
+/// from arrival time AND coordinates, so the departure landed as a second row
+/// and the arrival row stayed open forever. 2026-10-04: 13 such rows; the
+/// oldest (10-03 12:10) read as one 24 h stop that swallowed the whole next
+/// day, its six visits included. So, per device:
+///
+/// - an open row with a closed row of the same arrival (within 5 s) is that
+///   visit's arrival report and is dropped;
+/// - any other open row ends where that device's next visit begins.
+///
+/// Read-time only: the stored rows are the phone's raw reports and stay.
 fn load_visits(c: &Connection, from: f64, to: f64) -> rusqlite::Result<Vec<Visit>> {
     let mut stmt = c.prepare(
-        "SELECT id, arrival, departure, lat, lon FROM location_visits
-          WHERE arrival < ?2 AND COALESCE(departure, ?2) >= ?1 ORDER BY arrival",
+        "SELECT id, arrival, dep, lat, lon FROM (
+           SELECT v.id, v.arrival, v.lat, v.lon,
+                  COALESCE(v.departure,
+                    (SELECT MIN(n.arrival) FROM location_visits n
+                      WHERE n.device = v.device AND n.arrival > v.arrival + 5.0)) AS dep
+             FROM location_visits v
+            WHERE NOT (v.departure IS NULL AND EXISTS (
+                    SELECT 1 FROM location_visits d
+                     WHERE d.device = v.device AND d.departure IS NOT NULL
+                       AND d.arrival BETWEEN v.arrival - 5.0 AND v.arrival + 5.0)))
+          WHERE arrival < ?2 AND COALESCE(dep, ?2) >= ?1 ORDER BY arrival",
     )?;
     let rows = stmt.query_map(params![from, to], |r| {
         Ok(Visit { id: r.get(0)?, arrival: r.get(1)?, departure: r.get(2)?, lat: r.get(3)?, lon: r.get(4)? })
@@ -1688,6 +1712,44 @@ mod tests {
         let segs = segment(&pts, &visits, t + 1000.0);
         assert_eq!(segs.len(), 1, "{segs:#?}");
         assert_eq!(segs[0]["id"], "stop_visit_v1");
+    }
+
+    #[test]
+    fn an_arrival_report_that_never_closed_does_not_swallow_the_next_day() {
+        // The stored shape BEFORE this fix: each visit as two rows, the open
+        // arrival report and the closed departure report, ids differing only
+        // in their coordinates; plus one open row with no twin, then a later
+        // day's visits. Times are 2026-10-03/04 as seen live.
+        let c = crate::db::migrate::test_memdb();
+        let day1 = 1_791_043_856.0; // 10-03 12:10:56
+        let day2 = 1_791_125_146.0; // 10-04 10:45:46
+        let v = |id: &str, a: f64, d: Option<f64>, lat: f64, lon: f64| InVisit {
+            id: id.into(), arrival: a, departure: d, lat, lon, h_acc: None,
+        };
+        let rows = vec![
+            v("a-open", day1, None, 40.73475, -74.00245),
+            v("a-closed", day1, Some(day1 + 7452.0), 40.73492, -74.00258),
+            v("b-open-no-twin", day1 + 20_000.0, None, 40.7376, -74.0078),
+            v("b2-closed", day1 + 30_000.0, Some(day1 + 31_000.0), 40.7339, -74.0045),
+            v("c-open", day2, None, 40.73748, -74.00826),
+            v("c-closed", day2, Some(day2 + 2666.0), 40.73719, -74.00835),
+            v("d-open-current", day2 + 5000.0, None, 40.7360, -74.0049),
+        ];
+        db_ingest_visits(&c, "phone", &rows, day2 + 6000.0).unwrap();
+        // The second day only.
+        let (from, to) = (day2 - 10_000.0, day2 + 76_400.0);
+        let vs = load_visits(&c, from, to).unwrap();
+        let ids: Vec<&str> = vs.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["c-closed", "d-open-current"], "{vs:#?}");
+        let segs = segment(&[], &vs, day2 + 6000.0);
+        let stops: Vec<&str> = segs.iter().filter(|s| s["kind"] == "stop").map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(stops, vec!["stop_visit_c-closed", "stop_visit_d-open-current"], "{segs:#?}");
+        // The open row with no twin ends at the next visit, so on its own day
+        // it is a bounded stop, not one running to now.
+        let vs1 = load_visits(&c, day1 - 1000.0, day1 + 40_000.0).unwrap();
+        let b = vs1.iter().find(|v| v.id == "b-open-no-twin").expect("open row kept");
+        assert_eq!(b.departure, Some(day1 + 30_000.0), "{vs1:#?}");
+        assert!(!vs1.iter().any(|v| v.id == "a-open"), "an arrival report with a closed twin is dropped: {vs1:#?}");
     }
 
     #[test]

@@ -293,3 +293,32 @@ test('Map > Location history shows an unrecorded move as a gap row and a dashed 
   });
   expect(dashed).toBe(1);
 });
+
+// 2026-10-04: an overnight stop read "12:10 PM–12:41 PM · 24 h 31 min" with
+// no date, and an empty distance left "0 trips · · 0 min moving".
+test('Map > Location history dates an edge on another day and never prints an empty distance', async ({ page }) => {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const t0 = start.getTime() / 1000;
+  const DAY2 = {
+    ok: true, measured: true, n_considered: 2, visits_considered: 2, from: 0, to: 0,
+    segments: [
+      {id: 'stop_visit_overnight', kind: 'stop', start: t0 - 3 * 3600, end: t0 + 10 * 3600, duration_s: 13 * 3600, lat: 40.7373, lon: -74.0086, point_count: 0},
+      {id: 'stop_visit_morning', kind: 'stop', start: t0 + 10.5 * 3600, end: t0 + 11 * 3600, duration_s: 1800, lat: 40.7372, lon: -74.0084, point_count: 0},
+    ],
+  };
+  await page.route('**/api/map/location/timeline**', route => route.fulfill({json: DAY2}));
+  await page.addInitScript(() => { localStorage.setItem('amux_walkthrough_done', '1'); localStorage.removeItem('amux_map_tab'); });
+  await page.goto('/');
+  await page.waitForFunction(() => typeof (window as any).switchView === 'function' && typeof (window as any)._mapSidebarTab === 'function');
+  await openMapSidebar(page);
+  await page.locator('#map-tab-history').click();
+  await page.locator('#map-loc-open-day').click();
+  const yesterday = new Date((t0 - 3 * 3600) * 1000).toLocaleDateString([], {month: 'short', day: 'numeric'});
+  const rows = page.locator('.map-loc-row');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText(yesterday + ',');
+  await expect(rows.nth(1)).not.toContainText(yesterday);
+  const summary = await page.locator('#map-loc-summary').textContent();
+  expect(summary, 'no empty slot between separators').not.toMatch(/·\s*·/);
+  expect(summary).toMatch(/0 (mi|km)/);
+});

@@ -456,7 +456,12 @@ extension LocationRecorder: CLLocationManagerDelegate {
         let arrival = visit.arrivalDate == .distantPast ? nil : visit.arrivalDate.timeIntervalSince1970
         let departure = visit.departureDate == .distantFuture ? nil : visit.departureDate.timeIntervalSince1970
         guard let arrival else { return }
-        let v = VisitSample(id: "\(Int(arrival))-\(String(format: "%.4f,%.4f", visit.coordinate.latitude, visit.coordinate.longitude))",
+        // One id per visit: iOS reports it on arrival and again on departure
+        // with slightly different coordinates, so an id that included them
+        // stored the departure as a second visit and left the arrival open
+        // forever (2026-10-04, a 24 h stop). The server's "later report wins"
+        // upsert needs both reports to share the id.
+        let v = VisitSample(id: "\(Int(arrival))",
                             arrival: arrival, departure: departure,
                             lat: visit.coordinate.latitude, lon: visit.coordinate.longitude,
                             h_acc: visit.horizontalAccuracy)
