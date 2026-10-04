@@ -1,6 +1,6 @@
 {
   "measured": true,
-  "n_considered": 2423,
+  "n_considered": 2424,
   "command_handlers": {
     "_addToPinGroup": {
       "kind": "command._addToPinGroup",
@@ -946,6 +946,12 @@
     },
     "_fileSave": {
       "kind": "command._fileSave",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_fileShowCached": {
+      "kind": "command._fileShowCached",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

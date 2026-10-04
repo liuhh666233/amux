@@ -1244,6 +1244,9 @@
     box-sizing: border-box;
     max-height: var(--dialog-viewport-height, 100dvh);
   }
+  /* The dimmed backdrop covers the whole screen even while the box itself is
+     held above a keyboard, so the page never shows through beneath it. */
+  .file-overlay.active::before { content: ''; position: fixed; inset: 0; z-index: -1; background: inherit; }
   .file-overlay.active { display: flex; }
   .file-overlay-header {
     display: flex; justify-content: space-between; align-items: center;

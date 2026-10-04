@@ -2475,8 +2475,18 @@ function _dialogReachCheck(root) {
   let timer, previous = '', previousComponents = '';
   const refresh = () => {
     const vv = window.visualViewport;
-    // Pinch zoom is a reading action, not a keyboard layout change.
-    if (!vv || vv.scale <= 1.02) {
+    const a = document.activeElement;
+    const editing = !!a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+    if (!editing) {
+      // No keyboard can be up, so the dialog gets the whole screen. Without
+      // this a keyboard-time height outlived the keyboard whenever the page
+      // was zoomed (iOS zooms in on a small input it focuses, and the branch
+      // below skips zoomed updates): 2026-10-04 a file preview opened from
+      // Files filled only the top half, with the list showing beneath.
+      document.documentElement.style.setProperty('--dialog-viewport-height', innerHeight + 'px');
+      document.documentElement.style.setProperty('--dialog-viewport-top', '0px');
+    } else if (!vv || vv.scale <= 1.02) {
+      // Pinch zoom is a reading action, not a keyboard layout change.
       document.documentElement.style.setProperty('--dialog-viewport-height', (vv?.height || innerHeight) + 'px');
       document.documentElement.style.setProperty('--dialog-viewport-top', (vv?.offsetTop || 0) + 'px');
     }
@@ -2509,6 +2519,9 @@ function _dialogReachCheck(root) {
   window.visualViewport?.addEventListener('resize', refresh);
   window.visualViewport?.addEventListener('scroll', refresh);
   window.addEventListener('resize', refresh);
+  // A field losing focus is the keyboard closing; do not wait for a resize
+  // event that a zoomed page may never send.
+  document.addEventListener('focusout', () => setTimeout(refresh, 0));
   refresh();
 })();
 
@@ -13799,7 +13812,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1242';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1245';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
@@ -24558,11 +24571,24 @@ async function openFilePreview(path, options = {}) {
   document.getElementById('file-tab-raw').classList.remove('active');
   document.getElementById('file-download-btn').style.display = 'none';
   document.getElementById('file-overlay').classList.add('active');
+  // CACHE FIRST, like the Files listing (Ethan, 2026-10-04: a file marked
+  // saved-offline sat on "Loading..." while the server was unreachable,
+  // because a hung request never reached the cache in the catch below).
+  const gen = ++_filePreviewGen;
+  let fresh = false;
+  if (!options.readOnly) {
+    _idb.getFile(path).then(cached => {
+      if (gen !== _filePreviewGen || fresh || !cached || cached.type !== 'file') return;
+      _fileShowCached(path, cached);
+    }).catch(() => {});
+  }
   try {
     let url = API + '/api/file?path=' + encodeURIComponent(path);
     if (peekSessionDir) url += '&cwd=' + encodeURIComponent(peekSessionDir);
-    const r = await fetch(url);
+    const r = await fetch(url, {signal: AbortSignal.timeout(10000)});
     const data = await r.json();
+    if (gen !== _filePreviewGen) return;   // another file was opened meanwhile
+    fresh = true;
     if (data.error) {
       // Say WHAT failed and WHERE, not a bare "Error: file not found" dead end
       // (Ethan, 2026-09-12: a terminal file link opened to that and nothing
@@ -24646,10 +24672,19 @@ async function openFilePreview(path, options = {}) {
       _cacheStreamedImage(path, data);
     }
   } catch(e) {
+    if (gen !== _filePreviewGen) return;
     if (options.readOnly) {document.getElementById('file-body').textContent='Retained asset unavailable.';return;}
-    // Offline: try IDB cache
-    const cached = await _idb.getFile(path);
-    if (cached && cached.type === 'file') {
+    // Offline or unreachable: the saved copy, if any (it may already be shown).
+    const cached = await _idb.getFile(path).catch(() => null);
+    if (gen !== _filePreviewGen) return;
+    if (cached && cached.type === 'file') { _fileShowCached(path, cached); return; }
+    document.getElementById('file-body').textContent = 'Could not reach the server, and this file has no saved copy on this device yet.';
+  }
+}
+
+let _filePreviewGen = 0;
+function _fileShowCached(path, cached) {
+    {
       _idb.touchFile(path);   // opening refreshes the 30-day clock, even offline
       _fileData = cached.data;
       const age = Math.round((Date.now() - cached.ts) / 60000);
@@ -24664,10 +24699,7 @@ async function openFilePreview(path, options = {}) {
       document.getElementById('file-tab-preview').classList.toggle('active', _fileViewMode === 'preview');
       document.getElementById('file-tab-raw').classList.toggle('active', _fileViewMode === 'raw');
       _renderFileBody(cached.data, _fileViewMode);
-      return;
     }
-    document.getElementById('file-body').textContent = 'Failed to load file.';
-  }
 }
 
 // The inline video's "Full-screen player" button: the custom player, from
@@ -25288,23 +25320,35 @@ async function loadFiles(path) {
   }
   document.getElementById('files-breadcrumb').innerHTML = crumbHtml;
   _filesToolbarCheck();
+  // CACHE FIRST (Ethan, 2026-10-04, offline on a phone: "this should load
+  // offline cached locally"). The saved listing was only read after the
+  // request FAILED, and a request to an unreachable server does not fail, it
+  // hangs, so the folder sat on "Loading..." with its listing on the device.
+  // Show the saved copy at once, refresh it from the server, and give the
+  // server a bounded wait.
+  let fresh = false;
+  _idb.getFile(path).then(cached => {
+    if (!current() || fresh || !cached || cached.type !== 'dir') return;
+    _renderFilesEntries(body, path, cached.data, cached.ts);
+  }).catch(() => {});
   try {
-    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path) + (_filesShowHidden ? '&hidden=1' : ''));
+    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path) + (_filesShowHidden ? '&hidden=1' : ''),
+      {signal: AbortSignal.timeout(8000)});
     const data = await r.json();
     if (!current()) return;
+    fresh = true;
     if (data.error) { body.innerHTML = '<div style="padding:16px;color:var(--dim)">' + esc(data.error) + '</div>'; return; }
     _renderFilesEntries(body, path, data, false);
     _idb.setFile(path, { type: 'dir', data });
     _autoCacheDirFiles(path, data.entries);   // background: cache small text files (.md, …) for offline
   } catch(e) {
     if (!current()) return;
-    // Offline: try IDB cache
-    const cached = await _idb.getFile(path);
+    const cached = await _idb.getFile(path).catch(() => null);
     if (!current()) return;
     if (cached && cached.type === 'dir') {
       _renderFilesEntries(body, path, cached.data, cached.ts);
     } else {
-      body.innerHTML = '<div style="padding:16px;color:var(--dim)">Failed to load directory.</div>';
+      body.innerHTML = '<div style="padding:16px;color:var(--dim)">Could not reach the server, and this folder has no saved copy on this device yet.</div>';
     }
   }
 }
