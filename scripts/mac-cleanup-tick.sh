@@ -206,6 +206,12 @@ VM_IDLE_MIN=${AMUX_CLEANUP_VM_IDLE_MIN:-60}
 # events probe prints one docker event action per line.
 VM_LOAD_CMD=${AMUX_CLEANUP_VM_LOAD_CMD:-colima ssh -p PROFILE -- cat /proc/loadavg /proc/uptime}
 VM_EVENTS_CMD=${AMUX_CLEANUP_VM_EVENTS_CMD:-docker --context colima-PROFILE events --since MINm --until 0s --format \{\{.Action\}\}}
+# Running containers: any one not in VM_IDLE_IGNORE makes the VM busy. A proof
+# stack waiting between legs only runs healthchecks, and on 2026-10-04 at
+# 18:06Z this tick stopped goal-shared under memory pressure with
+# gs12-restore's gr98 stack in it, blocking every lane's local proofs.
+VM_PS_CMD=${AMUX_CLEANUP_VM_PS_CMD:-docker --context colima-PROFILE ps --format \{\{.Names\}\}}
+VM_IDLE_IGNORE=${AMUX_CLEANUP_VM_IDLE_IGNORE:-gs12-pypi-cache}
 VM_STOP_CMD=${AMUX_CLEANUP_VM_STOP_CMD:-colima stop -p PROFILE}
 TARGET_KEEP=${AMUX_CLEANUP_TARGET_KEEP:-$HOME/.amux/rust-build-target:$HOME/.ao/data/cargo-target-shared:${CARGO_TARGET_DIR:-}}
 TARGET_DEPTH=${AMUX_CLEANUP_TARGET_DEPTH:-8}
@@ -1161,6 +1167,17 @@ vm_is_idle() { # <profile>
   ev=$(perl -e 'alarm 30; exec @ARGV' $cmd 2>/dev/null) || return 2
   awk -v l="$load" -v t="$VM_IDLE_LOAD" 'BEGIN{ exit !(l+0 < t+0) }' || return 1
   if printf '%s\n' "$ev" | grep -v -E '^(exec_create|exec_start|exec_die)' | grep -q .; then return 1; fi
+  local ps name
+  cmd=${VM_PS_CMD//PROFILE/$p}
+  ps=$(perl -e 'alarm 30; exec @ARGV' $cmd 2>/dev/null) || return 2
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case " $VM_IDLE_IGNORE " in *" $name "*) continue ;; esac
+    VM_BUSY_CONTAINER="$name"
+    return 1
+  done <<PSEOF
+$ps
+PSEOF
   return 0
 }
 

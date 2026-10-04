@@ -279,20 +279,26 @@ echo "12d. idle VMs are stopped under pressure, busy or unmeasured ones never (D
 printf '%s\n' '{"name":"idle","status":"Running"}' '{"name":"busy","status":"Running"}' '{"name":"quiet-but-working","status":"Running"}' '{"name":"blind","status":"Running"}' '{"name":"off","status":"Stopped"}' > "$FIX/vms2.json"
 cat > "$FIX/vmload.sh" <<'VL'
 #!/bin/bash
-case "$1" in idle|quiet-but-working) printf '0.05 0.10 0.12 1/300 9\n86400.0 1000.0\n';; young) printf '0.01 0.01 0.01 1/300 9\n600.0 50.0\n';; busy) printf '6.1 6.0 5.9 9/300 9\n86400.0 10.0\n';; *) exit 1;; esac
+case "$1" in idle|quiet-but-working|healthy-stack) printf '0.05 0.10 0.12 1/300 9\n86400.0 1000.0\n';; young) printf '0.01 0.01 0.01 1/300 9\n600.0 50.0\n';; busy) printf '6.1 6.0 5.9 9/300 9\n86400.0 10.0\n';; *) exit 1;; esac
 VL
 cat > "$FIX/vmev.sh" <<'VE'
 #!/bin/bash
-case "$1" in idle) printf 'exec_create\nexec_start\nexec_die\n';; quiet-but-working) printf 'exec_start\ncreate\nstart\n';; *) :;; esac
+case "$1" in idle|healthy-stack) printf 'exec_create\nexec_start\nexec_die\n';; quiet-but-working) printf 'exec_start\ncreate\nstart\n';; *) :;; esac
 VE
 printf '#!/bin/bash\necho "$1" >> %s\n' "$FIX/stops" > "$FIX/vmstop.sh"; chmod +x "$FIX"/vmload.sh "$FIX"/vmev.sh "$FIX"/vmstop.sh
-VM_LIST_CMD="cat $FIX/vms2.json"; VM_LOAD_CMD="$FIX/vmload.sh PROFILE"; VM_EVENTS_CMD="$FIX/vmev.sh PROFILE"; VM_STOP_CMD="$FIX/vmstop.sh PROFILE"
+cat > "$FIX/vmps.sh" <<'VP'
+#!/bin/bash
+case "$1" in idle) printf 'gs12-pypi-cache\n';; healthy-stack) printf 'gs12-pypi-cache\ngs12-restore-proof-gr98\n';; noprobe) exit 1;; *) :;; esac
+VP
+chmod +x "$FIX/vmps.sh"
+VM_LIST_CMD="cat $FIX/vms2.json"; VM_LOAD_CMD="$FIX/vmload.sh PROFILE"; VM_EVENTS_CMD="$FIX/vmev.sh PROFILE"; VM_STOP_CMD="$FIX/vmstop.sh PROFILE"; VM_PS_CMD="$FIX/vmps.sh PROFILE"; VM_IDLE_IGNORE="gs12-pypi-cache"
 STATE_DIR="$FIX/vmstate"; : > "$FIX/stops"
 rc=0; vm_is_idle idle || rc=$?;              check "healthcheck-only activity at low load is idle" "0" "$rc"
 rc=0; vm_is_idle busy || rc=$?;              check "a loaded VM is busy" "1" "$rc"
 rc=0; vm_is_idle quiet-but-working || rc=$?; check "a container created in the window is busy, even at low load" "1" "$rc"
 rc=0; vm_is_idle blind || rc=$?;             check "an unreadable guest is unmeasured, not idle" "2" "$rc"
 rc=0; vm_is_idle young || rc=$?;             check "a VM up less than the window is busy, however quiet" "1" "$rc"
+rc=0; vm_is_idle healthy-stack || rc=$?;     check "a running proof stack with only healthchecks is busy (goal-shared 2026-10-04 18:06Z)" "1" "$rc"
 stop_idle_vms 0 "memory pressure 2" > "$FIX/out.txt"
 check "only the idle VM is stopped" "idle" "$(tr '\n' ' ' < "$FIX/stops" | sed 's/ $//')"
 check "the stop is recorded with its restore command" "yes" "$(grep -q 'stopped colima VM idle .*Restore: colima start -p idle' "$FIX/vmstate/vm-stops.log" && echo yes || echo no)"
