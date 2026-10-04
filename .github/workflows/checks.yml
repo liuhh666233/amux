@@ -373,6 +373,7 @@ jobs:
           ./scripts/test-mac-cleanup-lima.sh
           ./scripts/test-mac-cleanup-keep-context.sh
           ./scripts/test-mac-cleanup-user-tmp.sh
+          ./scripts/test-mac-cleanup-lane-tmp.sh
       - name: orch-pace projects the proof rate to its checkpoint
         run: ./scripts/test-orch-pace-proof.sh
       - name: the idle cargo-target reaper keeps anything it cannot prove idle and unopened (DESKT-51)

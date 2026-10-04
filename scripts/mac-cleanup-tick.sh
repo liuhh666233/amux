@@ -177,6 +177,11 @@ VM_IMAGE_PRUNE_AGE=${AMUX_CLEANUP_VM_IMAGE_PRUNE_AGE:-6h}
 # land precheck had to kill), while the host fell toward 100 GB free.
 USER_TMP_ROOT=${AMUX_CLEANUP_USER_TMP_ROOT:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")}
 USER_TMP_IDLE_MIN=${AMUX_CLEANUP_USER_TMP_IDLE_MIN:-1440}
+# Workers with workspace isolation get TMPDIR=~/.amux/tmp/<worker>, outside the
+# per-user temp dir above, so nothing reaped them: 101 GB in 13,336 entries
+# idle over 12 h on 2026-10-04 with the disk at 57 GB free.
+LANE_TMP_ROOT=${AMUX_CLEANUP_LANE_TMP_ROOT:-$HOME/.amux/tmp}
+LANE_TMP_IDLE_MIN=${AMUX_CLEANUP_LANE_TMP_IDLE_MIN:-1440}
 VM_IMAGE_PRUNE_CMD=${AMUX_CLEANUP_VM_IMAGE_PRUNE_CMD:-docker --context colima-PROFILE image prune -a -f --filter until=AGE}
 VM_STEP_S=${AMUX_CLEANUP_VM_STEP_S:-120}
 # Idle colima VMs under pressure (DESKT-70). On 2026-10-01 eight goal-spec lanes
@@ -1176,6 +1181,26 @@ keep_docker_context() { # <profile>
 
 # Remove tmp.* directories in the per-user temp dir untouched for
 # USER_TMP_IDLE_MIN minutes that no running process uses as its cwd.
+# reap_lane_tmp <dry>: remove ~/.amux/tmp/<worker>/<entry> when NOTHING inside
+# it changed for LANE_TMP_IDLE_MIN minutes (the newest file decides, so a cargo
+# target dir in use is kept even if its top-level mtime is old) and no running
+# process has its cwd at or under it.
+reap_lane_tmp() { # <dry:0|1>
+  local dry=$1 root="${LANE_TMP_ROOT%/}" e ce n=0 kb=0 k inuse
+  [ -d "$root" ] || { echo "mac-cleanup: lane tmp: no $root"; return 0; }
+  inuse=$(lsof -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | sed 's|^/private||')
+  for e in "$root"/*/*; do
+    [ -e "$e" ] || continue
+    [ -n "$(find "$e" -mmin -"$LANE_TMP_IDLE_MIN" -print -quit 2>/dev/null)" ] && continue
+    ce=$( (cd "$e" 2>/dev/null && pwd -P) || printf '%s' "$e"); ce=${ce#/private}
+    printf '%s\n' "$inuse" | awk -v p="$ce" '$0==p || index($0, p "/")==1 {f=1} END{exit !f}' && continue
+    k=$(du -sk "$e" 2>/dev/null | cut -f1)
+    if [ "$dry" = 1 ]; then n=$((n+1)); kb=$((kb+${k:-0})); continue; fi
+    rm -rf -- "${e:?}" 2>/dev/null && { n=$((n+1)); kb=$((kb+${k:-0})); }
+  done
+  echo "mac-cleanup: lane tmp: $([ "$dry" = 1 ] && echo 'would remove' || echo removed) $n entr$([ "$n" = 1 ] && echo y || echo ies) idle over ${LANE_TMP_IDLE_MIN} min, $(awk -v k="$kb" 'BEGIN{printf "%.1fG", k/1048576}') ($root)"
+}
+
 reap_user_tmp() { # <dry:0|1>
   local dry=$1 root="${USER_TMP_ROOT%/}" d b n=0 kb=0 k inuse
   [ -d "$root" ] || { echo "mac-cleanup: user tmp: no $root"; return 0; }
@@ -1415,6 +1440,7 @@ VMS_PRUNED=0
 if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then prune_vm_build_caches "$DRY"; fi
 [ "${AMUX_CLEANUP_VM_IMAGE_PRUNE:-1}" = 1 ] && prune_vm_images "$DRY"
 [ "${AMUX_CLEANUP_USER_TMP:-1}" = 1 ] && reap_user_tmp "$DRY"
+[ "${AMUX_CLEANUP_LANE_TMP:-1}" = 1 ] && reap_lane_tmp "$DRY"
 VMS_STOPPED=0
 vm_level=$($PRESSURE_CMD 2>/dev/null); case "$vm_level" in ''|*[!0-9]*) vm_level=-1 ;; esac
 if [ "$vm_level" -ge 2 ]; then stop_idle_vms "$DRY" "memory pressure $vm_level"
