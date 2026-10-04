@@ -20492,6 +20492,27 @@ fn pickup_stale_void(
 /// Returns the row count. 0 means the join missed, which the caller reports —
 /// the previous behaviour was indistinguishable from a successful stamp, and
 /// that is how 930 rows accumulated over 16 days.
+/// Mark the schedule run parked on steering row `queue_id` as delivered
+/// (0102). Returns how many rows moved; 0 is the common case (most steering
+/// is not from a schedule) and an error (no `schedule_runs`, or a DB from
+/// before 0102) also reads 0, since the delivery itself already happened.
+pub(crate) fn mark_schedule_run_delivered(
+    conn: &rusqlite::Connection,
+    queue_id: &str,
+    outcome: &str,
+) -> usize {
+    conn.execute(
+        "UPDATE schedule_runs SET status='delivered', submission='unverified', \
+         note=COALESCE(note,'') || ' · delivered ' || ?2 \
+         WHERE queue_id=?1 AND status='queued'",
+        rusqlite::params![
+            queue_id,
+            format!("{} ({})", chrono::Utc::now().format("%H:%M:%SZ"), outcome)
+        ],
+    )
+    .unwrap_or(0)
+}
+
 pub(crate) fn stamp_queued_delivery(
     conn: &rusqlite::Connection,
     session: &str,
@@ -21414,6 +21435,20 @@ pub async fn steer_deliver_tick(state: &AppState) -> usize {
                         session = %sess2, id = %id2, measured = true, n_considered = 1,
                         verdict = "delivery_stamp_unmatched",
                         "delivered a queued message and found no cmd_history row to stamp"
+                    );
+                }
+                // A schedule run parked on this queue row is now delivered
+                // (0102). Before this, SCHED-544's ticks reached
+                // mixpeek-override at 03:36Z and 04:24Z on 2026-10-04 and both
+                // run rows still read `queued` an hour later. The path stays
+                // `queued` in `delivery`; `status` and `submission` say it
+                // arrived, and the note says how and when.
+                let ran = mark_schedule_run_delivered(conn, &id2, &outcome2);
+                if ran > 0 {
+                    tracing::info!(
+                        session = %sess2, id = %id2, measured = true, n_considered = ran,
+                        verdict = "schedule_run_delivered",
+                        "a queued schedule run was delivered by the steering queue"
                     );
                 }
                 Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
@@ -50946,6 +50981,54 @@ mod spawn_argv_secret_tests {
     /// Same idiom as `the_at_boundary_scheduler_path_no_longer_borrows_the_owners_origin`
     /// above: read the shipped source, code lines only, so the function's own
     /// prose cannot satisfy it.
+    /// The deliverer marks a parked schedule run delivered (0102), and the
+    /// statement moves exactly the run with that queue id.
+    #[test]
+    fn a_steering_delivery_marks_its_schedule_run_delivered() {
+        const SRC: &str = include_str!("session_verbs.rs");
+        let start = SRC.find("pub async fn steer_deliver_tick(").expect("steer_deliver_tick is gone");
+        let rest = &SRC[start..];
+        let end = rest[1..].find("\n}\n").map(|i| i + 3).expect("no closing brace");
+        let body: String = rest[..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("mark_schedule_run_delivered("),
+            "steer_deliver_tick no longer marks the schedule run delivered"
+        );
+
+        let conn = crate::db::migrate::test_memdb();
+        use crate::runtime_jobs::scheduler::{insert_run, RunOutcome};
+        for (q, ts) in [("steer-1", 100), ("steer-2", 200)] {
+            insert_run(
+                &conn,
+                "SCHED-1",
+                ts,
+                &RunOutcome::Queued { queue_id: q.into(), detail: "queued (steering)".into() },
+                "cron-rs",
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(crate::api::session_verbs::mark_schedule_run_delivered(&conn, "steer-1", "sent (queued while generating)"), 1);
+        let row = |q: &str| -> (String, String, String, String) {
+            conn.query_row(
+                "SELECT status, delivery, submission, note FROM schedule_runs WHERE queue_id=?1",
+                [q],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+        };
+        let (st, dl, sub, note) = row("steer-1");
+        assert_eq!((st.as_str(), dl.as_str(), sub.as_str()), ("delivered", "queued", "unverified"));
+        assert!(note.contains("delivered") && note.contains("sent (queued while generating)"), "{note}");
+        assert_eq!(row("steer-2").0, "queued", "a different queue id must not move");
+        // A second delivery of the same id moves nothing.
+        assert_eq!(crate::api::session_verbs::mark_schedule_run_delivered(&conn, "steer-1", "again"), 0);
+    }
+
     #[test]
     fn the_queue_deliverer_stamps_the_history_row() {
         const SRC: &str = include_str!("session_verbs.rs");

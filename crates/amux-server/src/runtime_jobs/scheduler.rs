@@ -157,6 +157,15 @@ impl RunOutcome {
         }
     }
 
+    /// The steering queue row a `Queued` run waits in. Stored on the run so
+    /// the delivery can mark the run delivered (0102).
+    pub fn queue_id(&self) -> Option<&str> {
+        match self {
+            RunOutcome::Queued { queue_id, .. } if !queue_id.is_empty() => Some(queue_id),
+            _ => None,
+        }
+    }
+
     /// `verify_submitted`'s verdict, for the paths that have one. `None` is a
     /// real answer (shell runs never submit anything to a session) and must not
     /// be rendered as a confident value.
@@ -1215,8 +1224,8 @@ pub fn insert_run(
     .map(|s| s.chars().take(500).collect());
     conn.execute(
         "INSERT INTO schedule_runs (schedule_id, ran_at, status, note, source, delivery, submission,
-                                    exit_code, output_tail)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                    exit_code, output_tail, queue_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             schedule_id,
             ran_at,
@@ -1227,6 +1236,7 @@ pub fn insert_run(
             outcome.submission(),
             outcome.shell_output().map(|o| o.exit_code),
             outcome.shell_output().map(|o| o.tail.as_str()),
+            outcome.queue_id(),
         ],
     )?;
     Ok(())
