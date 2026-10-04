@@ -1166,17 +1166,20 @@
      of wrapping (which detached borders and shredded rows on narrow screens). */
   .overlay-body .peek-box { display: block; white-space: pre; overflow-x: auto; overflow-y: hidden; max-width: 100%;
     word-break: normal; overflow-wrap: normal; -webkit-overflow-scrolling: touch;
-    /* Only claim HORIZONTAL pans; vertical scroll gestures pass through to the
-       peek-body. Without this, iOS treats each box block as its own touch-scroll
-       context and traps the vertical swipe when your finger lands on one — which
-       are the ──── rules around every prompt, so you couldn't scroll up past ❯.
-       overflow-y:hidden is load-bearing: overflow-x:auto ALONE makes the browser
+    /* Vertical swipes chain to the peek-body. touch-action names the pans the
+       browser may perform for a touch that STARTS here, the parent's scroll
+       included, so it must allow pan-y: it said `pan-x` alone, and a table
+       filling the peek left nowhere to start a vertical swipe (Ethan,
+       2026-10-03: "hard to scroll down/up when a table in peek mode is full
+       height of peek"; e2e/peek-table-touch-scroll.spec.ts). The old trap,
+       iOS keeping a vertical swipe that lands on a box (the ──── rules around
+       every prompt), is prevented by overflow-y below. overflow-y:hidden is load-bearing: overflow-x:auto ALONE makes the browser
        COMPUTE overflow-y to `auto` (CSS spec), so a table TALLER than the viewport
        becomes a vertical scroll container that — with overscroll containment —
        swallows the wheel/swipe instead of chaining to peek-body ("can't scroll a
        very tall table", 2026-07-15). Boxes are content-height, so hidden clips
        nothing. Scope the overscroll containment to X so vertical still chains. */
-    touch-action: pan-x; overscroll-behavior-x: contain; }
+    touch-action: pan-x pan-y; overscroll-behavior-x: contain; }
   .overlay-body .peek-box::-webkit-scrollbar { height: 6px; }
   .overlay-body .peek-box::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border-radius: 3px; }
   /* Emoji occupy exactly 2 monospace cells inside tables so borders stay aligned
