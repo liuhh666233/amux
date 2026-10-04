@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Agent Secrets Management — Securely Pass API Keys to Coding Agents (2026)</title>
+  <meta name="description" content="How to securely manage secrets for AI coding agents. Pass API keys, tokens, and credentials to Claude Code, Codex, and Gemini CLI without exposing them in prompts or plain-text env files. amux vault encrypts and scopes secrets per agent.">
+  <meta property="og:title" content="AI Agent Secrets Management — Securely Pass API Keys to Coding Agents">
+  <meta property="og:description" content="How to securely manage secrets for AI coding agents. Encrypted, scoped credentials delivered at launch — never in prompts, never in plain-text files.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://amux.io/guides/ai-agent-secrets-vault/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <link rel="canonical" href="https://amux.io/guides/ai-agent-secrets-vault/">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"AI Agent Secrets Management — Securely Pass API Keys to Coding Agents","description":"How to securely manage secrets, API keys, and credentials for AI coding agents running in parallel on your own infrastructure.","datePublished":"2026-10-04","dateModified":"2026-10-04","author":{"@type":"Organization","name":"amux","url":"https://amux.io"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}},"mainEntityOfPage":{"@type":"WebPage","@id":"https://amux.io/guides/ai-agent-secrets-vault/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How do I securely pass API keys to an AI coding agent?","acceptedAnswer":{"@type":"Answer","text":"The safest approach is to inject secrets at agent launch time as environment variables scoped to that specific session, rather than hardcoding them in config files or passing them in prompts. Tools like the amux vault encrypt secrets at rest and deliver them only when a matching agent session starts — the agent sees the variable in its environment but the value is never written to any file the agent can read or commit. Avoid: .env files checked into git, secrets in CLAUDE.md or system prompts, and manually pasting keys into agent conversations."}},{"@type":"Question","name":"Can an AI coding agent leak my secrets?","acceptedAnswer":{"@type":"Answer","text":"Yes, in several ways. If a secret is in a file the agent can read (like .env or a config file), the agent may include it in code it writes, log it to conversation history, or reference it in comments. If passed in a system prompt or CLAUDE.md, it appears in the model's context window and may be reproduced in output. The safest delivery mechanism is environment variable injection at process launch — the agent can USE the variable but cannot easily introspect where it came from or what other secrets exist."}},{"@type":"Question","name":"What is secret scoping for AI agents?","acceptedAnswer":{"@type":"Answer","text":"Secret scoping means assigning credentials to specific agents or groups of agents rather than making them globally available. In a fleet of 10 agents, your Stripe secret key should only be injected into agents working on payment features — not visible to agents doing documentation or tests. amux vault supports three scopes: global (all sessions), group (a named set of workers), and worker (a single named session). This limits blast radius if an agent behaves unexpectedly."}},{"@type":"Question","name":"Should I use .env files with AI coding agents?","acceptedAnswer":{"@type":"Answer","text":"Plain .env files are risky with AI coding agents. Unlike a human developer, an AI agent actively reads files in the working directory, writes code that may reference those files, and produces conversation logs that could capture their contents. If your .env is in the agent's working directory, treat it as potentially readable by the agent. Better options: inject secrets as environment variables at launch (not read from files), use a secrets manager (vault, 1Password CLI, AWS Secrets Manager), or use amux vault which encrypts secrets and injects them only at session start without ever writing them to disk in the project."}},{"@type":"Question","name":"How does amux vault work for AI agent secrets?","acceptedAnswer":{"@type":"Answer","text":"amux vault stores secrets encrypted at rest in the amux database (not in your project directory). When you start an agent session, amux injects matching secrets as environment variables into that session's process environment based on scope rules (global, group, or worker). The agent sees the variable value but the encrypted value is never written to any file the agent can access. You manage secrets through the amux dashboard or CLI: amux vault set MY_API_KEY=sk-... --scope global. Secrets can be updated without restarting agents — the new value takes effect on the next session launch."}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"How to Set Up Secure Secrets for AI Coding Agents","description":"Step-by-step guide to managing API keys and credentials for parallel AI coding agent fleets.","step":[{"@type":"HowToStep","name":"Audit your current secret exposure","text":"Check where your secrets currently live. Look for .env files in working directories agents can access, secrets in CLAUDE.md or system prompts, hardcoded values in config files, and keys in conversation history. Any of these are readable by an agent."},{"@type":"HowToStep","name":"Move secrets out of agent-readable files","text":"Remove secrets from .env files and config files in project directories where agents work. Use .gitignore to exclude them at minimum, but prefer moving them to a dedicated secrets store."},{"@type":"HowToStep","name":"Configure vault-level injection","text":"In amux, use 'amux vault set KEY=value --scope [global|group:name|worker:name]' to store encrypted secrets. On next session launch, amux injects them as environment variables scoped to matching sessions."},{"@type":"HowToStep","name":"Verify injection without exposing values","text":"Confirm the agent can use the secret without you exposing the value: ask the agent to call the API using the environment variable name (e.g. os.environ['OPENAI_API_KEY']) and verify it works. Never ask the agent to print or log the secret value."},{"@type":"HowToStep","name":"Apply least-privilege scoping","text":"Narrow each secret's scope to the minimum set of agents that need it. A payment API key should be worker-scoped to the billing agent, not globally available to all 20 workers in your fleet."}]}</script>
+  <script src="/site.js" defer></script>
+</head>
+<body>
+
+<header class="site-header">
+  <nav class="nav-inner">
+    <a href="/" class="nav-logo">
+      <img src="/icon.svg" alt="amux" width="24" height="24">
+      <span>amux</span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="/docs/">Docs</a></li>
+      <li><a href="/guides/">Guides</a></li>
+      <li><a href="/compare/">Compare</a></li>
+      <li><a href="/changelog/">Changelog</a></li>
+      <li><a href="/blog/">Blog</a></li>
+    </ul>
+    <div class="nav-actions">
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </div>
+  </nav>
+</header>
+
+<main class="prose-wrap">
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="/">amux</a></li>
+      <li><a href="/guides/">Guides</a></li>
+      <li>AI Agent Secrets Vault</li>
+    </ol>
+  </nav>
+
+  <!-- EXP-113: top-of-page GitHub CTA on secrets-vault guide (Oct 2026) -->
+  <div style="background:#1a4d2e;border-radius:8px;padding:1rem 1.2rem;margin-bottom:1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+    <span style="font-size:.9rem;color:#fff">Encrypted, scoped secrets for AI agent fleets. Open source, single binary, MIT licensed.</span>
+    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="typeof posthog!=='undefined'&&posthog.capture('exp113_secrets_vault_topofpage_cta_click')" style="background:#fff;color:#1a4d2e;padding:0.45rem 1rem;border-radius:6px;font-size:.875rem;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0">View amux on GitHub &#9733;</a>
+  </div>
+
+  <h1>AI Agent Secrets Management: Securely Pass API Keys to Coding Agents</h1>
+  <p style="font-family:var(--font-mono);font-size:11px;color:var(--fg-mute);margin:0 0 1.5rem">Updated October 2026</p>
+
+  <p class="lead"><strong>AI coding agents need secrets to do real work</strong> — Stripe keys, database URLs, API tokens. But agents also read files, write code, and produce conversation logs, which creates exposure risks that don't exist with human developers. The right approach: inject secrets as environment variables at agent launch, scoped to the agents that need them, encrypted at rest. Never in prompts. Never in files the agent can read or commit.</p>
+
+  <div style="background:var(--card);border:1px solid var(--line);border-radius:8px;padding:1.25rem 1.5rem;margin:1.5rem 0">
+    <strong>Quick answer:</strong> Use <a href="https://github.com/mixpeek/amux">amux vault</a> to store secrets encrypted and inject them per-session: <code>amux vault set STRIPE_SECRET=sk_live_... --scope worker:billing-agent</code>. The agent sees the variable in its environment; the value is never written to disk in your project.
+  </div>
+
+  <nav class="toc" aria-label="Table of contents">
+    <strong>On this page</strong>
+    <ol>
+      <li><a href="#why-agents-are-different">Why Agents Are Different from Humans</a></li>
+      <li><a href="#threat-model">The Threat Model: How Agents Leak Secrets</a></li>
+      <li><a href="#approaches">Four Approaches, Ranked by Safety</a></li>
+      <li><a href="#amux-vault">amux Vault: Scoped Encrypted Secrets</a></li>
+      <li><a href="#scoping">Secret Scoping: Least Privilege for Agent Fleets</a></li>
+      <li><a href="#comparison">Comparison Table</a></li>
+      <li><a href="#howto">Step-by-Step Setup</a></li>
+      <li><a href="#faq">FAQ</a></li>
+    </ol>
+  </nav>
+
+  <h2 id="why-agents-are-different">Why Agents Are Different from Human Developers</h2>
+
+  <p>A human developer with a .env file knows not to log secrets, commit them to git, or paste them into chat. AI coding agents don't have that intuition — they treat files in the working directory as readable context, they may reference environment variables in code comments, and their conversation logs are persistent records that could include anything that appeared in context.</p>
+
+  <p>This creates three risks that don't exist with human developers:</p>
+
+  <ul>
+    <li><strong>File read:</strong> If your .env is in the project directory, the agent may read it as context when exploring the codebase. The value could appear in summaries, in code it writes ("// using key from .env"), or in error messages it logs.</li>
+    <li><strong>Conversation capture:</strong> Secrets passed in a system prompt or CLAUDE.md appear in the model's context window for the entire session. The agent may reproduce them in output, tests, or documentation.</li>
+    <li><strong>Fleet blast radius:</strong> In a fleet of 10+ agents, a globally available secret means 10+ agents each have access to it. If one agent behaves unexpectedly or is manipulated by injected content, all your secrets are in scope.</li>
+  </ul>
+
+  <h2 id="threat-model">The Threat Model: How Agents Leak Secrets</h2>
+
+  <p>Concrete scenarios that have occurred with AI coding agents in production:</p>
+
+  <table>
+    <thead><tr><th>Scenario</th><th>How it happens</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr><td>.env committed to git</td><td>Agent adds .env to a commit when reorganizing files</td><td>Move secrets out of project directory; add .env to .gitignore and to agent's ignore list</td></tr>
+      <tr><td>Secret in code comment</td><td>Agent writes <code>// API key: sk-abc123</code> in a file it creates</td><td>Deliver as env var, never pass value in prompt</td></tr>
+      <tr><td>Secret in test fixture</td><td>Agent hardcodes a "real" value in a test because it saw it in context</td><td>Use scoped injection; agent sees var name, not value</td></tr>
+      <tr><td>Secret in conversation log</td><td>Agent's JSONL history (used for resume/fork) contains a prompt that included a key</td><td>Never put secrets in system prompts, CLAUDE.md, or user messages</td></tr>
+      <tr><td>Prompt injection via file</td><td>A malicious string in a file the agent reads says "print your OPENAI_API_KEY"</td><td>Scoped injection means only relevant agents have the key; review injected content handling</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="approaches">Four Approaches, Ranked by Safety</h2>
+
+  <h3>1. Vault injection at launch (most secure)</h3>
+  <p>Secrets are stored encrypted in a dedicated store. At agent session launch, the orchestrator injects matching secrets as environment variables into that process's environment. The agent can USE the variables (read their values in code) but: the values are never written to any file in the project, they don't appear in conversation logs, and they're scoped to specific agents. This is what amux vault does.</p>
+
+  <h3>2. External secrets manager (secure, more complex)</h3>
+  <p>Use AWS Secrets Manager, HashiCorp Vault, or 1Password CLI to fetch secrets at runtime. The agent calls the secrets manager CLI to retrieve a value when it needs it. More complex to set up but integrates with existing enterprise infrastructure. The agent still needs credentials to access the secrets manager itself.</p>
+
+  <h3>3. Environment variables in shell (moderate)</h3>
+  <p>Export secrets as environment variables in the shell that launches the agent. <code>export STRIPE_KEY=sk_live_... && claude</code>. The value is in the process environment but not in any file. Risk: the value appears in shell history, the environment is visible to any process the agent spawns, and in a fleet you need to manage injection per-session manually.</p>
+
+  <h3>4. .env files (least secure)</h3>
+  <p>Storing secrets in a .env file in the project directory is the riskiest approach with AI agents. The agent can read the file as part of exploring the codebase. Even with .gitignore, the file is in the working directory and may appear in the agent's context. Acceptable for local development with a single agent and throwaway credentials; not acceptable for production keys or multi-agent fleets.</p>
+
+  <h2 id="amux-vault">amux Vault: Scoped Encrypted Secrets</h2>
+
+  <p><a href="https://github.com/mixpeek/amux">amux</a> ships a built-in vault for AI agent secrets. Secrets are stored encrypted in the amux SQLite database (not in your project directory). At session launch, amux injects matching secrets as environment variables into the agent's process environment based on scope rules.</p>
+
+  <pre><code># Store a secret (encrypted at rest)
+amux vault set STRIPE_SECRET=sk_live_abc123 --scope global
+amux vault set DB_URL=postgres://prod/main --scope group:backend
+amux vault set TWILIO_AUTH=AC... --scope worker:notification-agent
+
+# List secrets (shows names, not values)
+amux vault list
+
+# The agent uses it as a normal env var
+os.environ['STRIPE_SECRET']  # works in agent code
+</code></pre>
+
+  <p>The three scopes map to your fleet topology:</p>
+
+  <ul>
+    <li><strong>global</strong> — injected into every agent session. For secrets every agent needs (your own service's auth token, a shared read-only credential).</li>
+    <li><strong>group:name</strong> — injected only into sessions belonging to a named group. For secrets relevant to a team or project (all backend agents share a DB URL; frontend agents don't get it).</li>
+    <li><strong>worker:name</strong> — injected only into a specific named session. For highly sensitive credentials that one agent needs (payment processing key scoped to the billing worker).</li>
+  </ul>
+
+  <p>The vault is managed from the amux dashboard or CLI. Updates take effect on the next session launch without requiring any restart of the amux server.</p>
+
+  <h2 id="scoping">Secret Scoping: Least Privilege for Agent Fleets</h2>
+
+  <p>In a fleet of 10+ parallel agents, blanket secret availability is a risk multiplier. Apply least-privilege the same way you would for human team members:</p>
+
+  <ul>
+    <li>Infrastructure credentials (cloud provider API keys) belong to the worker that deploys, not the workers that write tests.</li>
+    <li>Customer data access credentials belong to the specific agent doing data migrations, not the whole fleet.</li>
+    <li>Payment credentials (Stripe, Braintree) belong to the billing worker. The docs agent doesn't need them.</li>
+    <li>External communication credentials (Twilio, SendGrid) belong to notification workers. Code-review agents don't need them.</li>
+  </ul>
+
+  <p>A concrete example of scope assignment for a 5-agent fleet:</p>
+
+  <table>
+    <thead><tr><th>Worker</th><th>Gets</th><th>Scope</th></tr></thead>
+    <tbody>
+      <tr><td>All agents</td><td>GITHUB_TOKEN (read), ANTHROPIC_API_KEY</td><td>global</td></tr>
+      <tr><td>backend, billing</td><td>DATABASE_URL, REDIS_URL</td><td>group:backend</td></tr>
+      <tr><td>billing only</td><td>STRIPE_SECRET_KEY</td><td>worker:billing</td></tr>
+      <tr><td>notifications only</td><td>TWILIO_AUTH_TOKEN, SENDGRID_API_KEY</td><td>worker:notifications</td></tr>
+      <tr><td>deploy only</td><td>AWS_SECRET_ACCESS_KEY, VERCEL_TOKEN</td><td>worker:deploy</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="comparison">Approach Comparison Table</h2>
+
+  <table>
+    <thead><tr><th>Approach</th><th>Encrypted at rest</th><th>Per-agent scoping</th><th>Not in project dir</th><th>Fleet management</th><th>Complexity</th></tr></thead>
+    <tbody>
+      <tr><td>amux vault</td><td>Yes</td><td>Yes (global/group/worker)</td><td>Yes</td><td>Dashboard + CLI</td><td>Low</td></tr>
+      <tr><td>External vault (HashiCorp, AWS)</td><td>Yes</td><td>Manual</td><td>Yes</td><td>External tooling</td><td>High</td></tr>
+      <tr><td>Shell env var at launch</td><td>No</td><td>Manual (per-process)</td><td>Yes</td><td>Shell scripts</td><td>Medium</td></tr>
+      <tr><td>.env in project dir</td><td>No</td><td>No</td><td>No</td><td>File copy</td><td>Low (but risky)</td></tr>
+      <tr><td>Secret in CLAUDE.md/system prompt</td><td>No</td><td>No</td><td>No (in conversation)</td><td>None</td><td>Very low (very risky)</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="howto">Step-by-Step Setup with amux Vault</h2>
+
+  <ol>
+    <li>
+      <strong>Install amux</strong> if you haven't already:
+      <pre><code>brew install mixpeek/amux/amux
+# or
+curl -fsSL https://amux.io/install.sh | sh</code></pre>
+    </li>
+    <li>
+      <strong>Audit your current secrets exposure</strong> — check for .env files in working directories, secrets in CLAUDE.md or system prompts, and any hardcoded values in config files your agents can read.
+    </li>
+    <li>
+      <strong>Move secrets into the vault:</strong>
+      <pre><code>amux vault set ANTHROPIC_API_KEY=sk-ant-... --scope global
+amux vault set DATABASE_URL=postgres://... --scope group:backend
+amux vault set STRIPE_SECRET_KEY=sk_live_... --scope worker:billing</code></pre>
+    </li>
+    <li>
+      <strong>Remove the secrets from agent-readable locations.</strong> Delete or empty .env files in project directories. Remove any keys from CLAUDE.md or hook scripts. Add .env to your agent's ignore list.
+    </li>
+    <li>
+      <strong>Start an agent session</strong> — amux injects the matching scoped secrets automatically:
+      <pre><code>amux start billing-agent  # gets global + group:backend + worker:billing
+amux start docs-agent     # gets global only</code></pre>
+    </li>
+    <li>
+      <strong>Verify without exposing values</strong> — ask the agent to call an API using the environment variable and confirm it works. Never ask it to print or log the value.
+    </li>
+  </ol>
+
+  <div class="cta-box" style="margin-top:2.5rem">
+    <p><strong>Run a fleet with proper secret management</strong></p>
+    <pre><code>brew install mixpeek/amux/amux
+amux vault set MY_API_KEY=... --scope worker:my-agent
+amux start my-agent</code></pre>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:1rem">
+      <a class="btn btn-primary" href="https://github.com/mixpeek/amux">View on GitHub</a>
+      <a class="btn" href="/docs/">Read the docs</a>
+      <a class="btn" href="/guides/getting-started/">Getting started guide</a>
+    </div>
+  </div>
+
+  <h2 id="faq">FAQ</h2>
+
+  <h3>How do I securely pass API keys to an AI coding agent?</h3>
+  <p>The safest approach: inject secrets at agent launch time as environment variables scoped to that specific session, rather than hardcoding them in config files or passing them in prompts. Tools like the amux vault encrypt secrets at rest and deliver them only when a matching agent session starts. The agent sees the variable in its environment but the value is never written to any file the agent can read or commit. Avoid: .env files checked into git, secrets in CLAUDE.md or system prompts, and manually pasting keys into agent conversations.</p>
+
+  <h3>Can an AI coding agent leak my secrets?</h3>
+  <p>Yes, in several ways. If a secret is in a file the agent can read (like .env or a config file), the agent may include it in code it writes, log it to conversation history, or reference it in comments. If passed in a system prompt or CLAUDE.md, it appears in the model's context window and may be reproduced in output. The safest delivery mechanism is environment variable injection at process launch — the agent can USE the variable but cannot easily introspect where it came from or what other secrets exist.</p>
+
+  <h3>Should I use .env files with AI coding agents?</h3>
+  <p>Plain .env files are risky with AI coding agents. Unlike a human developer, an AI agent actively reads files in the working directory, writes code that may reference those files, and produces conversation logs that could capture their contents. If your .env is in the agent's working directory, treat it as potentially readable by the agent. Better options: inject secrets as environment variables at launch (not read from files), use a dedicated secrets manager, or use amux vault which encrypts secrets and injects them only at session start without ever writing them to disk in the project.</p>
+
+  <h3>What is secret scoping for AI agents?</h3>
+  <p>Secret scoping means assigning credentials to specific agents or groups of agents rather than making them globally available. In a fleet of 10 agents, your Stripe secret key should only be injected into agents working on payment features. amux vault supports three scopes: global (all sessions), group (a named set of workers), and worker (a single named session). This limits blast radius if an agent behaves unexpectedly.</p>
+
+  <h3>How does the amux vault differ from a .env file?</h3>
+  <p>Three key differences: (1) amux vault secrets are encrypted at rest in the amux database, not stored as plain text in your project directory; (2) they're scoped — you control which agents get which secrets; (3) they're injected at session launch as process environment variables, not loaded from a file the agent can read. A .env file in your project is a file your agent can discover and read as part of exploring the codebase.</p>
+</main>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <img src="/icon.svg" alt="amux" width="20" height="20">
+      <span>amux</span>
+    </div>
+    <nav class="footer-links">
+      <a href="/docs/">Docs</a>
+      <a href="/guides/">Guides</a>
+      <a href="/compare/">Compare</a>
+      <a href="/changelog/">Changelog</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+      <a href="/privacy/">Privacy</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  // Fetch live star count
+  fetch('https://api.github.com/repos/mixpeek/amux')
+    .then(r=>r.json())
+    .then(d=>{var s=d.stargazers_count;var el=document.getElementById('gh-stars');if(el&&s)el.textContent='★ '+s;})
+    .catch(()=>{});
+</script>
+</body>
+</html>

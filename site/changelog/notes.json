@@ -1,16 +1,81 @@
 [
   {
+    "hash": "91bf682bfb56c3cc635919f3218b9f6115b7d3e4",
+    "short": "91bf682",
+    "date": "2026-10-03",
+    "type": "fix",
+    "tags": [
+      "ios",
+      "upload",
+      "reliability"
+    ],
+    "title": "iOS share: retries dropped chunks and reports them; 1MB chunk size",
+    "description": "Sharing large files from iOS via the share sheet now retries dropped chunks and reports which ones failed, rather than silently failing with a network error. Chunk size is reduced to 1MB for more reliable uploads over mobile connections. Files over 8MB that previously failed mid-upload now complete reliably."
+  },
+  {
+    "hash": "263514f87ae5071e7da544e070f3a8664a60bd0c",
+    "short": "263514f",
+    "date": "2026-10-03",
+    "type": "feat",
+    "tags": [
+      "location",
+      "map",
+      "import"
+    ],
+    "title": "Location: import a Google Maps Timeline export into your history",
+    "description": "You can now import a Google Maps Timeline JSON export into amux location history using scripts/import-google-timeline.py. Timeline path points and activity endpoints are mapped to the /api/map/location endpoint. Useful for seeding location context from an existing Google account."
+  },
+  {
+    "hash": "e3b05a9567ef555a10f23173bcfa8682b6b7ffbd",
+    "short": "e3b05a9",
+    "date": "2026-10-02",
+    "type": "feat",
+    "tags": [
+      "companion",
+      "chat",
+      "context"
+    ],
+    "title": "Companion: sees your last 15 worker activity log entries",
+    "description": "The chat companion now receives the last 15 entries from each worker's cmd_history \u2014 prompts, messages, and steering deliveries with timestamps and origin. This gives the companion full context of what your agents have actually been doing, making it far more useful for fleet-level questions like 'what did my backend agent work on today?' or 'why did the deploy agent stop?'"
+  },
+  {
+    "hash": "62a149c3d3b20ba286332367f0e0040434cfda1b",
+    "short": "62a149c",
+    "date": "2026-10-02",
+    "type": "fix",
+    "tags": [
+      "ui",
+      "mobile",
+      "settings"
+    ],
+    "title": "Fix: settings modal centers correctly on mobile with overflow scroll",
+    "description": "The settings modal on mobile was positioned off-center and clipped without scroll. It now centers properly and scrolls when content exceeds the viewport height. Affects all settings panels on iOS and Android."
+  },
+  {
+    "hash": "16120922f8850e3c7a3118ca33d28a362c4f3a86",
+    "short": "1612092",
+    "date": "2026-10-03",
+    "type": "fix",
+    "tags": [
+      "ios",
+      "upload",
+      "share"
+    ],
+    "title": "Fix: iOS share extension no longer fails with network error on files over 8MB",
+    "description": "Sharing large files from iOS via the system share sheet failed with 'network connection lost' for files over 8MB. The root cause was the share extension timing out on large single-chunk uploads. Fixed by switching to chunked upload with retry logic."
+  },
+  {
     "sha": "02a660d8",
     "date": "2026-09-30",
     "title": "Peek: split pane drag resize, per-pane zoom, sortable file browser",
-    "body": "The transcript viewer now supports drag-resizable split panes — grab the divider between the file browser and transcript view and drag to your preferred width. Per-pane zoom lets you increase or decrease text size in each panel independently (Cmd+ / Cmd−). The file browser is now sortable by name, size, or last modified. The split toggle button in the toolbar shows or hides the file browser panel with one click. Together these make the peek panel a genuine two-pane IDE-grade transcript explorer.",
+    "body": "The transcript viewer now supports drag-resizable split panes \u2014 grab the divider between the file browser and transcript view and drag to your preferred width. Per-pane zoom lets you increase or decrease text size in each panel independently (Cmd+ / Cmd\u2212). The file browser is now sortable by name, size, or last modified. The split toggle button in the toolbar shows or hides the file browser panel with one click. Together these make the peek panel a genuine two-pane IDE-grade transcript explorer.",
     "type": "feat"
   },
   {
     "sha": "64f864c6",
     "date": "2026-09-30",
     "title": "Peek: file browser split toggle button added to toolbar",
-    "body": "A new button in the peek toolbar shows or hides the file browser split pane without closing the transcript view. Previously the file browser state persisted across navigations but had no explicit toggle — you had to close and reopen the peek panel to change the layout. The toggle is persistent: if you hide the file browser, it stays hidden across peek sessions until you turn it back on.",
+    "body": "A new button in the peek toolbar shows or hides the file browser split pane without closing the transcript view. Previously the file browser state persisted across navigations but had no explicit toggle \u2014 you had to close and reopen the peek panel to change the layout. The toggle is persistent: if you hide the file browser, it stays hidden across peek sessions until you turn it back on.",
     "type": "feat"
   },
   {
@@ -31,14 +96,14 @@
     "sha": "7cc19bc9",
     "date": "2026-09-30",
     "title": "Fix: an owner /clear drops queued needs-input auto-approvals",
-    "body": "When an owner ran /clear in a session, the session's message queue was flushed — but any pending needs-input auto-approvals queued for that session were not. On the next turn, those stale approvals would fire against whatever new task the session had picked up, silently approving actions that were never reviewed by the owner. The fix: /clear now also flushes the queued auto-approval entries for that session.",
+    "body": "When an owner ran /clear in a session, the session's message queue was flushed \u2014 but any pending needs-input auto-approvals queued for that session were not. On the next turn, those stale approvals would fire against whatever new task the session had picked up, silently approving actions that were never reviewed by the owner. The fix: /clear now also flushes the queued auto-approval entries for that session.",
     "type": "fix"
   },
   {
     "sha": "477d835d",
     "date": "2026-09-30",
-    "title": "Vault secrets: encrypted credentials scoped global, group, or worker — delivered at agent launch (AMUX-5375)",
-    "body": "Agents now receive encrypted secrets as environment variables at launch. Store API keys, OAuth tokens, database credentials, and webhook secrets in the vault via the Secrets tab. Set the scope: global (all workers), group (a named set), or per-worker. On launch, amux decrypts the relevant secrets and injects them into the agent's environment — they never appear in CLAUDE.md, git history, or transcript output. Rotating a credential updates every worker that uses it without editing any per-agent config.",
+    "title": "Vault secrets: encrypted credentials scoped global, group, or worker \u2014 delivered at agent launch (AMUX-5375)",
+    "body": "Agents now receive encrypted secrets as environment variables at launch. Store API keys, OAuth tokens, database credentials, and webhook secrets in the vault via the Secrets tab. Set the scope: global (all workers), group (a named set), or per-worker. On launch, amux decrypts the relevant secrets and injects them into the agent's environment \u2014 they never appear in CLAUDE.md, git history, or transcript output. Rotating a credential updates every worker that uses it without editing any per-agent config.",
     "type": "feat"
   },
   {

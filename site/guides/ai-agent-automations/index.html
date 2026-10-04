@@ -42,7 +42,7 @@
     "description": "How amux runs AI business automations — intent-resolved on every run, not brittle coordinate replay. Browser AI agents that compose with coding agents, scheduled, phone-monitored, self-healing.",
     "url": "https://amux.io/guides/ai-agent-automations/",
     "datePublished": "2026-07-05",
-    "dateModified": "2026-08-17",
+    "dateModified": "2026-10-04",
     "author": {"@type": "Organization", "name": "amux", "url": "https://amux.io/"},
     "publisher": {"@type": "Organization", "name": "amux", "url": "https://amux.io/"},
     "image": "https://amux.io/og-image.png",
@@ -171,7 +171,7 @@
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <a href="/guides/">Guides</a> <span class="sep">›</span> <span>AI Agent Business Automations</span></div>
 
     <h1>AI Agent Business Automations</h1>
-    <p class="subtitle">Intent-based, not brittle coordinate replay — automate SaaS tasks with AI that reads the page, not records the pixels. Updated August 2026.</p>
+    <p class="subtitle">Intent-based, not brittle coordinate replay — automate SaaS tasks with AI that reads the page, not records the pixels. Updated October 2026.</p>
 
     <p>amux runs business automations as AI-driven browser tasks: pull a daily Stripe payout report, reconcile two dashboards, check insurance eligibility statuses, monitor competitor pricing. The critical difference from traditional RPA (robotic process automation): amux automations describe <em>what to accomplish</em>, not <em>which pixels to click</em>. Each run, the agent reads the current page state and decides actions fresh — it survives UI redesigns, A/B tests, and dynamic content that would break a coordinate-replay script. And because automations run inside the same platform as your coding agents, results hand off directly: a scraper finds bugs, a Claude Code session files PRs.</p>
 
@@ -470,7 +470,7 @@ produce: |
 
     <div style="background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.3);border-radius:8px;padding:20px 24px;margin:32px 0;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
       <div style="flex:1;min-width:200px">
-        <div style="font-weight:600;font-size:1rem;margin-bottom:4px">amux — browser automation + coding agents in one dashboard (311★ GitHub)</div>
+        <div style="font-weight:600;font-size:1rem;margin-bottom:4px">amux — browser automation + coding agents in one dashboard (514★ GitHub)</div>
         <div style="color:var(--muted);font-size:.9rem">Define automations as Markdown SOPs. amux runs them against your saved browser profiles with intent re-resolved every run — not brittle coordinate replay. Compose with Claude Code sessions for end-to-end pipelines. Open source, single Rust binary.</div>
       </div>
       <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" onclick="posthog&&posthog.capture('exp014_guide_github_cta_click',{page:window.location.pathname})" style="background:#6366f1;color:#fff;padding:10px 20px;border-radius:6px;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0">View on GitHub ★</a>
@@ -488,11 +488,47 @@ amux serve  # → https://localhost:8824</code></pre>
       </div>
     </div>
 
+    <h2>Defining automations as Markdown Robot files</h2>
+    <p>Automations are stored as flat Markdown files at <code>~/.amux/robots/&lt;slug&gt;.md</code>. The frontmatter controls when and how the automation runs; the body is the plain-English SOP the agent reads. Because they're plain text files, they're git-diffable, reviewable, and shareable without a proprietary format.</p>
+
+    <pre style="background:var(--surface-2);padding:1rem;border-radius:6px;overflow-x:auto"><code>---
+name: Daily Stripe payout report
+slug: stripe-payout-daily
+trigger: schedule
+schedule: daily at 8am
+target: browser:stripe-profile
+allow_irreversible: false
+---
+
+## Goal
+Post yesterday's total Stripe payout to the amux board.
+
+## Steps
+1. Go to https://dashboard.stripe.com/payouts
+2. Filter to yesterday.
+3. Read the total amount.
+4. Create a board issue: "Stripe payout [date]: [amount]"
+
+## Success when
+A board issue exists with yesterday's payout amount.
+
+## Stop if
+A 2FA prompt, CAPTCHA, or login redirect appears.</code></pre>
+
+    <p>Frontmatter fields:</p>
+    <ul>
+      <li><code>trigger</code>: <code>schedule</code>, <code>manual</code>, or <code>webhook</code></li>
+      <li><code>target</code>: <code>browser:&lt;profile-name&gt;</code> (runs in saved auth profile) or <code>desktop</code> (computer-use, requires a screen)</li>
+      <li><code>allow_irreversible</code>: <code>false</code> (default) halts and confirms before any irreversible action; <code>true</code> permits destructive steps like form submissions and payments</li>
+      <li><code>handoff_to</code>: optional session name — when the automation completes, it sends results directly to a named coding agent session</li>
+    </ul>
+
     <h2>Related guides</h2>
     <ul>
       <li><a href="/guides/running-10-plus-agents/">Running 10+ agents in parallel</a></li>
       <li><a href="/guides/ai-coding-agents-overnight/">AI coding agents overnight</a></li>
       <li><a href="/guides/custom-automation-cron/">Custom automation with amux scheduler</a></li>
+      <li><a href="/guides/ai-agent-secrets-vault/">Secure secrets for AI agents (vault)</a></li>
       <li><a href="/guides/self-healing-configuration/">Self-healing agent configuration</a></li>
       <li><a href="/guides/mobile-management-pwa/">Managing agents from your phone</a></li>
       <li><a href="/concierge/">amux Concierge — managed automation setup</a></li>
