@@ -7612,7 +7612,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.49"
+LAND_BEHAVIOR_VERSION="2026-10-02.50"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -7950,17 +7950,22 @@ p.communicate(msg.encode())
       _land_log "WARN the shared $cfg holds core.worktree=$val (not this hold's worktree) after $phase; left for its owner"
     fi
   }
-  # _land_leg_summary <timed log> <total s>: a leg starts at the first line
-  # carrying its "name:" prefix and ends where the next leg starts; log the
-  # five slowest with the push's total.
+  # _land_leg_summary <timed log> <total s>: a pre-push leg prints its verdict
+  # when it FINISHES, so a leg runs from the line printed just before its first
+  # line to its own last line; log the five slowest with the push's total.
+  # (.45 credited each gap to the line BEFORE it: on 2026-10-04 13:50Z it
+  # reported "session-stamp 26s" for env-census's 26 s, and gs12-gates was
+  # asked to speed up a 0.1 s leg, GG-63.)
   _land_leg_summary() {
     [ -s "$1" ] || return 0
     local top
     top="$(awk '
       { t=$1; sub(/s$/,"",t); line=$0; sub(/^ *[0-9.]+s /,"",line)
         if (match(line,/^[A-Za-z0-9_.-]+:/)) { leg=substr(line,1,RLENGTH-1)
-          if (!(leg in seen)) { seen[leg]=1; n++; name[n]=leg; start[n]=t } } last=t }
-      END { for (i=1;i<=n;i++) { e=(i<n)?start[i+1]:last; d=e-start[i]; if (d>=1) printf "%.0f %s\n", d, name[i] } }' "$1" \
+          if (!(leg in seen)) { seen[leg]=1; n++; name[n]=leg; begin[leg]=prev }
+          end_[leg]=t }
+        prev=t }
+      END { for (i=1;i<=n;i++) { d=end_[name[i]]-begin[name[i]]; if (d>=1) printf "%.0f %s\n", d, name[i] } }' "$1" \
       | sort -nr | head -5 | awk '{printf "%s%s %ss", (NR>1?", ":""), $2, $1}')"
     _land_log "push took ${2}s; slowest legs: ${top:-none over 1s}. Timed output: $1"
   }
