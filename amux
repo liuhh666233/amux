@@ -6773,8 +6773,22 @@ _land_precheck() {
   [ -n "$chk" ] || return 0
   git rev-parse -q --verify "$remote/$branch^{commit}" >/dev/null 2>&1 || {
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck unmeasured: no $remote/$branch" >> "$log"; return 0; }
+  # The base is pinned to a SHA once, here, and that SHA is what the check
+  # gets: on 2026-10-04 22:05Z gs12-spend's precheck was handed the ref name,
+  # read a base from 2026-09-19 (ef8e6a6c10a) while the ref was briefly wrong,
+  # swept 4,165 published commits and refused on them; a minute later the same
+  # merge-base was correct. An implausibly long range is reported unmeasured,
+  # never refused, so no lane is told to rewrite published history.
+  local _pc_base _pc_tip _pc_n
+  _pc_base="$(git rev-parse -q --verify "$remote/$branch^{commit}" 2>/dev/null)"
+  _pc_tip="$(git rev-parse "$tip")"
+  _pc_n="$(git rev-list --count "$_pc_base..$_pc_tip" 2>/dev/null || echo 0)"
+  if [ "${_pc_n:-0}" -gt "${AMUX_LAND_PRECHECK_MAX_RANGE:-300}" ]; then
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "WARN enqueue precheck unmeasured: the range $(git rev-parse --short "$_pc_base")..$(git rev-parse --short "$_pc_tip") is $_pc_n commits (over ${AMUX_LAND_PRECHECK_MAX_RANGE:-300}); the base is suspect, so nothing is refused on it and the gate still runs" >> "$log"
+    return 0
+  fi
   t0=$(date +%s); rc=0
-  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="enqueue" perl -e "$_LAND_PC_TIMEOUT_PL" "$budget" $chk "$remote/$branch" "$(git rev-parse "$tip")" 2>&1)" || rc=$?
+  out="$(cd "$top" && AMUX_LAND_PRECHECK_TIMEOUT_S="$budget" AMUX_LAND_PRECHECK_MODE="enqueue" perl -e "$_LAND_PC_TIMEOUT_PL" "$budget" $chk "$_pc_base" "$_pc_tip" 2>&1)" || rc=$?
   [ -n "$_pc_tmp" ] && rm -rf -- "${_pc_tmp:?}"
   full="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-$me-$$-precheck.log"
   mkdir -p "${full%/*}"; printf '%s\n' "$out" > "$full"
@@ -7637,7 +7651,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.52"
+LAND_BEHAVIOR_VERSION="2026-10-02.53"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -8654,7 +8668,7 @@ $f"
     if [ -n "$lanes" ] && [ "$_fg_on" = 0 ] && [ "${AMUX_LAND_PRECHECK_BATCH:-1}" = 1 ]; then
       local _pc_out _pc_rc=0 _pc_t0 _pc_named _pc_tk _pc_rest _pc_excl=""
       _pc_t0=$(date +%s)
-      _pc_out="$(_land_precheck_exec "$remote/$branch" "$stack_tip")" || _pc_rc=$?
+      _pc_out="$(_land_precheck_exec "$(git rev-parse "$remote/$branch")" "$stack_tip")" || _pc_rc=$?
       _land_heal_core_worktree "the composed precheck"
       # A check killed at its budget is UNMEASURED, and pushing an unmeasured
       # batch spends a whole gate run: both batches refused at the gate on
@@ -8665,7 +8679,7 @@ $f"
         local _pc_rb="${AMUX_LAND_PRECHECK_RETRY_TIMEOUT_S:-$(( ${AMUX_LAND_PRECHECK_TIMEOUT_S:-900} * 2 ))}"
         _land_log "composed batch precheck unmeasured after $(( $(date +%s) - _pc_t0 ))s; re-running once with a ${_pc_rb}s budget before any gate run"
         _pc_rc=0; _pc_t0=$(date +%s)
-        _pc_out="$(AMUX_LAND_PRECHECK_ATTEMPT=2 AMUX_LAND_PRECHECK_TIMEOUT_S="$_pc_rb" _land_precheck_exec "$remote/$branch" "$stack_tip")" || _pc_rc=$?
+        _pc_out="$(AMUX_LAND_PRECHECK_ATTEMPT=2 AMUX_LAND_PRECHECK_TIMEOUT_S="$_pc_rb" _land_precheck_exec "$(git rev-parse "$remote/$branch")" "$stack_tip")" || _pc_rc=$?
         _land_heal_core_worktree "the composed precheck retry"
       fi
       # Keep EVERY composed check's output and its raw exit status: a pass in
