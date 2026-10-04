@@ -101,6 +101,14 @@ def read_tool_paths(data: dict[str, Any], limit: int) -> list[tuple[str, int]]:
     raw = str(tool_input.get("file_path") or "").strip()
     if not raw:
         return []
+    # The Read tool shows an image or PDF to the model as pictures and pages,
+    # never as text lines, so a newline count says nothing about what it sends,
+    # and `limit` does not change it. Refusing cost a turn and a useless retry:
+    # 2026-10-04 a Chat tab was refused an attached invoice PDF twice ("couldn't
+    # open a file"). Shell readers (`cat x.pdf`) still go through the probe.
+    if looks_binary(raw):
+        audit("binary_read_passed", tool="large_read", paths=[raw])
+        return []
     path = resolve_path(raw, str(data.get("cwd") or os.getcwd()))
     too_large, seen = exceeds_limit(path, limit)
     return [(raw, seen)] if too_large else []

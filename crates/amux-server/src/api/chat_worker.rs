@@ -760,6 +760,11 @@ fn turn_args(provider: &str, flags: &str, cc_model: &str, conv: &str, fresh: boo
     // answering the accountability nudge). Only the harness CLI is allowed;
     // every other tool keeps the worker's own permission setting.
     a.extend(["--allowedTools".into(), "Bash(amux:*)".into()]);
+    // Files the owner attaches in the Chat tab are saved under the amux
+    // uploads folder, outside the worker's directory, so a headless turn was
+    // refused them with no way to grant it (2026-10-04, mixpeek-override's
+    // chat: "couldn't open the invoice PDF ... permission ... denied").
+    a.extend(["--add-dir".into(), home().join("uploads").to_string_lossy().into_owned()]);
     for f in ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"] {
         if flags.split_whitespace().any(|t| t == f) {
             a.push(f.into());
@@ -2056,6 +2061,11 @@ mod tests {
         assert!(
             fresh.windows(2).any(|w| w == ["--allowedTools", "Bash(amux:*)"]),
             "the harness CLI must be usable from a headless turn"
+        );
+        let uploads = home().join("uploads").to_string_lossy().into_owned();
+        assert!(
+            fresh.windows(2).any(|w| w[0] == "--add-dir" && w[1] == uploads),
+            "a headless turn must be able to read the files attached in the Chat tab: {fresh:?}"
         );
         let resumed = turn_args("claude", "", "", "c-1", false);
         assert!(resumed.windows(2).any(|w| w == ["--resume", "c-1"]));

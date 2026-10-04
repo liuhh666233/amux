@@ -66,7 +66,22 @@ ok "complex shell and heredoc bodies stop before unsupported lexical parsing"
 # images the blocked artifact IS the deliverable.
 printf '\x89PNG\r\n\x1a\n' > "$TMP/big.png"
 for i in 1 2 3 4 5 6 7 8; do printf 'binary junk %s\n' "$i" >> "$TMP/big.png"; done
-binary_out="$(read_payload "$TMP/big.png" | hook 2>&1 || true)"
+# The Read TOOL renders an image or PDF as pictures and pages, so line counts
+# mean nothing there and it passes (2026-10-04: a Chat tab was refused an
+# attached invoice PDF twice). A shell reader still dumps the bytes as text, so
+# `cat` of a big binary is what the refusal below is about.
+cp "$TMP/big.png" "$TMP/big.pdf"
+for f in big.png big.pdf; do
+  if pass_out="$(read_payload "$TMP/$f" | hook 2>&1)" && [[ -z "$pass_out" ]]; then
+    ok "the Read tool may open $f (rendered, not read as lines)"
+  else
+    echo "FAIL Read of $f was refused: $pass_out" >&2; exit 1
+  fi
+done
+grep -q '"verdict":"binary_read_passed"' "$TMP/home/.amux/logs/read-delegation.jsonl" \
+  && ok "a passed binary Read is audited as binary_read_passed" \
+  || { echo "FAIL no binary_read_passed audit row" >&2; exit 1; }
+binary_out="$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","cwd":"/","tool_input":{"command":"cat "+sys.argv[1]}}))' "$TMP/big.png" | hook 2>&1 || true)"
 case "$binary_out" in
   *"looks BINARY"*) ok "an image is named as binary, not sent to the text helper" ;;
   *) echo "FAIL image not identified as binary: $binary_out" >&2; exit 1 ;;
