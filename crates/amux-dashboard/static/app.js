@@ -13082,8 +13082,15 @@ async function togglePeekBoardPolicy(field, on) {
     });
     if (r) {
       try { const d = await r.json(); showToast(d.message || 'Saved'); } catch (e) {}
+      // The server took it: record it locally too. The session refetch below
+      // can fail (a 503 read, measured in e2e), and the box then fell back to
+      // the stale value although the save had landed. A refetch that succeeds
+      // still overwrites this with the server's effective value.
+      const c = _PEEK_BOARD_ALL_CONFIGS.find(x => x.field === field);
+      const s = (typeof sessions !== 'undefined' ? sessions : []).find(x => x.name === name);
+      if (c && s) { s[c.value] = !!on; if (c.own) s[c.own] = true; }
     }
-    await fetchSessions();
+    await fetchSessions().catch(() => {});
   } finally {
     delete _pbcPending[field];
     _peekBoardPolicySync();
@@ -13830,7 +13837,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.1247';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.1248';   // bump together with the sw.js CACHE version
 // The dashboard's code ran, so a cache-clear pass reached it: reset the landing
 // page's loop guard (api/static_files.rs clear_sw_landing, AMUX-5385).
 try { sessionStorage.removeItem('amux_clear_sw_n'); } catch (e) {}
