@@ -9133,6 +9133,7 @@ pub fn spawn(state: AppState) -> Option<super::PeriodicTask> {
             let (ci_runs, ci_sup) = fetch_ci_runs(unix_now()).await;
             let system_issues = crate::runtime_jobs::registry::health_issues(unix_now());
             let r = autofix_tick_with_inputs(&state, &home, &ci_runs, ci_sup, &system_issues).await;
+            release_freed_heap();
             if !r.filed.is_empty() || !r.errors.is_empty() {
                 tracing::info!(
                     filed = r.filed.len(),
@@ -9152,6 +9153,27 @@ pub fn spawn(state: AppState) -> Option<super::PeriodicTask> {
             // duplicate is what let the broken one look alive for a week.
         }
     }))
+}
+
+/// Hand the memory a tick freed back to the OS (AMUX-5565).
+///
+/// Each tick's detectors scan up to 400k request-log rows on blocking-pool
+/// threads, and glibc keeps what they free in per-thread arenas instead of
+/// returning it. The weekly soak measured the cost on a fresh server under
+/// load, 240 minutes per arm, steady-state RSS slope:
+///   autofix on, arenas default   14.7 MB/h  (peak 224 MB)
+///   autofix on, MALLOC_ARENA_MAX=2  8.3 MB/h  (peak 105 MB)
+///   autofix off (AMUX_AUTOFIX_SECS=0)  0.7 MB/h, SOAK PASSED
+/// The gate is 2 MB/h. `malloc_trim` releases free pages from every arena; it
+/// is glibc-only and a no-op elsewhere (macOS's allocator returns memory).
+fn release_freed_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: malloc_trim only walks the allocator's own free lists.
+        let released = unsafe { libc::malloc_trim(0) };
+        tracing::debug!(target: "amux::autofix", verdict = "heap_trimmed", released = released != 0,
+            "autofix: freed heap returned to the OS after the tick");
+    }
 }
 
 pub use crate::config::amux_home;
