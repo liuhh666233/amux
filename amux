@@ -6785,8 +6785,33 @@ _land_precheck() {
   esac
   printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "enqueue precheck refused (rc $rc, $(( $(date +%s) - t0 ))s); not queued. Output: $full" >> "$log"
   printf '%s\n' "$out" | tail -30 >&2
+  local _fx; _fx="$(_land_inflight_fixes "$remote" "$branch" "$out" "$me")"
+  if [ -n "$_fx" ]; then
+    printf '%s\n' "$_fx" | sed 's/^/amux land: already being fixed: /' >&2
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$me" "precheck refusal names a file a queued ticket already changes: $(printf '%s' "$_fx" | tr '\n' ';')" >> "$log"
+  fi
   echo "amux land: refused before queueing: the repository's land precheck failed on this range (full output $full). Fix the commits and run amux land again." >&2
   return 1
+}
+
+# _land_inflight_fixes <remote> <branch> <refusal text> <me>: queued tickets
+# (other lanes) whose commits change a file the refusal names, one line each.
+# On 2026-10-04 four lanes each wrote the same one-line marker fix for a test
+# the precheck refused, because each saw only its own refusal.
+_land_inflight_fixes() {
+  local remote="$1" branch="$2" text="$3" me="$4" key q tk who sha f base
+  key="$(printf '%s %s' "$(git remote get-url "$remote" 2>/dev/null)" "$branch" | shasum | cut -c1-16)"
+  q="$HOME/.amux/locks/land-$key.q"
+  [ -d "$q" ] || return 0
+  for tk in $(ls "$q" 2>/dev/null | sort); do
+    { read -r who; read -r sha; } < "$q/$tk" 2>/dev/null || continue
+    [ -n "$sha" ] && [ "$who" != "$me" ] || continue
+    base="$(git merge-base "$remote/$branch" "$sha" 2>/dev/null)" || continue
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      printf '%s' "$text" | grep -qF -- "$f" && { echo "$who's queued ticket $tk changes $f"; break; }
+    done <<< "$(git diff --name-only "$base" "$sha" 2>/dev/null)"
+  done
 }
 
 # Wall-clock bound for the land precheck. `alarm; exec` signalled only the
@@ -7612,7 +7637,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.51"
+LAND_BEHAVIOR_VERSION="2026-10-02.52"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
