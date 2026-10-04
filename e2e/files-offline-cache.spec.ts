@@ -8,8 +8,9 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, expect } from './fixtures';
+import { cleanup } from './teardown';
 
-test('Files shows the saved listing and file at once when the server hangs, and the preview fills the screen', async ({ page, request }) => {
+test('Files shows the saved listing and file at once when the server hangs, and the preview fills the screen', async ({ page, request }, info) => {
   test.setTimeout(90_000);
   const dir = await mkdtemp(join(tmpdir(), 'amux-files-cache-'));
   await mkdir(join(dir, 'essays'));
@@ -61,7 +62,7 @@ test('Files shows the saved listing and file at once when the server hangs, and 
     });
     expect(fill.bottom, JSON.stringify(fill)).toBeGreaterThan(fill.inner - 2);
   } finally {
-    await request.post('/api/prefs', { headers, data: { key: 'files_cwd', value: prior.value || '' } });
-    await rm(dir, { recursive: true, force: true });
+    await cleanup('restore files_cwd', () => request.post('/api/prefs', { headers, data: { key: 'files_cwd', value: prior.value || '' } }), info);
+    await cleanup('remove temp folder', () => rm(dir, { recursive: true, force: true }), info);
   }
 });
