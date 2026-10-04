@@ -7007,13 +7007,33 @@ _land_regenerate() {
   # failed with rc 127 for gs12-compute at 23:26Z on 2026-10-02. The common
   # git dir's parent is the primary checkout for a plain clone and a worktree.
   local top; top="$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd)" || top="$(git rev-parse --show-toplevel)"
-  local one
+  local one own run_cmd _t1 _times=""
   out=""
   while IFS= read -r one; do
     [ -n "$one" ] || continue
-    out="$out$(cd "$tmp" && AMUX_LAND_REPO="$top" AMUX_LAND_TREE="$tmp" perl -e "$_LAND_PC_TIMEOUT_PL" "$budget" bash -c "$one" 2>&1)
-" || { rc=$?; cmd="$one"; break; }
+    # A generator may name its own inputs: `inputs=<pathspec> [<pathspec>...]
+    # :: <command>`. It runs only when one of THOSE changed between origin and
+    # the stack. The union check above let one broad input (env_census's
+    # server/**/*.py) run all six Mixpeek generators on every landing, 132 s
+    # under the lock while 16 lanes waited (MO-4354, 2026-10-04); the OpenAPI
+    # render alone is 50 s and its inputs moved on 10 of the last 60 landings.
+    run_cmd="$one"; own=""
+    if [[ "$one" == inputs=*" :: "* ]]; then
+      own="${one%% :: *}"; own="${own#inputs=}"; run_cmd="${one#* :: }"
+      if [ -n "${remote:-}" ] && [ -n "${branch:-}" ]; then
+        # shellcheck disable=SC2086  # pathspecs, one per word, on purpose
+        if [ -z "$(git diff --name-only "$remote/$branch" "$tip" -- $own 2>/dev/null | head -1)" ]; then
+          _times="$_times${_times:+, }skipped ${run_cmd:0:40}"
+          continue
+        fi
+      fi
+    fi
+    _t1=$(date +%s)
+    out="$out$(cd "$tmp" && AMUX_LAND_REPO="$top" AMUX_LAND_TREE="$tmp" perl -e "$_LAND_PC_TIMEOUT_PL" "$budget" bash -c "$run_cmd" 2>&1)
+" || { rc=$?; cmd="$run_cmd"; break; }
+    _times="$_times${_times:+, }$(( $(date +%s) - _t1 ))s ${run_cmd:0:40}"
   done <<< "$cmd"
+  [ -n "$_times" ] && _land_log "regenerate legs: $_times"
   if [ "$rc" != 0 ]; then
     local log; log="$HOME/.amux/logs/land/$(date -u +%Y%m%dT%H%M%SZ)-${AMUX_WORKER:-${AMUX_SESSION:-$(whoami)}}-$$-regenerate.log"
     mkdir -p "${log%/*}"; printf '%s\n' "$out" > "$log"
@@ -7592,7 +7612,7 @@ _land_cancel() {
 # install moved that time, and on 2026-10-01 a lint-only install (b6a1172f)
 # had eight waiters flagged for a cancel-and-requeue that would have cost
 # each its place for nothing.
-LAND_BEHAVIOR_VERSION="2026-10-02.48"
+LAND_BEHAVIOR_VERSION="2026-10-02.49"
 
 cmd_land() {
   # amux land [--remote origin] [--branch main] [--tries 8] [--max-hold 3600] [--no-batch] [--batch-max N] [--priority] [--detach] [--sha <commit>] | --cancel | --status
@@ -8574,7 +8594,15 @@ $f"
     # the composed stack first: seconds instead of a gate (gs12-gates measured
     # 46 s at load 22). It judges and writes nothing in batch mode.
     # AMUX_LAND_PRECHECK_BATCH=0 skips it.
-    if [ -n "$lanes" ] && [ "${AMUX_LAND_PRECHECK_BATCH:-1}" = 1 ]; then
+    # Under the fast gate the push itself runs the same precheck-mode legs on
+    # the same stack, so a batch precheck here is that work twice under the
+    # lock (MO-4354). The push path drops a waiter its refusal names (MO-4104)
+    # the same way this block does.
+    local _fg_on=0
+    { [ "${AMUX_LAND_FAST_GATE:-}" = 1 ] || [ "$(git config --bool --get amux.landFastGate 2>/dev/null)" = true ]; } && _fg_on=1
+    [ -n "$lanes" ] && [ "$_fg_on" = 1 ] && [ "${AMUX_LAND_PRECHECK_BATCH:-1}" = 1 ] && \
+      _land_log "batch precheck skipped: the fast-gate push runs the same legs on this stack"
+    if [ -n "$lanes" ] && [ "$_fg_on" = 0 ] && [ "${AMUX_LAND_PRECHECK_BATCH:-1}" = 1 ]; then
       local _pc_out _pc_rc=0 _pc_t0 _pc_named _pc_tk _pc_rest _pc_excl=""
       _pc_t0=$(date +%s)
       _pc_out="$(_land_precheck_exec "$remote/$branch" "$stack_tip")" || _pc_rc=$?
