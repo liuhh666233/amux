@@ -123,12 +123,19 @@ test('chunked Files publish preserves names, refuses dangerous paths and never o
     expect((await publish('.bashrc')).status()).toBe(403);
   } finally {await rm(dir,{recursive:true,force:true});}
 });
-test('large file uploaded from the Files page appears with exact bytes', async ({page,request},info) => {
+test('large file uploaded from the Files page appears with exact bytes', async ({page,request,browserName},info) => {
   test.setTimeout(180000);
+  // WebKit on CI's Linux runner reads a setFiles() file at a steady ~270 KB/s
+  // once ~30 MB has been read (AMUX-5489): run 37180896741 had chunks 0-28 at
+  // 20-460 ms and chunks 29-58 at 3.75 s each, and nightly 37018757929 the same
+  // rate in 5 MB chunks. The same spec passes in WebKit on macOS, so that is
+  // how the runner feeds the file in, not the upload path. 24 MB still spans
+  // 24 one-megabyte chunks there; Chromium keeps the full 128 MB.
+  const size = (browserName === 'webkit' ? 24 : 128)*1024*1024+17;
   const dir = await mkdtemp(path.join(tmpdir(),'amux-files-large-'));
   const sourceDir = await mkdtemp(path.join(tmpdir(),'amux-files-source-'));
   const source = path.join(sourceDir,'large-folder-file.bin');
-  const h = await open(source,'w');await h.truncate(128*1024*1024+17);await h.close();
+  const h = await open(source,'w');await h.truncate(size);await h.close();
   await page.addInitScript(() => localStorage.setItem('amux_walkthrough_done','1'));
   await page.goto('/');
   const headers = await page.evaluate(() => ({Authorization:'Bearer '+(window as any)._AMUX_AUTH_TOKEN}));
@@ -143,7 +150,7 @@ test('large file uploaded from the Files page appears with exact bytes', async (
     await (await choose).setFiles(source);
     await expect(page.locator('#files-body .fe-row').filter({hasText:'large-folder-file.bin'})).toBeVisible({timeout:120000});
     const destination = path.join(dir,'large-folder-file.bin');
-    expect((await stat(destination)).size).toBe(128*1024*1024+17);
+    expect((await stat(destination)).size).toBe(size);
     expect(await hashFile(destination)).toBe(await hashFile(source));
     await page.screenshot({path:info.outputPath('large-files-page.png')});
   } finally {
