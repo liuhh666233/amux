@@ -607,7 +607,10 @@ pub(crate) fn segment(points: &[Pt], visits: &[Visit], now: f64) -> Vec<Value> {
     }
     if !gaps.is_empty() {
         out.extend(gaps);
-        out.sort_by(|a, b| a["start"].as_f64().unwrap_or(0.0).total_cmp(&b["start"].as_f64().unwrap_or(0.0)));
+        // Start, then end: a zero-length gap between two visits shares its
+        // start with the next stop and must sort before it.
+        let key = |v: &Value, k: &str| v[k].as_f64().unwrap_or(0.0);
+        out.sort_by(|a, b| key(a, "start").total_cmp(&key(b, "start")).then(key(a, "end").total_cmp(&key(b, "end"))));
     }
     out
 }
@@ -1759,6 +1762,9 @@ mod tests {
         let stops: Vec<&str> = segs.iter().filter(|s| s["kind"] == "stop").map(|s| s["id"].as_str().unwrap()).collect();
         // d (open) now ends at e's arrival, so it reaches into this window too.
         assert_eq!(stops, vec!["stop_visit_d-open-current", "stop_visit_e-open", "stop_visit_f-closed"], "{segs:#?}");
+        // The gap between e and f (they touch, 600 m apart) sits between them.
+        let kinds: Vec<&str> = segs.iter().map(|s| s["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["stop", "gap", "stop", "gap", "stop"], "{segs:#?}");
         // The open row with no twin ends at the next visit, so on its own day
         // it is a bounded stop, not one running to now.
         let vs1 = load_visits(&c, day1 - 1000.0, day1 + 40_000.0).unwrap();
