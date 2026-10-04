@@ -79,17 +79,29 @@ test('project card stops claiming Driving when its assigned worker needs input',
 });
 
 test('directory viewer ignores older network and offline cache responses after navigation',async()=>{
+ // Cache first (AMUX-5582): every load reads the saved copy at once, and the
+ // offline path reads it again after a failure. Reads are matched by path, so
+ // the test does not depend on how many reads a load makes.
  const nodes=new Map(),pending=[],renders=[],cache=[];
- const ctx=vm.createContext({document:{getElementById:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:'',value:''});return nodes.get(id)}},history:{replaceState:()=>{}},location:{pathname:'/'},_encodeHashPath:s=>s,_updateFilesCwdBtn:()=>{},_filesToolbarCheck:()=>{},esc:s=>s,API:'',_filesShowHidden:false,_renderFilesEntries:(_body,path,data)=>renders.push({path,data}),_autoCacheDirFiles:()=>{},_idb:{setFile:()=>{},getFile:()=>new Promise(resolve=>cache.push(resolve))},fetch:url=>new Promise((resolve,reject)=>pending.push({url,resolve,reject}))});
+ const ctx=vm.createContext({document:{getElementById:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:'',value:''});return nodes.get(id)}},history:{replaceState:()=>{}},location:{pathname:'/'},_encodeHashPath:s=>s,_updateFilesCwdBtn:()=>{},_filesToolbarCheck:()=>{},esc:s=>s,API:'',_filesShowHidden:false,_renderFilesEntries:(_body,path,data)=>renders.push({path,data}),_autoCacheDirFiles:()=>{},_idb:{setFile:()=>{},getFile:p=>new Promise(resolve=>cache.push({p,resolve}))},AbortSignal:{timeout:()=>undefined},fetch:url=>new Promise((resolve,reject)=>pending.push({url,resolve,reject}))});
  vm.runInContext(source.slice(source.indexOf('let _filesLoadGeneration ='),source.indexOf('function _feHighlight(')),ctx);
+ const settle=()=>new Promise(resolve=>setImmediate(resolve));
+ const answerCache=(p,value)=>{for(const c of cache)if(c.p===p)c.resolve(value)};
  const old=ctx.loadFiles('/repo'); const fresh=ctx.loadFiles('/repo/.worktrees/task');
  pending[1].resolve({json:async()=>({entries:['worktree']})});await fresh;
  pending[0].resolve({json:async()=>({entries:['wrong repository']})});await old;
+ answerCache('/repo',{type:'dir',data:{entries:['stale cached repo']},ts:1});await settle();
  assert.deepEqual(renders.map(r=>r.path),['/repo/.worktrees/task']);
- const offline=ctx.loadFiles('/old');pending[2].reject(new Error('offline'));await new Promise(resolve=>setImmediate(resolve));
+ const offline=ctx.loadFiles('/old');pending[2].reject(new Error('offline'));await settle();
  const newer=ctx.loadFiles('/new');pending[3].resolve({json:async()=>({entries:['new']})});await newer;
- cache[0]({type:'dir',data:{entries:['stale cached']},ts:1});await offline;
+ answerCache('/old',{type:'dir',data:{entries:['stale cached']},ts:1});await offline;await settle();
  assert.deepEqual(renders.map(r=>r.path),['/repo/.worktrees/task','/new']);
+ // The saved copy shows before the server answers, and the answer replaces it.
+ const cached=ctx.loadFiles('/saved');
+ answerCache('/saved',{type:'dir',data:{entries:['saved']},ts:1});await settle();
+ assert.deepEqual(renders.at(-1).data.entries,['saved']);
+ pending[4].resolve({json:async()=>({entries:['live']})});await cached;
+ assert.deepEqual(renders.at(-1).data.entries,['live']);
 });
 
 
