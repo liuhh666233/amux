@@ -782,6 +782,13 @@ pub trait Fleet: Send + Sync {
     fn active_child_work(&self, _lane: &str) -> bool {
         false
     }
+    /// A Claude lane whose own hook says its turn ENDED (`idle`), even though a
+    /// background shell or agent keeps its derived status from reading idle.
+    /// The same rule steering uses (`steer_background_turn_ended`): a paste is
+    /// queued by Claude Code whatever runs behind it.
+    fn turn_ended(&self, _lane: &str) -> bool {
+        false
+    }
     /// When a session runs out of todo cards but still has blocked/done work,
     /// keep nudging it to re-assess and continue. ON BY DEFAULT since
     /// 2026-08-11 (Ethan: "standing order whenever idle to take care of any
@@ -931,6 +938,11 @@ impl Fleet for LiveFleet {
                 "board-drive boundary uses Workers structured truth");
         }
         status.as_deref() == Some("idle")
+    }
+    fn turn_ended(&self, lane: &str) -> bool {
+        crate::api::session_verbs::provider_of(&crate::api::session_verbs::parse_env(lane)) == "claude"
+            && crate::api::session_verbs::lane_report(&self.state, lane)
+                .is_some_and(|r| r.applies && r.state == "idle")
     }
     fn active_child_work(&self, lane: &str) -> bool {
         self.signals.as_ref().is_some_and(|signals| {
@@ -7458,7 +7470,19 @@ async fn drive_lane<F: Fleet>(state: &AppState, fleet: &F, lane: &str) -> LaneTr
             ),
             None => "lane is not at a turn boundary (no self-report; structured FleetSignals decided)".into(),
         };
-        return LaneTrace::skip(lane, "mid-turn", detail).with_counts(eligible, open);
+        // A Claude lane whose turn ended with a background shell still running
+        // (an `amux land` wait, a monitor) is at a boundary for delivery, the
+        // way steering already treats it. Without this, gs12-planes sat idle
+        // from 08:27Z on 2026-10-04 with GP-213 in To Do, eligible_todos 1,
+        // skipped as `mid-turn` while quoting its own `idle` self-report.
+        if fleet.turn_ended(lane) {
+            tracing::info!(target: "amux::board_drive", session = lane,
+                measured = true, n_considered = 1,
+                verdict = "dispatch_background_turn_ended",
+                "board_drive: the lane's turn ended with background work still running; dispatching");
+        } else {
+            return LaneTrace::skip(lane, "mid-turn", detail).with_counts(eligible, open);
+        }
     }
 
     crate::fanout_workspace::adopt_at_boundary(state, lane).await;
@@ -10698,6 +10722,7 @@ mod tests {
         running: std::sync::atomic::AtomicBool,
         boundary: std::sync::atomic::AtomicBool,
         active_child: std::sync::atomic::AtomicBool,
+        turn_ended: std::sync::atomic::AtomicBool,
         enabled: std::sync::atomic::AtomicBool,
         isolated: std::sync::atomic::AtomicBool,
         starts: std::sync::atomic::AtomicUsize,
@@ -10715,6 +10740,7 @@ mod tests {
                 running: std::sync::atomic::AtomicBool::new(true),
                 boundary: std::sync::atomic::AtomicBool::new(true),
                 active_child: std::sync::atomic::AtomicBool::new(false),
+                turn_ended: std::sync::atomic::AtomicBool::new(false),
                 enabled: std::sync::atomic::AtomicBool::new(true),
                 isolated: std::sync::atomic::AtomicBool::new(false),
                 starts: std::sync::atomic::AtomicUsize::new(0),
@@ -10749,6 +10775,9 @@ mod tests {
         }
         fn active_child_work(&self, _: &str) -> bool {
             self.active_child.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn turn_ended(&self, _: &str) -> bool {
+            self.turn_ended.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn auto_continue_enabled(&self, _: &str) -> bool {
             true
@@ -10990,6 +11019,28 @@ mod tests {
         assert_eq!(
             drive_lane(&state, &fleet, "lane").await.outcome,
             "blocker-recovery"
+        );
+    }
+
+    /// A lane whose turn ended with background work still running gets its
+    /// To Do card; one genuinely mid-turn does not (2026-10-04, gs12-planes
+    /// and GP-213).
+    #[tokio::test]
+    async fn a_turn_ended_with_background_work_still_gets_its_todo() {
+        let (_dir, state, store) = drive_state();
+        drive_card(&store, "BG", "todo", "agent", "code");
+        let busy = BoundaryFleet::default();
+        busy.boundary.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(drive_lane(&state, &busy, "lane").await.reason, "mid-turn");
+        assert!(busy.delivered.lock().unwrap().is_empty());
+        let ended = BoundaryFleet::default();
+        ended.boundary.store(false, std::sync::atomic::Ordering::SeqCst);
+        ended.turn_ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        let trace = drive_lane(&state, &ended, "lane").await;
+        assert_ne!(trace.reason, "mid-turn", "{trace:?}");
+        assert!(
+            ended.delivered.lock().unwrap().iter().any(|(_, t)| t.contains("BG")),
+            "the To Do card was not delivered: {trace:?}"
         );
     }
 
