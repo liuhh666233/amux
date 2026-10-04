@@ -51027,6 +51027,28 @@ mod spawn_argv_secret_tests {
         assert_eq!(row("steer-2").0, "queued", "a different queue id must not move");
         // A second delivery of the same id moves nothing.
         assert_eq!(crate::api::session_verbs::mark_schedule_run_delivered(&conn, "steer-1", "again"), 0);
+
+        // The CRON path: a provisional `running` row finished by
+        // finish_cron_run, which is how a scheduled (not run-now) fire records
+        // a queued delivery. It must carry the queue id too.
+        conn.execute(
+            "INSERT INTO schedule_runs (schedule_id, ran_at, status, source) VALUES ('SCHED-2', 300, 'running', 'cron-rs')",
+            [],
+        )
+        .unwrap();
+        let rid = conn.last_insert_rowid();
+        assert_eq!(
+            crate::runtime_jobs::scheduler::finish_cron_run(
+                &conn,
+                rid,
+                &RunOutcome::Queued { queue_id: "steer-3".into(), detail: "queued (steering)".into() },
+                None,
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(crate::api::session_verbs::mark_schedule_run_delivered(&conn, "steer-3", "sent"), 1);
+        assert_eq!(row("steer-3").0, "delivered", "a cron fire's queued run must flip too");
     }
 
     #[test]

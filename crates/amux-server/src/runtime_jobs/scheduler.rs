@@ -1744,7 +1744,7 @@ pub fn finish_cron_run(
     .map(|s| s.chars().take(500).collect());
     conn.execute(
         "UPDATE schedule_runs SET status=?1, note=?2, delivery=?3, submission=?4, \
-                exit_code=?6, output_tail=?7 \
+                exit_code=?6, output_tail=?7, queue_id=?8 \
          WHERE id=?5 AND status='running'",
         rusqlite::params![
             outcome.status(),
@@ -1754,6 +1754,10 @@ pub fn finish_cron_run(
             run_id,
             outcome.shell_output().map(|o| o.exit_code),
             outcome.shell_output().map(|o| o.tail.as_str()),
+            // The cron path finishes its provisional row here, not through
+            // insert_run, so the queue id has to be written here too (0102;
+            // SCHED-544's 05:02Z fire stayed `queued` without it).
+            outcome.queue_id(),
         ],
     )
 }
