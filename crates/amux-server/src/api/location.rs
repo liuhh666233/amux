@@ -526,7 +526,10 @@ pub(crate) fn segment(points: &[Pt], visits: &[Visit], now: f64) -> Vec<Value> {
         .collect();
     for v in visits {
         let end = v.departure.unwrap_or(now);
-        if stops.iter().any(|s| s.0 <= end && v.arrival <= s.1) {
+        // Strict: an open visit now ends at the next one's arrival, so two
+        // visits that only TOUCH are neighbours, not the same stop (the 10:45
+        // visit vanished behind a 10:05 one ending at 10:45:46).
+        if stops.iter().any(|s| s.0 < end && v.arrival < s.1) {
             continue; // already found from points
         }
         let inside = points.iter().filter(|p| p.ts >= v.arrival && p.ts <= end).count();
@@ -1744,6 +1747,18 @@ mod tests {
         let segs = segment(&[], &vs, day2 + 6000.0);
         let stops: Vec<&str> = segs.iter().filter(|s| s["kind"] == "stop").map(|s| s["id"].as_str().unwrap()).collect();
         assert_eq!(stops, vec!["stop_visit_c-closed", "stop_visit_d-open-current"], "{segs:#?}");
+        // An open row followed directly by another visit: both are stops, the
+        // second is not swallowed because the first now ends where it begins.
+        let touching = vec![
+            v("e-open", day2 + 20_000.0, None, 40.7377, -74.0018),
+            v("f-closed", day2 + 22_000.0, Some(day2 + 24_000.0), 40.7372, -74.0084),
+        ];
+        db_ingest_visits(&c, "phone", &touching, day2 + 25_000.0).unwrap();
+        let vs = load_visits(&c, day2 + 19_000.0, day2 + 25_000.0).unwrap();
+        let segs = segment(&[], &vs, day2 + 25_000.0);
+        let stops: Vec<&str> = segs.iter().filter(|s| s["kind"] == "stop").map(|s| s["id"].as_str().unwrap()).collect();
+        // d (open) now ends at e's arrival, so it reaches into this window too.
+        assert_eq!(stops, vec!["stop_visit_d-open-current", "stop_visit_e-open", "stop_visit_f-closed"], "{segs:#?}");
         // The open row with no twin ends at the next visit, so on its own day
         // it is a bounded stop, not one running to now.
         let vs1 = load_visits(&c, day1 - 1000.0, day1 + 40_000.0).unwrap();
