@@ -8016,11 +8016,27 @@ async fn autofix_tick_with_inputs(
     let detector_home = home.to_path_buf();
     let detector_runs = ci_runs.to_vec();
     let system_findings = system_job_findings(system_issues, now);
+    // `AMUX_AUTOFIX_SKIP=latency,5xx` leaves the named detectors out of the
+    // tick (slugs from DetectorKind::slug). For isolating one detector's cost,
+    // as the rust-soak A/B for AMUX-5565 does; unset runs them all.
+    let skip: Vec<String> = std::env::var("AMUX_AUTOFIX_SKIP")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !skip.is_empty() {
+        tracing::info!(target: "amux::autofix", verdict = "autofix_detectors_skipped", skipped = ?skip,
+            "autofix: detectors left out of this tick by AMUX_AUTOFIX_SKIP");
+    }
     let detected = state.store.read_async(move |conn| {
         let on = enabled(conn);
         let mut findings = system_findings;
         let mut suppressed = ci_sup;
         for kind in DetectorKind::all() {
+            if skip.iter().any(|s| s == kind.slug()) {
+                continue;
+            }
             let (f, s) = match kind {
                 DetectorKind::Http5xx => detect_5xx(conn, now),
                 DetectorKind::Latency => detect_latency(conn, now),
