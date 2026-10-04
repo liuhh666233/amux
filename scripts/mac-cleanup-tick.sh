@@ -182,6 +182,10 @@ USER_TMP_IDLE_MIN=${AMUX_CLEANUP_USER_TMP_IDLE_MIN:-1440}
 # idle over 12 h on 2026-10-04 with the disk at 57 GB free.
 LANE_TMP_ROOT=${AMUX_CLEANUP_LANE_TMP_ROOT:-$HOME/.amux/tmp}
 LANE_TMP_IDLE_MIN=${AMUX_CLEANUP_LANE_TMP_IDLE_MIN:-1440}
+# At most this many entries per tick. Deleting 11,781 entries (millions of
+# files) in one pass on 2026-10-04 drove fseventsd from 9 to 57 GB resident
+# and filled 52 GB of swap; a capped pass leaves the rest for the next tick.
+LANE_TMP_MAX=${AMUX_CLEANUP_LANE_TMP_MAX:-300}
 VM_IMAGE_PRUNE_CMD=${AMUX_CLEANUP_VM_IMAGE_PRUNE_CMD:-docker --context colima-PROFILE image prune -a -f --filter until=AGE}
 VM_STEP_S=${AMUX_CLEANUP_VM_STEP_S:-120}
 # Idle colima VMs under pressure (DESKT-70). On 2026-10-01 eight goal-spec lanes
@@ -1186,11 +1190,12 @@ keep_docker_context() { # <profile>
 # target dir in use is kept even if its top-level mtime is old) and no running
 # process has its cwd at or under it.
 reap_lane_tmp() { # <dry:0|1>
-  local dry=$1 root="${LANE_TMP_ROOT%/}" e ce n=0 kb=0 k inuse
+  local dry=$1 root="${LANE_TMP_ROOT%/}" e ce n=0 kb=0 k inuse capped=0
   [ -d "$root" ] || { echo "mac-cleanup: lane tmp: no $root"; return 0; }
   inuse=$(lsof -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | sed 's|^/private||')
   for e in "$root"/*/*; do
     [ -e "$e" ] || continue
+    if [ "$n" -ge "${LANE_TMP_MAX:-300}" ]; then capped=1; break; fi
     [ -n "$(find "$e" -mmin -"$LANE_TMP_IDLE_MIN" -print -quit 2>/dev/null)" ] && continue
     ce=$( (cd "$e" 2>/dev/null && pwd -P) || printf '%s' "$e"); ce=${ce#/private}
     printf '%s\n' "$inuse" | awk -v p="$ce" '$0==p || index($0, p "/")==1 {f=1} END{exit !f}' && continue
@@ -1198,7 +1203,7 @@ reap_lane_tmp() { # <dry:0|1>
     if [ "$dry" = 1 ]; then n=$((n+1)); kb=$((kb+${k:-0})); continue; fi
     rm -rf -- "${e:?}" 2>/dev/null && { n=$((n+1)); kb=$((kb+${k:-0})); }
   done
-  echo "mac-cleanup: lane tmp: $([ "$dry" = 1 ] && echo 'would remove' || echo removed) $n entr$([ "$n" = 1 ] && echo y || echo ies) idle over ${LANE_TMP_IDLE_MIN} min, $(awk -v k="$kb" 'BEGIN{printf "%.1fG", k/1048576}') ($root)"
+  echo "mac-cleanup: lane tmp: $([ "$dry" = 1 ] && echo 'would remove' || echo removed) $n entr$([ "$n" = 1 ] && echo y || echo ies) idle over ${LANE_TMP_IDLE_MIN} min, $(awk -v k="$kb" 'BEGIN{printf "%.1fG", k/1048576}') ($root)$([ "$capped" = 1 ] && echo "; capped at $LANE_TMP_MAX this tick, the rest next tick")"
 }
 
 reap_user_tmp() { # <dry:0|1>
