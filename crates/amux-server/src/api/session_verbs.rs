@@ -15181,6 +15181,14 @@ pub(crate) async fn start_session(
         shell_rc.push_str(&format!("export {key}={}; ", sh_quote(value)));
     }
     if !isolated {
+        shell_rc.push_str(WORKER_SYSTEM_PATH_RC);
+        if !std::env::var("PATH").unwrap_or_default().split(':').any(|d| d == "/usr/sbin") {
+            tracing::info!(session = name, measured = true, n_considered = 1,
+                verdict = "worker_path_system_dirs_added",
+                "the server's PATH lacks /usr/sbin (launchd plist); the worker shell appends /usr/sbin and /sbin");
+        }
+    }
+    if !isolated {
         tracing::info!(session=name, endpoint, home=%home().display(), measured=true,
             n_considered=harness_env.len(), verdict="worker_harness_routing",
             "worker CLI and hooks use the launching server home and endpoint");
@@ -20512,6 +20520,13 @@ pub(crate) fn mark_schedule_run_delivered(
     )
     .unwrap_or(0)
 }
+
+/// Appended to a worker's shell startup: add the macOS system directories when
+/// PATH lacks them. The server inherits PATH from its launchd plist, which has
+/// no /usr/sbin or /sbin, and every worker shell inherited that, so a bare
+/// `sysctl` failed in a lane and Mixpeek's host gate read "go" on a host at
+/// load 26 (gs12-compute, 2026-10-04).
+pub(crate) const WORKER_SYSTEM_PATH_RC: &str = "for __d in /usr/sbin /sbin; do case \":$PATH:\" in *\":$__d:\"*) ;; *) PATH=\"$PATH:$__d\" ;; esac; done; unset __d; export PATH; ";
 
 pub(crate) fn stamp_queued_delivery(
     conn: &rusqlite::Connection,
@@ -50981,6 +50996,27 @@ mod spawn_argv_secret_tests {
     /// Same idiom as `the_at_boundary_scheduler_path_no_longer_borrows_the_owners_origin`
     /// above: read the shipped source, code lines only, so the function's own
     /// prose cannot satisfy it.
+    /// A worker shell gets /usr/sbin and /sbin on PATH when the server's PATH
+    /// lacks them, without duplicating them when it has them.
+    #[test]
+    fn a_worker_shell_gets_the_system_dirs_on_path() {
+        let rc = crate::api::session_verbs::WORKER_SYSTEM_PATH_RC;
+        let run = |path: &str| -> String {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("{rc} printf %s \"$PATH\""))
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(run("/usr/bin:/bin"), "/usr/bin:/bin:/usr/sbin:/sbin");
+        assert_eq!(run("/usr/bin:/bin:/usr/sbin:/sbin"), "/usr/bin:/bin:/usr/sbin:/sbin");
+        const SRC: &str = include_str!("session_verbs.rs");
+        let code: String = SRC.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(code.contains("shell_rc.push_str(WORKER_SYSTEM_PATH_RC)"), "the worker launch no longer appends the system PATH dirs");
+    }
+
     /// The deliverer marks a parked schedule run delivered (0102), and the
     /// statement moves exactly the run with that queue id.
     #[test]
