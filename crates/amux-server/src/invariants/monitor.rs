@@ -515,6 +515,7 @@ pub async fn evaluate_all(state: &AppState) -> Vec<InvariantResult> {
     out.extend(frustration_ledger_check(state));
     out.extend(schedule_kind_check(state));
     out.extend(schedule_target_check(state));
+    out.extend(schedule_shell_owner_check(state));
     // AF-582: the announcement for an interrupted schedule fire already
     // existed (scheduler.rs's own AF-515 warn on startup) and reached
     // nobody — it fired 20 times through gtm-ticker's incident window and
@@ -880,6 +881,47 @@ fn schedule_target_check(state: &AppState) -> Vec<InvariantResult> {
         }
     }
     checks::schedule_targets_can_receive(&bad, total_enabled)
+}
+
+/// `schedule.shell_owner_can_read`: shell schedules whose owner can never
+/// read their results (archived or unregistered), with their 24h failures.
+/// Same refusal predicate as delivery (`schedule_target_refusal`), terminal
+/// causes only: a paused owner still reads its runs when it resumes.
+fn schedule_shell_owner_check(state: &AppState) -> Vec<InvariantResult> {
+    const ID: &str = "schedule.shell_owner_can_read";
+    let Ok(conn) = state.store.read() else {
+        return vec![InvariantResult::new(ID, Status::Unknown)];
+    };
+    let since = chrono::Utc::now().timestamp() - 86_400;
+    let rows: Vec<(String, String, String, i64, i64)> = conn
+        .prepare(
+            "SELECT s.id, COALESCE(s.title,''), COALESCE(s.session,''), \
+                    (SELECT COUNT(*) FROM schedule_runs r WHERE r.schedule_id=s.id AND r.ran_at>?1 AND r.status IN ('error','refused')), \
+                    (SELECT COUNT(*) FROM schedule_runs r WHERE r.schedule_id=s.id AND r.ran_at>?1) \
+             FROM schedules s WHERE s.enabled=1 AND COALESCE(s.deleted,0)=0 AND COALESCE(s.kind,'tmux')='shell'",
+        )
+        .and_then(|mut st| {
+            st.query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .map(|it| it.flatten().collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    let total = rows.len() as i64;
+    let mut unowned = 0i64;
+    let mut bad = Vec::new();
+    for (id, title, owner, failed, runs) in rows {
+        if owner.is_empty() {
+            unowned += 1;
+            continue;
+        }
+        if let Some(refusal) = crate::api::session_verbs::schedule_target_refusal(&owner) {
+            if refusal.is_terminal() {
+                bad.push(checks::OrphanedShellSchedule {
+                    schedule_id: id, title, owner, cause: refusal.cause().to_string(), failed_24h: failed, runs_24h: runs,
+                });
+            }
+        }
+    }
+    checks::shell_schedule_owners_can_read(&bad, total, unowned)
 }
 
 fn schedule_kind_check(state: &AppState) -> Vec<InvariantResult> {

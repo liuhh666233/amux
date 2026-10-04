@@ -3097,6 +3097,79 @@ pub fn no_secrets_in_process_argv(
     }))]
 }
 
+/// A shell schedule whose OWNER can no longer read what it produces.
+#[derive(Debug, Clone)]
+pub struct OrphanedShellSchedule {
+    pub schedule_id: String,
+    pub title: String,
+    pub owner: String,
+    pub cause: String,
+    pub failed_24h: i64,
+    pub runs_24h: i64,
+}
+
+/// `schedule.shell_owner_can_read`: a shell schedule needs no lane to deliver
+/// into, so `schedule.target_can_receive` skips it, but its owner is still who
+/// reads its failures. On 2026-10-04 the MVS production canary (0 of 50 writes
+/// in 16 of 24 runs), the restore canary ("LOSS RISK", 21 of 24) and the spend
+/// actuator (failing every run for 3 days) all belonged to archived workers, so
+/// every failure reached nobody. An owner that is unset is counted, not failed.
+pub fn shell_schedule_owners_can_read(
+    rows: &[OrphanedShellSchedule],
+    total_shell: i64,
+    unowned: i64,
+) -> Vec<InvariantResult> {
+    const ID: &str = "schedule.shell_owner_can_read";
+    if rows.is_empty() {
+        return vec![InvariantResult::pass(ID).evidence(json!({
+            "orphaned": 0, "total_enabled_shell": total_shell, "unowned": unowned,
+            "measured": true, "n_considered": total_shell,
+        }))];
+    }
+    let mut sorted: Vec<&OrphanedShellSchedule> = rows.iter().collect();
+    sorted.sort_by(|a, b| b.failed_24h.cmp(&a.failed_24h).then_with(|| a.schedule_id.cmp(&b.schedule_id)));
+    let names = sorted
+        .iter()
+        .map(|r| format!("{} '{}' -> owner '{}' is {} ({} of {} runs failed in 24h)", r.schedule_id, r.title, r.owner, r.cause, r.failed_24h, r.runs_24h))
+        .collect::<Vec<_>>()
+        .join("; ");
+    vec![InvariantResult::fail(
+        ID,
+        "every enabled shell schedule is owned by a worker that can read its results".to_string(),
+        format!(
+            "{} of {total_shell} enabled shell schedule(s) belong to an owner that can never read them, so their failures reach nobody: {names}. Reassign each to a live worker (PATCH /api/schedules/<id> {{\"session\": \"<worker>\"}}) or disable it.",
+            rows.len()
+        ),
+    )
+    .evidence(json!({
+        "orphaned": sorted.iter().map(|r| json!({"schedule_id": r.schedule_id, "title": r.title, "owner": r.owner, "cause": r.cause, "failed_24h": r.failed_24h, "runs_24h": r.runs_24h})).collect::<Vec<_>>(),
+        "total_enabled_shell": total_shell, "unowned": unowned,
+        "measured": true, "n_considered": total_shell,
+    }))]
+}
+
+#[cfg(test)]
+mod shell_owner_tests {
+    use super::*;
+    fn row(id: &str, failed: i64) -> OrphanedShellSchedule {
+        OrphanedShellSchedule { schedule_id: id.into(), title: "t".into(), owner: "gone".into(), cause: "archived".into(), failed_24h: failed, runs_24h: 24 }
+    }
+    #[test]
+    fn no_orphans_pass_with_their_population() {
+        let r = shell_schedule_owners_can_read(&[], 40, 3);
+        assert_eq!(r[0].status, crate::invariants::Status::Pass);
+        assert_eq!(r[0].evidence["total_enabled_shell"], 40);
+    }
+    #[test]
+    fn an_archived_owner_fails_and_is_named_worst_first() {
+        let r = shell_schedule_owners_can_read(&[row("SCHED-1", 2), row("SCHED-2", 24)], 40, 0);
+        assert_eq!(r[0].status, crate::invariants::Status::Fail);
+        let obs = r[0].observed.clone();
+        assert!(obs.find("SCHED-2").unwrap() < obs.find("SCHED-1").unwrap(), "{obs}");
+        assert!(obs.contains("owner 'gone' is archived (24 of 24 runs failed in 24h)"), "{obs}");
+    }
+}
+
 /// One enabled schedule whose target cannot receive it (AMUX-4784).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndeliverableSchedule {
