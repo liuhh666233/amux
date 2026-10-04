@@ -7911,7 +7911,7 @@ async fn drive_lane<F: Fleet>(state: &AppState, fleet: &F, lane: &str) -> LaneTr
             if done.len() >= cap {
                 let (oldest, title) = done[0].clone();
                 let text = format!(
-                    "[amux done-WIP cap] You hold {} cards at done (cap {cap}, {DISPATCH_DONE_WIP_KEY}). Before new work, take your oldest, {oldest} \"{title}\", to verified: run its production read, proof or remaining evidence and move it on, or say on the card exactly what it waits for. New cards resume when you are under the cap.",
+                    "[amux done-WIP cap] You hold {} cards at done (cap {cap}, {DISPATCH_DONE_WIP_KEY}). Before new work, close the review gap on your oldest, {oldest} \"{title}\" (the review note on the card names it), and post the evidence on the card; the reviewer verifies it, so do not move it to verified yourself. If nothing is left for you to do, say on the card exactly what it waits for. New cards resume when you are under the cap.",
                     done.len()
                 );
                 let rev: Option<i64> = state.store.read().ok().and_then(|c| {
@@ -11125,6 +11125,9 @@ mod tests {
         let sent = capped.delivered.lock().unwrap().clone();
         assert!(sent.iter().any(|(_, t)| t.contains("done-WIP cap") && t.contains("OLD")), "{sent:?}");
         assert!(!sent.iter().any(|(_, t)| t.contains("NEW")), "new work was handed out: {sent:?}");
+        // The lane closes the review gap; the reviewer verifies (gs12 refuses
+        // a lane's own verified move), so the handoff must not send it there.
+        assert!(sent.iter().any(|(_, t)| t.contains("close the review gap") && t.contains("do not move it to verified yourself")), "{sent:?}");
         let open = BoundaryFleet::default();
         open.done_cap.store(3, std::sync::atomic::Ordering::SeqCst);
         let trace = drive_lane(&state, &open, "lane").await;
