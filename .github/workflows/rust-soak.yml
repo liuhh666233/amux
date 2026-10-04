@@ -40,6 +40,12 @@ on:
           SOAK_CONCURRENCY (0.41-0.62 at 4, 0.76-1.47 at 8) and decelerates to a
           plateau without leaking descriptors.
         default: ''
+      server_env:
+        description: >-
+          Extra KEY=VALUE pairs (space separated) exported for the server in
+          this run, to isolate one subsystem in an A/B, e.g.
+          AMUX_AUTOFIX_SECS=0 (AMUX-5565). Empty changes nothing.
+        default: ''
 
 permissions:
   contents: read
@@ -77,6 +83,7 @@ jobs:
           SOAK_FD_GROWTH: ${{ github.event.inputs.fd_growth || '50' }}
           SOAK_CONCURRENCY: '8'
           ARENA_MAX_INPUT: ${{ github.event.inputs.malloc_arena_max || '' }}
+          SERVER_ENV_INPUT: ${{ github.event.inputs.server_env || '' }}
         # `set -o pipefail` is load-bearing, not tidiness. GitHub's default
         # shell for `run:` is `bash -e {0}`, WITHOUT pipefail, so a pipeline
         # exits with the status of its LAST command. `tee` always succeeds, so
@@ -98,6 +105,15 @@ jobs:
           else
             echo "== MALLOC_ARENA_MAX unset (shipped default)"
           fi
+          # Each pair must be NAME=VALUE with a plain env name, so a dispatch
+          # input cannot smuggle shell into this step.
+          for kv in ${SERVER_ENV_INPUT:-}; do
+            if [[ "$kv" =~ ^[A-Z_][A-Z0-9_]*=[A-Za-z0-9_.,:/-]*$ ]]; then
+              export "$kv"; echo "== server env $kv (A/B arm)"
+            else
+              echo "FAIL: server_env entry '$kv' is not NAME=VALUE"; exit 1
+            fi
+          done
           bash scripts/soak-probe.sh | tee soak.log
 
       - name: Database growth under churn
