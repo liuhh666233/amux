@@ -789,6 +789,10 @@ pub trait Fleet: Send + Sync {
     fn turn_ended(&self, _lane: &str) -> bool {
         false
     }
+    /// The lane's done-WIP cap (AMUX_DISPATCH_DONE_WIP_MAX); 0 is off.
+    fn done_wip_cap(&self, _lane: &str) -> usize {
+        0
+    }
     /// When a session runs out of todo cards but still has blocked/done work,
     /// keep nudging it to re-assess and continue. ON BY DEFAULT since
     /// 2026-08-11 (Ethan: "standing order whenever idle to take care of any
@@ -938,6 +942,13 @@ impl Fleet for LiveFleet {
                 "board-drive boundary uses Workers structured truth");
         }
         status.as_deref() == Some("idle")
+    }
+    fn done_wip_cap(&self, lane: &str) -> usize {
+        done_wip_cap_in(
+            &crate::api::session_verbs::home(),
+            lane,
+            std::env::var(DISPATCH_DONE_WIP_KEY).ok().as_deref(),
+        )
     }
     fn turn_ended(&self, lane: &str) -> bool {
         crate::api::session_verbs::provider_of(&crate::api::session_verbs::parse_env(lane)) == "claude"
@@ -2051,6 +2062,42 @@ fn reclaim_stale_doing(
 
 /// Scope key for backlog dispatch (AMUX-4055).
 pub const DISPATCH_BACKLOG_KEY: &str = "AMUX_DISPATCH_BACKLOG_WHEN_IDLE";
+
+/// Scope key for the done-WIP cap (Ethan, 2026-10-04 15:31 ET, harness
+/// efficiency). With N > 0, a lane holding N or more cards at `done` is not
+/// handed new work; it is handed its OLDEST done card to take to production
+/// (read, proof, evidence) instead. On 2026-10-04 160 cards sat at done for a
+/// median 31 h while dispatch kept handing out new todos. Unset or 0: off.
+pub const DISPATCH_DONE_WIP_KEY: &str = "AMUX_DISPATCH_DONE_WIP_MAX";
+
+/// Resolved done-WIP cap for a lane: process env, then worker > group > global.
+pub(crate) fn done_wip_cap_in(home: &std::path::Path, session: &str, process_value: Option<&str>) -> usize {
+    let parse = |v: &str| v.trim().parse::<usize>().unwrap_or(0);
+    if let Some(v) = process_value.filter(|v| !v.trim().is_empty()) {
+        return parse(v);
+    }
+    if session.is_empty() {
+        return 0;
+    }
+    crate::api::session_verbs::scoped_setting_in(home, session, DISPATCH_DONE_WIP_KEY)
+        .as_deref()
+        .map(parse)
+        .unwrap_or(0)
+}
+
+/// The lane's done cards, oldest first: (id, title).
+pub(crate) fn lane_done_cards(conn: &Connection, session: &str) -> Vec<(String, String)> {
+    conn.prepare(
+        "SELECT id, COALESCE(title,'') FROM legacy_execution_issues AS issues \
+         WHERE session=?1 AND status='done' AND COALESCE(archived,0)=0 AND deleted IS NULL \
+         ORDER BY COALESCE(entered_state_at, updated) ASC",
+    )
+    .and_then(|mut st| {
+        st.query_map([session], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map(|it| it.flatten().collect::<Vec<_>>())
+    })
+    .unwrap_or_default()
+}
 
 /// May this lane pull from `backlog` when it has no `todo` left?
 ///
@@ -7855,6 +7902,42 @@ async fn drive_lane<F: Fleet>(state: &AppState, fleet: &F, lane: &str) -> LaneTr
             "board_drive: idle runtime claim no longer vetoes guarded stale recovery or capture-shell WIP exemption");
     }
 
+    // DONE-WIP CAP: before handing out NEW work, a lane over its cap is given
+    // its oldest done card to take to production instead.
+    if matches!(pickup, Pickup::Claim { .. } | Pickup::DrainBacklog { .. }) {
+        let cap = fleet.done_wip_cap(lane);
+        if cap > 0 {
+            let done = state.store.read().ok().map(|c| lane_done_cards(&c, lane)).unwrap_or_default();
+            if done.len() >= cap {
+                let (oldest, title) = done[0].clone();
+                let text = format!(
+                    "[amux done-WIP cap] You hold {} cards at done (cap {cap}, {DISPATCH_DONE_WIP_KEY}). Before new work, take your oldest, {oldest} \"{title}\", to verified: run its production read, proof or remaining evidence and move it on, or say on the card exactly what it waits for. New cards resume when you are under the cap.",
+                    done.len()
+                );
+                let rev: Option<i64> = state.store.read().ok().and_then(|c| {
+                    c.query_row(
+                        "SELECT rev FROM legacy_execution_issues AS issues WHERE id=?1",
+                        rusqlite::params![&oldest],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                });
+                let delivered = fleet.deliver_about(lane, &text, &oldest, rev.unwrap_or(0)).await;
+                tracing::info!(target: "amux::board_drive", session = lane, card = %oldest,
+                    measured = true, n_considered = done.len(), cap, delivered = ?delivered,
+                    verdict = "done_wip_cap_held",
+                    "board_drive: lane is at its done-WIP cap; handed its oldest done card instead of new work");
+                return LaneTrace::skip(
+                    lane,
+                    "done-wip-cap",
+                    format!("{} cards at done (cap {cap}); oldest {oldest} handed back instead of new work", done.len()),
+                )
+                .with_card(&oldest)
+                .with_counts(eligible, open);
+            }
+        }
+    }
+
     match pickup {
         Pickup::Claim { card, prompt } => {
             // Only dispatch "work it now" if the atomic claim actually took —
@@ -10723,6 +10806,7 @@ mod tests {
         boundary: std::sync::atomic::AtomicBool,
         active_child: std::sync::atomic::AtomicBool,
         turn_ended: std::sync::atomic::AtomicBool,
+        done_cap: std::sync::atomic::AtomicUsize,
         enabled: std::sync::atomic::AtomicBool,
         isolated: std::sync::atomic::AtomicBool,
         starts: std::sync::atomic::AtomicUsize,
@@ -10741,6 +10825,7 @@ mod tests {
                 boundary: std::sync::atomic::AtomicBool::new(true),
                 active_child: std::sync::atomic::AtomicBool::new(false),
                 turn_ended: std::sync::atomic::AtomicBool::new(false),
+                done_cap: std::sync::atomic::AtomicUsize::new(0),
                 enabled: std::sync::atomic::AtomicBool::new(true),
                 isolated: std::sync::atomic::AtomicBool::new(false),
                 starts: std::sync::atomic::AtomicUsize::new(0),
@@ -10778,6 +10863,9 @@ mod tests {
         }
         fn turn_ended(&self, _: &str) -> bool {
             self.turn_ended.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn done_wip_cap(&self, _: &str) -> usize {
+            self.done_cap.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn auto_continue_enabled(&self, _: &str) -> bool {
             true
@@ -11020,6 +11108,27 @@ mod tests {
             drive_lane(&state, &fleet, "lane").await.outcome,
             "blocker-recovery"
         );
+    }
+
+    /// Over its done-WIP cap a lane is handed its oldest done card instead of
+    /// a new todo; under it (or with the cap off) it gets the todo.
+    #[tokio::test]
+    async fn a_lane_over_its_done_cap_is_handed_its_oldest_done_card() {
+        let (_dir, state, store) = drive_state();
+        drive_card(&store, "NEW", "todo", "agent", "code");
+        drive_card(&store, "OLD1", "done", "agent", "code");
+        drive_card(&store, "OLD2", "done", "agent", "code");
+        let capped = BoundaryFleet::default();
+        capped.done_cap.store(2, std::sync::atomic::Ordering::SeqCst);
+        let trace = drive_lane(&state, &capped, "lane").await;
+        assert_eq!(trace.reason, "done-wip-cap", "{trace:?}");
+        let sent = capped.delivered.lock().unwrap().clone();
+        assert!(sent.iter().any(|(_, t)| t.contains("done-WIP cap") && t.contains("OLD")), "{sent:?}");
+        assert!(!sent.iter().any(|(_, t)| t.contains("NEW")), "new work was handed out: {sent:?}");
+        let open = BoundaryFleet::default();
+        open.done_cap.store(3, std::sync::atomic::Ordering::SeqCst);
+        let trace = drive_lane(&state, &open, "lane").await;
+        assert_ne!(trace.reason, "done-wip-cap", "{trace:?}");
     }
 
     /// A lane whose turn ended with background work still running gets its
