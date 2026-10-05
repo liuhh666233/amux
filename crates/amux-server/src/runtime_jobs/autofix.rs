@@ -2066,15 +2066,15 @@ fn detect_latency_with_scan_cap(
            AND (req_meta IS NULL OR req_meta NOT LIKE '%\"slow_ok\"%') \
          ORDER BY ts DESC LIMIT ?2",
     ) {
-        if let Ok(rows) = stmt.query_map(rusqlite::params![b_start, scan_cap as i64], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, f64>(1)?,
-                r.get::<_, f64>(2)?,
-                r.get::<_, Option<f64>>(3)?,
-                r.get::<_, Option<f64>>(4)?,
-            ))
-        }) {
+        // ONE ALLOCATION PER FAMILY, NOT PER ROW (AMUX-5565). This reads up to
+        // 400k rows every tick. It used to take each row's family as an owned
+        // String, allocated and freed 400k times while the sample vectors grew
+        // between them, and the heap fragmentation that left behind is what the
+        // weekly soak measured: steady RSS growth of 14.7 MB/h that tracked the
+        // request log's size, 1.6 MB/h with this detector skipped
+        // (AMUX_AUTOFIX_SKIP=latency, run 37239594211). The name is now read in
+        // place and copied only the first time a family is seen.
+        if let Ok(mut rows) = stmt.query(rusqlite::params![b_start, scan_cap as i64]) {
             // A REQUEST WHOSE CLOCK SPANS A RESTART IS NOT A SLOW REQUEST
             // (AF-175). `latency_ms` is wall time from arrival to completion,
             // so a request that arrived before this process started and
@@ -2095,7 +2095,12 @@ fn detect_latency_with_scan_cap(
             // drop everything and look exactly like a filter that worked.
             let mut spanned_restart = 0usize;
             let mut considered = 0usize;
-            for (fam, ms, ts, row_boot, row_load) in rows.flatten() {
+            while let Ok(Some(r)) = rows.next() {
+                // A row that does not convert is skipped, as `rows.flatten()` did.
+                let (Ok(ms), Ok(ts)) = (r.get::<_, f64>(1), r.get::<_, f64>(2)) else { continue };
+                let Some(fam) = r.get_ref(0).ok().and_then(|v| v.as_str().ok()) else { continue };
+                let row_boot = r.get::<_, Option<f64>>(3).unwrap_or(None);
+                let row_load = r.get::<_, Option<f64>>(4).unwrap_or(None);
                 considered += 1;
                 if ts < oldest_seen {
                     oldest_seen = ts;
@@ -2119,7 +2124,10 @@ fn detect_latency_with_scan_cap(
                 if spanned {
                     spanned_restart += 1;
                 }
-                let e = per_family.entry(fam).or_default();
+                if !per_family.contains_key(fam) {
+                    per_family.insert(fam.to_string(), FamilySamples::default());
+                }
+                let Some(e) = per_family.get_mut(fam) else { continue };
                 if ts >= w_start {
                     e.win_raw += 1;
                     if !spanned {
