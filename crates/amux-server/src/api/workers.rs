@@ -3551,10 +3551,12 @@ CC_DIR=/tmp
             .iter()
             .find(|row| row["name"] == "conflict")
             .expect("conflict row");
-        assert_eq!(conflict["status"], json!("unattributed"), "{conflict}");
+        // Two claims still Doing: the newer one (CONFLICT-2, claimed 1s
+        // later) names the live card instead of withholding WORKING.
+        assert_ne!(conflict["status"], json!("unattributed"), "{conflict}");
         assert_eq!(
-            conflict["runtime_board"]["status"],
-            json!("active-conflicting-claims"),
+            conflict["runtime_board"]["verdict"],
+            json!("linked-newest-of-several"),
             "{conflict}"
         );
         assert_eq!(
@@ -3562,7 +3564,8 @@ CC_DIR=/tmp
             json!(2),
             "{conflict}"
         );
-        assert!(conflict["runtime_board"]["card_id"].is_null(), "{conflict}");
+        assert_eq!(conflict["runtime_board"]["card_id"], json!("CONFLICT-2"), "{conflict}");
+        assert_eq!(conflict["runtime_board"]["violation"], json!(false), "{conflict}");
 
         let conn = rusqlite::Connection::open(dir.path().join("amux-test.db")).unwrap();
         conn.execute(

@@ -293,7 +293,11 @@ def main():
     for rec in found:
         key = rec["repo_key"]
         last = state.get(key, {})
-        worse = (rec["drain_h"] or 0) >= 1.5 * (last.get("drain_h") or 0) and (rec["drain_h"] or 0) > 0
+        # "Worse" needs a measured baseline. With none (never sent, or the last
+        # send had an unmeasured drain) any drain compared against 0 read as 50%
+        # worse and skipped the cooldown: 35 sends in 26 h at a 120 min cooldown.
+        prev = last.get("drain_h") or 0
+        worse = prev > 0 and (rec["drain_h"] or 0) >= 1.5 * prev
         due = now - last.get("sent", 0) >= a.cooldown_min * 60
         if not a.route or a.dry_run or not (due or worse):
             continue
@@ -305,12 +309,20 @@ def main():
             levers.append(f"the gate itself: median hold {rec['median_hold_min']} min is the per-landing cost; shortening it moves every lane")
         if rec["holder_attempt_min"] and rec["holder_attempt_min"] >= a.holder_attempt:
             levers.append(f"the holder {rec['holder']} is {rec['holder_attempt_min']:.0f} min into one attempt: check its push is progressing")
+        if not levers:
+            # Nothing the recipient can act on: a message here is a status
+            # update that interrupts a lane mid-turn. The verdict line above is
+            # the record; say so here so a sweep can count the suppressions.
+            with open(OUT, "a") as f:
+                f.write(json.dumps({"ts": int(now), "verdict": "pipeline_bottleneck_not_routed_no_lever",
+                                    "repo_key": key, "route": a.route, "measured": True, "n_considered": 1}) + "\n")
+            continue
         msg = (f"Bottleneck (amux pipeline-bottlenecks, AH-291): the land queue {key} is the constraint. "
                f"{'; '.join(rec['why'])}. Depth {rec['depth']}, oldest wait {rec['oldest_wait_min']:.0f} min, "
                f"holder {rec['holder']} ({rec['holder_attempt_min']} min), median hold {rec['median_hold_min']} min over "
                f"{rec['holds_measured_6h']} holds, {rec['landed_6h']} landings in 6 h, "
                + (f"drain about {rec['drain_h']} h.\n" if rec['drain_h'] is not None else "drain unmeasured (under 3 measured holds).\n")
-               + ("Levers: " + " | ".join(levers) if levers else "No lever is measurable from the queue alone."))
+               + "Levers: " + " | ".join(levers))
         r = subprocess.run(["amux", "send", a.route, "--stdin"], input=msg, capture_output=True, text=True)
         sent = r.returncode == 0
         with open(OUT, "a") as f:

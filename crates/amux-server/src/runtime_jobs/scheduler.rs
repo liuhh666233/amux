@@ -1837,15 +1837,26 @@ impl LiveDeliverer {
         // arrival order, to ~/.amux/shell-runs/<schedule>/<start_ms>.log,
         // which the worker's Shell tab tails. Same timeout and kill_on_drop.
         let sched_id = sched.id().to_string();
+        // The run speaks AS the schedule's owner. Without this a shell run had
+        // no AMUX_SESSION, and the CLI's tmux fallback named whichever session
+        // was most recently active: SCHED-550 (amux-helper's) sent 55 messages
+        // stamped amux, canvas-app-use-cases, amux-app and gainz (2026-10-04).
+        let owner = sched.str_field("session").trim().to_string();
         let run_once = |cmd: String| {
             let sid = sched_id.clone();
+            let owner = owner.clone();
             async move {
                 let path = shell_run_log_path(&sid);
                 let fut = async {
                     use tokio::io::AsyncReadExt;
-                    let mut child = tokio::process::Command::new("/bin/bash")
-                        .arg("-c")
-                        .arg(cmd)
+                    let mut command = tokio::process::Command::new("/bin/bash");
+                    command.arg("-c").arg(cmd).env_remove("TMUX").env_remove("TMUX_PANE");
+                    if owner.is_empty() {
+                        command.env_remove("AMUX_SESSION");
+                    } else {
+                        command.env("AMUX_SESSION", &owner);
+                    }
+                    let mut child = command
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::piped())
                         .kill_on_drop(true)

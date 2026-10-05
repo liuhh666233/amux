@@ -3330,6 +3330,23 @@ fn reconcile_runtime_board(
             violation: false,
         };
     }
+    // Several claimed cards still Doing: the newest claim is the latest thing
+    // this runtime did, so it names the live card. Before 2026-10-04 this was
+    // a violation ("unattributed") for as long as any older claim stayed open,
+    // which for an orchestrator holding standing ops cards was permanent: both
+    // mixpeek-override and amux-helper read unattributed all day while working.
+    // The older claims are still visible on the board; the verdict says so.
+    if !claimed.is_empty() && claimed_card_valid && conflicting_live_claims {
+        return RuntimeBoardTruth {
+            status: "active".into(),
+            card_id: claimed.to_string(),
+            card_live: true,
+            verdict: "linked-newest-of-several",
+            measured: true,
+            n_considered: doing_count,
+            violation: false,
+        };
+    }
     if claimed.is_empty() && cardless_allowed && !conflicting_live_claims {
         return RuntimeBoardTruth {
             status: "active".into(),
@@ -3369,30 +3386,45 @@ fn announce_runtime_board_truth(
     observed_card: &str,
     truth: &RuntimeBoardTruth,
 ) {
-    static ACTIVE_VIOLATIONS: std::sync::OnceLock<std::sync::Mutex<BTreeSet<String>>> =
-        std::sync::OnceLock::new();
-    let active = ACTIVE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(BTreeSet::new()));
+    // session -> (violation began, last warned). The WARN repeats hourly while
+    // a violation lasts. Logged once, a violation that never healed left one
+    // old line and then silence: mixpeek-override and amux-helper read
+    // `unattributed` all day on 2026-10-04 and the harness check that exists
+    // to catch a wrong status reported "harness healthy".
+    static ACTIVE_VIOLATIONS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (f64, f64)>>,
+    > = std::sync::OnceLock::new();
+    const REPEAT_S: f64 = 3600.0;
+    let active = ACTIVE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Default::default()));
     let Ok(mut active) = active.lock() else {
         return;
     };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
     if truth.violation {
-        if active.insert(session.to_string()) {
+        let entry = active.entry(session.to_string()).or_insert((now, 0.0));
+        if now - entry.1 >= REPEAT_S {
+            entry.1 = now;
             tracing::warn!(
                 target: "amux::sessions",
                 %session,
                 runtime_status,
                 observed_card,
                 verdict = truth.verdict,
+                violation_age_s = (now - entry.0) as i64,
                 measured = truth.measured,
                 n_considered = truth.n_considered,
                 "runtime/board truth violation: WORKING withheld until one exact live card is attributable"
             );
         }
-    } else if active.remove(session) {
+    } else if let Some((began, _)) = active.remove(session) {
         tracing::info!(
             target: "amux::sessions",
             %session,
             verdict = truth.verdict,
+            violation_age_s = (now - began) as i64,
             measured = truth.measured,
             n_considered = truth.n_considered,
             "runtime/board truth healed"
@@ -5298,7 +5330,14 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
             // Decomposition keeps the parent epic Doing while its children run.
             // Like board-drive's WIP/resume selection, runtime attribution must
             // treat that container as context, not a competing execution claim.
-            if issue.as_ref().is_some_and(|row| row.item_type == "epic") {
+            // Standing watches and tripwires are the same: a lane parks one in
+            // Doing for days (amux-helper's harness check, 2026-10-04), and as a
+            // claim it made every later card "conflicting" for as long as it
+            // lived. Same dormant set as board::frontier_exclusion.
+            if issue
+                .as_ref()
+                .is_some_and(|row| matches!(row.item_type.as_str(), "epic" | "watch" | "tripwire"))
+            {
                 *epic_doing_counts.entry(sess).or_default() += 1;
                 continue;
             }
@@ -5520,9 +5559,9 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
             .filter(|(owner, _, _)| owner == &name);
             // At a boundary, preserve the existing WIP label fallback. During
             // active runtime only the causal marker may name the live card.
-            let board = (!selection.conflicting_live_claims || runtime_status != "active")
-                .then_some(exact_board)
-                .flatten()
+            // The causal marker is the NEWEST live claim, so it names the card
+            // even when older claims are still Doing (see reconcile_runtime_board).
+            let board = exact_board
                 .or_else(|| {
                     if runtime_status == "active" {
                         None
@@ -6999,14 +7038,20 @@ pub(crate) mod tests {
         );
         assert!(!linked.violation);
 
-        let conflicting =
+        // Several surviving claims: the newest (the one passed in) is live.
+        let several =
             reconcile_runtime_board(true, "active", Some("ATE-92"), true, true, false, 2);
+        assert_eq!(several.status, "active");
+        assert_eq!(several.verdict, "linked-newest-of-several");
+        assert_eq!(several.card_id, "ATE-92");
+        assert!(several.card_live);
+        assert!(!several.violation);
+
+        // With no valid claimed card the conflict is still a violation.
+        let conflicting =
+            reconcile_runtime_board(true, "active", None, false, true, false, 2);
         assert_eq!(conflicting.status, "unattributed");
         assert_eq!(conflicting.verdict, "active-conflicting-claims");
-        assert!(
-            conflicting.card_id.is_empty(),
-            "two surviving exact claims must stay explicit ambiguity"
-        );
         assert!(conflicting.violation);
 
         let informational = reconcile_runtime_board(true, "active", None, false, false, true, 0);

@@ -7108,6 +7108,23 @@ fn associate_capture_card(
             created: false,
         }));
     }
+    // A PEER message never mints a card on the recipient's board, even on a
+    // delegating board. It may still land on a card it names or one intake
+    // matched (above); otherwise it stays in Messages. Measured 2026-10-04:
+    // 81 of the 82 cards captured on mixpeek-override in 24h were its own
+    // lanes' status reports and amux-helper's notes, and its backlog stood at
+    // 475 while it spent turns reconciling them. A peer that wants work done
+    // files it with `amux board request`, which carries the callback.
+    if from_peer {
+        tracing::info!(
+            session = %session_name,
+            measured = true,
+            n_considered = 1,
+            verdict = "peer_capture_not_minted",
+            "ledger: peer message matched no live card; retained in Messages without creating board work"
+        );
+        return Ok(None);
+    }
     if let Some(mut row) = mint_capture_card(conn, session_name, body, now_ms, from_peer)? {
         row.log = Some(crate::db::board_store::append_log(
             row.log.as_deref(),
@@ -20307,10 +20324,18 @@ pub(crate) async fn steer_delivery_for(state: &AppState, name: &str, age_s: f64)
 }
 
 /// How long the background-work hard hold may keep a message from a Claude
-/// lane. `AMUX_STEER_BACKGROUND_MAX_AGE_S`, default 30 minutes; 0 means never
-/// release (the pre-2026-10-01 behaviour).
+/// lane. `AMUX_STEER_BACKGROUND_MAX_AGE_S`, default 10 minutes (the same as
+/// `steer_max_age_s`); 0 means never release (the pre-2026-10-01 behaviour).
+///
+/// Was 30 minutes until 2026-10-04. An orchestrator runs background subagents
+/// almost continuously, so it rarely reaches a boundary and nearly everything
+/// queued for it waited out the ceiling: mixpeek-override logged 81 stalls in
+/// 24h, 68 of them this hold, averaging 15 minutes and peaking at 26, with
+/// task callbacks and its own orchestration tick among them. The release is a
+/// paste Claude Code queues to the end of the turn, so a shorter ceiling costs
+/// no interruption.
 pub(crate) fn steer_background_max_age_s() -> f64 {
-    env_secs_i64("AMUX_STEER_BACKGROUND_MAX_AGE_S", 1800) as f64
+    env_secs_i64("AMUX_STEER_BACKGROUND_MAX_AGE_S", 600) as f64
 }
 
 /// The ceiling on the background-work hard hold (AH-279, 2026-10-01).
@@ -43845,6 +43870,39 @@ mod steer_boundary_tests {
             })
             .await
             .unwrap();
+    }
+
+    /// 2026-10-04: a peer message never mints a card on a delegating board.
+    /// Both halves asserted: the same text from a non-peer still cards, so a
+    /// gate that refused every capture would fail the second half.
+    #[tokio::test]
+    async fn a_peer_message_to_a_delegating_board_does_not_mint_a_card() {
+        let (state, dir) = tstate();
+        let _g = crate::api::settings::test_env::set_home(dir.path());
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("orch.env"), "CC_AUTO_START=0\nAMUX_BOARD_DELEGATION=1\n").unwrap();
+        assert!(crate::db::board_store::board_delegation_allowed(Some("orch")));
+        let text = "Lane report: rebuilt the shard index for tenant 42, residual count is zero";
+        let intake = super::super::board_intake::plan(&state.store, "orch", "agent",
+            &amux_core::board::title_from_prompt(text).unwrap_or_default(), text).await;
+        let intake2 = intake.clone();
+        let now_ms = 1_700_000_000_000i64;
+        let (peer, owner) = state
+            .store
+            .write_async(move |conn| {
+                let peer = super::associate_capture_card(conn, "orch", text, now_ms, &intake, true)?;
+                let owner = super::associate_capture_card(conn, "orch", text, now_ms, &intake2, false)?;
+                let out = (peer.map(|a| a.created), owner.map(|a| a.created));
+                *SLOT.lock().unwrap() = Some(out);
+                Ok(crate::db::WriteOutcome { applied: true, events: vec![] })
+            })
+            .await
+            .map(|_| SLOT.lock().unwrap().take().unwrap())
+            .unwrap();
+        static SLOT: std::sync::Mutex<Option<(Option<bool>, Option<bool>)>> = std::sync::Mutex::new(None);
+        assert_eq!(peer, None, "a peer message must not mint a card");
+        assert_eq!(owner, Some(true), "a non-peer capture still mints");
     }
 
     /// AF-568. The 45s window guards a TRANSPORT RETRY, and the steering path it
