@@ -273,7 +273,8 @@ check "a failed prune is reported and does not trim" "yes" "$(grep -q 'build-cac
 check "and is counted failed" "yes" "$(grep -q 'failed 2' "$FIX/out.txt" && echo yes || echo no)"
 VM_LIST_CMD="true"; prune_vm_build_caches 0 > "$FIX/out.txt"
 check "no running VM says so" "yes" "$(grep -q 'no running colima VM' "$FIX/out.txt" && echo yes || echo no)"
-check "the default prune is build cache only" "yes" "$(printf '%s' "$DEFAULT_VM_PRUNE" | grep -q 'builder prune -f' && ! printf '%s' "$DEFAULT_VM_PRUNE" | grep -q -E 'system|image|volume' && echo yes || echo no)"
+check "the default prune is build cache only" "yes" "$(printf '%s' "$DEFAULT_VM_PRUNE" | grep -q 'builder prune -af' && ! printf '%s' "$DEFAULT_VM_PRUNE" | grep -q -E 'system|image|volume' && echo yes || echo no)"
+check "and it releases finished builds' cache older than 6 h, not only dangling cache" "yes" "$(printf '%s' "$DEFAULT_VM_PRUNE" | grep -q -- '-af --filter until=6h' && echo yes || echo no)"
 
 echo "12d. idle VMs are stopped under pressure, busy or unmeasured ones never (DESKT-70)"
 printf '%s\n' '{"name":"idle","status":"Running"}' '{"name":"busy","status":"Running"}' '{"name":"quiet-but-working","status":"Running"}' '{"name":"blind","status":"Running"}' '{"name":"off","status":"Stopped"}' > "$FIX/vms2.json"

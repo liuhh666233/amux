@@ -164,7 +164,13 @@ TARGET_TIGHT_IDLE_H=${AMUX_CLEANUP_TARGET_TIGHT_IDLE_H:-6}
 # Runs only under the same disk threshold as the tight build-output floor.
 # Seams: the test points these at recorders. PROFILE is the colima profile.
 VM_LIST_CMD=${AMUX_CLEANUP_VM_LIST_CMD:-colima list --json}
-VM_PRUNE_CMD=${AMUX_CLEANUP_VM_PRUNE_CMD:-docker --context colima-PROFILE builder prune -f}
+# -a with an age filter (2026-10-04): `builder prune -f` removes only dangling
+# cache, so the leases BuildKit keeps for finished builds pinned their
+# snapshots: goal-shared held 366 leases and 369 snapshots for 10 images, 93 GB
+# in containerd's overlay store, and the host disk burned 26 G/h. `-af --filter
+# until=6h` released 78.8 GB there (leases 366 -> 130) and keeps the last 6 h
+# of cache warm for builds in flight.
+VM_PRUNE_CMD=${AMUX_CLEANUP_VM_PRUNE_CMD:-docker --context colima-PROFILE builder prune -af --filter until=6h}
 VM_TRIM_CMD=${AMUX_CLEANUP_VM_TRIM_CMD:-colima ssh -p PROFILE -- sudo fstrim -a}
 # Unused IMAGES in running colima VMs, past an age, every tick (MF-4043):
 # goal-shared reached 39 images / 148 GB (137 GB unused) on 2026-10-03 and the
