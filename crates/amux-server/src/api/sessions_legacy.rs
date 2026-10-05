@@ -3380,6 +3380,43 @@ fn reconcile_runtime_board(
     }
 }
 
+/// How recent a lane's own verification write must be to explain its activity.
+const VERIFYING_WINDOW_S: f64 = 7200.0;
+
+/// A lane verifying its OWN finished card is working on that card (amux-helper,
+/// 2026-10-04). Under self-verification (Ethan 21:01 ET, item 2) a lane moves
+/// its card out of Doing and spends the next hour on evidence and the
+/// done -> verified move, and every claim emit fires only on Doing, so six gs12
+/// lanes read `unattributed` (active-card-invalid) while doing exactly what they
+/// were told. The board_change_log write is the causal fact: the lane's own
+/// latest write that left its own card at done or verified, newer than its last
+/// claim and inside VERIFYING_WINDOW_S. A lane that parked its card to backlog
+/// and wrote nothing since stays a violation.
+fn apply_verifying(
+    truth: RuntimeBoardTruth,
+    verifying: Option<&(String, f64)>,
+    last_claim_ts: Option<f64>,
+    now: f64,
+) -> RuntimeBoardTruth {
+    if !truth.violation || !matches!(truth.verdict, "active-card-invalid" | "active-without-card") {
+        return truth;
+    }
+    let Some((card, ts)) = verifying else {
+        return truth;
+    };
+    if now - ts > VERIFYING_WINDOW_S || last_claim_ts.is_some_and(|claim| claim > *ts) {
+        return truth;
+    }
+    RuntimeBoardTruth {
+        status: "active".into(),
+        card_id: card.clone(),
+        card_live: true,
+        verdict: "linked-verifying",
+        violation: false,
+        ..truth
+    }
+}
+
 fn announce_runtime_board_truth(
     session: &str,
     runtime_status: &str,
@@ -5450,6 +5487,24 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
                 .unwrap_or_default();
             last_board_change_from_rows(&rows)
         };
+        // session -> (card, ts) of its latest write leaving its OWN card at
+        // done or verified (see apply_verifying). SQLite returns the bare
+        // row_id from the MAX row.
+        let verifying_writes: BTreeMap<String, (String, f64)> = conn
+            .prepare(
+                "SELECT l.changed_by, l.row_id, MAX(l.changed_at) FROM board_change_log l \
+                 JOIN issues i ON i.id = l.row_id AND i.session = l.changed_by \
+                 WHERE l.table_name = 'issues' AND l.new_status IN ('done','verified') \
+                   AND l.changed_at >= ?1 AND l.changed_by IS NOT NULL AND l.changed_by != '' \
+                 GROUP BY l.changed_by",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([signals.now - VERIFYING_WINDOW_S], |r| {
+                    Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get::<_, f64>(2)?)))
+                })
+                .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
         {
             for (session, text, card_id, ts_ms) in user_msgs {
                 let card_id = card_id.filter(|id| !id.trim().is_empty());
@@ -5606,6 +5661,12 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
                 selection.conflicting_live_claims,
                 marker.is_some_and(|(_, _, cardless, _)| *cardless),
                 doing_count,
+            );
+            let truth = apply_verifying(
+                truth,
+                verifying_writes.get(&name),
+                marker.filter(|(_, card, _, _)| card.is_some()).map(|(ts, _, _, _)| *ts),
+                signals.now,
             );
             announce_runtime_board_truth(&name, &runtime_status, observed_card, &truth);
             announce_sticky_runtime_claim(
@@ -7019,6 +7080,33 @@ pub(crate) mod tests {
                 "Primis's substantive CARDLESS TURN shape must be rejected: {invalid}"
             );
         }
+    }
+
+    /// A lane verifying its own done card is attributed to it; a stale write,
+    /// a newer claim, or a non-violation verdict leaves the truth alone.
+    #[test]
+    fn verifying_its_own_done_card_attributes_the_lane() {
+        let now = 1_000_000.0;
+        let invalid = || reconcile_runtime_board(true, "active", Some("GO-62"), false, false, false, 0);
+        assert_eq!(invalid().verdict, "active-card-invalid");
+        let write = ("GO-58".to_string(), now - 600.0);
+
+        let linked = apply_verifying(invalid(), Some(&write), Some(now - 3600.0), now);
+        assert_eq!(linked.verdict, "linked-verifying");
+        assert_eq!(linked.card_id, "GO-58");
+        assert_eq!(linked.status, "active");
+        assert!(!linked.violation);
+
+        // No verification write: a lane that parked its card stays a violation.
+        assert!(apply_verifying(invalid(), None, Some(now - 3600.0), now).violation);
+        // A write older than the window explains nothing now.
+        let stale = ("GO-58".to_string(), now - VERIFYING_WINDOW_S - 1.0);
+        assert!(apply_verifying(invalid(), Some(&stale), None, now).violation);
+        // A claim newer than the write is the truth.
+        assert!(apply_verifying(invalid(), Some(&write), Some(now - 60.0), now).violation);
+        // A healthy linked lane is never rewritten.
+        let ok = reconcile_runtime_board(true, "active", Some("X-1"), true, false, false, 1);
+        assert_eq!(apply_verifying(ok, Some(&write), None, now).verdict, "linked");
     }
 
     /// ATE-92: one decision owns the runtime/board join. These cells are the
