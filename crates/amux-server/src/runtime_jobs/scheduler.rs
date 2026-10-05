@@ -1849,7 +1849,9 @@ impl LiveDeliverer {
                 let path = shell_run_log_path(&sid);
                 let fut = async {
                     use tokio::io::AsyncReadExt;
-                    let mut command = tokio::process::Command::new("/bin/bash");
+                    // Non-FHS hosts (NixOS) have no /bin/bash; bash then comes from PATH.
+                    let bash = if std::path::Path::new("/bin/bash").is_file() { "/bin/bash" } else { "bash" };
+                    let mut command = tokio::process::Command::new(bash);
                     command.arg("-c").arg(cmd).env_remove("TMUX").env_remove("TMUX_PANE");
                     if owner.is_empty() {
                         command.env_remove("AMUX_SESSION");

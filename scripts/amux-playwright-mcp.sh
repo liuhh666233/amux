@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Launch one playwright-mcp lane instance, for use as the ExecStart of a
 # systemd template unit (amux-playwright-mcp@.service.template). The
 # instance name (systemd's %i) is "<lane>-<port>", e.g. "frontstage-8931" —

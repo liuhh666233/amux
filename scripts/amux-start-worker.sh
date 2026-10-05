@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Start every registered amux worker lane after the server is ready.
 #
 # AMUX-49 (2026-08-31): this used to hardcode the `amux` lane only, so a

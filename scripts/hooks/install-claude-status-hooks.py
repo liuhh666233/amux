@@ -182,9 +182,11 @@ def merge(
 
     for event, report_group in canonical(hook_path).items():
         raw_hooks.setdefault(event, []).append(report_group)
-    raw_hooks.setdefault("PreToolUse", []).extend(canonical_read_guard(read_guard_path))
+    # Empty path = no read router; any previously managed one was removed above.
+    if read_guard_path:
+        raw_hooks.setdefault("PreToolUse", []).extend(canonical_read_guard(read_guard_path))
     if ask_guard_path is not None:
-        raw_hooks["PreToolUse"].extend(canonical_ask_guard(ask_guard_path))
+        raw_hooks.setdefault("PreToolUse", []).extend(canonical_ask_guard(ask_guard_path))
     return data
 
 
@@ -219,6 +221,7 @@ def main() -> int:
     parser.add_argument(
         "--read-guard-path",
         default="$HOME/.amux/hooks/large-read-guard.py",
+        help="empty string = do not wire the read router (and remove an amux-managed one)",
     )
     parser.add_argument(
         "--ask-guard-path",
@@ -262,7 +265,8 @@ def main() -> int:
     except ValueError as exc:
         raise SystemExit(f"refusing to rewrite {args.settings}: {exc}")
     write_atomic(args.settings, merged)
-    print(f"wired amux status and read-routing hooks in {args.settings}")
+    wired = "status and read-routing" if args.read_guard_path else "status (no read-routing)"
+    print(f"wired amux {wired} hooks in {args.settings}")
     return 0
 
 

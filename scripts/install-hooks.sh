@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Install the repo's git hooks. Run once after cloning:  ./scripts/install-hooks.sh
 #
 #   pre-push           — the shared-queue guard: refuses to ship other lanes'

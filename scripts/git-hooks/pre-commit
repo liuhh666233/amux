@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ensure cargo/rustup's PATH is present even when the invoking shell (a git
 # GUI, a fresh non-interactive commit, or apparently even an ordinary
 # interactive `git commit` in some environments) didn't export it — same

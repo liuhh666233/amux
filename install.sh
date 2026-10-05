@@ -63,6 +63,8 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$SHARED_TARGET_DIR}"
 # Resolve a relative target against the checkout before the build changes cwd.
 case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$SCRIPT_DIR/$TARGET_DIR" ;; esac
 OS="$(uname -s)"
+# Non-FHS hosts (NixOS) have no /usr/bin/python3; there it comes from PATH.
+PY3=/usr/bin/python3; [[ -x "$PY3" ]] || PY3=python3
 
 echo "${BOLD}amux installer${RESET} (Rust server, port $PORT)"
 echo ""
@@ -404,11 +406,19 @@ if [[ -f "$SCRIPT_DIR/scripts/hooks/hook-report.sh" ]]; then
   # real Claude settings. AMUX_CLAUDE_SETTINGS is the explicit test/custom escape.
   if [[ "$AMUX_HOME" == "$HOME/.amux" || -n "${AMUX_CLAUDE_SETTINGS:-}" ]]; then
     _claude_settings="${AMUX_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
-    if /usr/bin/python3 "$SCRIPT_DIR/scripts/hooks/install-claude-status-hooks.py" \
+    _routing_args=(--read-guard-path '$HOME/.amux/hooks/large-read-guard.py'
+      --ask-guard-path '$HOME/.amux/hooks/ask-guard.py')
+    _routing_note="status + read-routing"
+    # AMUX_STATUS_HOOKS_ONLY=1: these settings are global, so the read router
+    # would reroute every Claude session on the host, not just amux lanes.
+    if [[ "${AMUX_STATUS_HOOKS_ONLY:-}" == "1" ]]; then
+      _routing_args=(--read-guard-path '')
+      _routing_note="status (read routing skipped: AMUX_STATUS_HOOKS_ONLY=1)"
+    fi
+    if "$PY3" "$SCRIPT_DIR/scripts/hooks/install-claude-status-hooks.py" \
       --settings "$_claude_settings" --hook-path '$HOME/.amux/hook-report.sh' \
-      --read-guard-path '$HOME/.amux/hooks/large-read-guard.py' \
-      --ask-guard-path '$HOME/.amux/hooks/ask-guard.py'; then
-      say "Claude status + read-routing hooks: $_claude_settings"
+      "${_routing_args[@]}"; then
+      say "Claude $_routing_note hooks: $_claude_settings"
     else
       warn "could not wire Claude status hooks; the report-hook invariant will remain unhealthy"
     fi
@@ -424,7 +434,7 @@ if [[ "$AMUX_HOME" == "$HOME/.amux" ]]; then
   for _provider in claude codex; do
     _settings="$HOME/.$_provider/settings.json"
     [[ "$_provider" == codex ]] && _settings="${CODEX_HOME:-$HOME/.codex}/hooks.json"
-    /usr/bin/python3 "$SCRIPT_DIR/scripts/hooks/install-native-status-hooks.py" \
+    "$PY3" "$SCRIPT_DIR/scripts/hooks/install-native-status-hooks.py" \
       --provider "$_provider" --settings "$_settings" --script "$AMUX_HOME/native-status.py" \
       || warn "could not install $_provider passive status observer"
   done

@@ -1244,9 +1244,11 @@ async fn maybe_vacuum_bounded(store: &crate::db::SharedStore, home: &Path, max_b
 
 /// Free bytes on the volume holding `path`.
 pub fn disk_free_bytes(path: &Path) -> Option<u64> {
+    // Non-FHS hosts (NixOS) have neither absolute path; df then comes from PATH.
     let df = ["/bin/df", "/usr/bin/df"]
-        .iter()
-        .find(|c| Path::new(c).is_file())?;
+        .into_iter()
+        .find(|c| Path::new(c).is_file())
+        .unwrap_or("df");
     let out = std::process::Command::new(df)
         .arg("-Pk")
         .arg(path)

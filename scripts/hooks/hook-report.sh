@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # amux report hook (AMUX-2829). Reads Claude Code's hook payload on STDIN,
 # extracts the transcript path, and reports REAL context usage with the state.
 #
@@ -45,8 +45,10 @@ case "$OSTYPE:$HOSTTYPE" in
     fi
     ;;
 esac
+# Non-FHS hosts (NixOS) have no /usr/bin/python3; there it comes from PATH.
+PY3=/usr/bin/python3; [ -x "$PY3" ] || PY3=python3
 if [ "${1:-}" = "--drain-subagents" ]; then
-  /usr/bin/python3 - "${2:-}" "${3:-}" "${4:-}" "${5:-lifecycle_queue}" <<'PY'
+  "$PY3" - "${2:-}" "${3:-}" "${4:-}" "${5:-lifecycle_queue}" <<'PY'
 import fcntl,json,os,ssl,sys,tempfile,time,urllib.error,urllib.request
 queue,url,session,queue_kind=sys.argv[1:5]
 if not queue or not url or not session: raise SystemExit(0)
@@ -332,7 +334,7 @@ case "${MODE/subagent-/subagent:}" in
     esac
     ;;
 esac
-BODY=$(printf '%s' "$IN" | /usr/bin/python3 -c '
+BODY=$(printf '%s' "$IN" | "$PY3" -c '
 import json,sys,os,time,uuid
 raw=sys.stdin.read()
 mode,src=sys.argv[1],sys.argv[2]
@@ -473,7 +475,7 @@ QF="$QD/$AMUX_SESSION.json"
 case "${MODE/subagent-/subagent:}" in
   subagent:*)
     mkdir -p "$QD" 2>/dev/null; chmod 700 "$QD" 2>/dev/null || true
-    QUEUE_NOTE=$(/usr/bin/python3 - "$QF" "$BODY" "$REPORT_URL" <<'PY'
+    QUEUE_NOTE=$("$PY3" - "$QF" "$BODY" "$REPORT_URL" <<'PY'
 import fcntl,json,os,sys,tempfile,time,uuid
 path,raw,url=sys.argv[1:4]
 try: body=json.loads(raw)
@@ -563,7 +565,7 @@ fi
 # cannot delete or overtake a newer replacement.
 SF="$QD/$AMUX_SESSION.state.json"
 mkdir -p "$QD" 2>/dev/null; chmod 700 "$QD" 2>/dev/null || true
-STATE_NOTE=$(/usr/bin/python3 - "$SF" "$BODY" <<'PY'
+STATE_NOTE=$("$PY3" - "$SF" "$BODY" <<'PY'
 import fcntl,json,os,sys,tempfile,time,uuid
 path,raw=sys.argv[1:3]
 try: body=json.loads(raw)

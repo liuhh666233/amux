@@ -5737,7 +5737,9 @@ fn du_one(p: &std::path::Path, deadline: std::time::Instant) -> DuOutcome {
         tracing::debug!(path = %p.display(), "disk: du deadline already expired — path skipped in the size ranking");
         return DuOutcome::TimedOut;
     }
-    let mut child = match std::process::Command::new("/usr/bin/du")
+    // Non-FHS hosts (NixOS) have no /usr/bin/du; du then comes from PATH.
+    let du = if std::path::Path::new("/usr/bin/du").is_file() { "/usr/bin/du" } else { "du" };
+    let mut child = match std::process::Command::new(du)
         .args(["-skx"])
         .arg(p)
         .stdout(std::process::Stdio::piped())
