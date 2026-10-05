@@ -219,6 +219,21 @@ VM_EVENTS_CMD=${AMUX_CLEANUP_VM_EVENTS_CMD:-docker --context colima-PROFILE even
 VM_PS_CMD=${AMUX_CLEANUP_VM_PS_CMD:-docker --context colima-PROFILE ps --format \{\{.Names\}\}}
 VM_IDLE_IGNORE=${AMUX_CLEANUP_VM_IDLE_IGNORE:-gs12-pypi-cache}
 VM_STOP_CMD=${AMUX_CLEANUP_VM_STOP_CMD:-colima stop -p PROFILE}
+# Docker Desktop runs its own VM that `colima list` never shows. On 2026-10-05
+# it held 16 GB resident plus 30 GB compressed under memory pressure 2, three
+# days after its last container (escalation 20261004-213936). Same rule as a
+# colima VM: quit it only when it has been up the whole window with no running
+# container and no docker event but healthcheck execs; unreadable is busy.
+# Its images and volumes stay; it starts again on demand.
+DD_UP_CMD=${AMUX_CLEANUP_DD_UP_CMD:-ps -o etime= -p PIDOF}
+# -f on the path: macOS truncates a process name to 16 characters, so
+# `pgrep -x com.docker.backend` never matches and would read "not running".
+DD_PID_CMD=${AMUX_CLEANUP_DD_PID_CMD:-pgrep -f /Docker.app/Contents/MacOS/com.docker.backend}
+DD_PS_CMD=${AMUX_CLEANUP_DD_PS_CMD:-docker --context desktop-linux ps --format \{\{.Names\}\}}
+DD_EVENTS_CMD=${AMUX_CLEANUP_DD_EVENTS_CMD:-docker --context desktop-linux events --since MINm --until 0s --format \{\{.Action\}\}}
+# Empty means the built-in quit below: the app name has a space, which an
+# unquoted seam would split.
+DD_STOP_CMD=${AMUX_CLEANUP_DD_STOP_CMD:-}
 TARGET_KEEP=${AMUX_CLEANUP_TARGET_KEEP:-$HOME/.amux/rust-build-target:$HOME/.ao/data/cargo-target-shared:${CARGO_TARGET_DIR:-}}
 TARGET_DEPTH=${AMUX_CLEANUP_TARGET_DEPTH:-8}
 TARGET_SCAN_S=${AMUX_CLEANUP_TARGET_SCAN_S:-90}
@@ -1295,6 +1310,34 @@ EOF
   echo "mac-cleanup: idle VMs: stopped ${VMS_STOPPED}, kept busy ${n_busy}, kept unmeasured ${n_unk} (only under $why)"
 }
 
+# Quit Docker Desktop when idle. Sets DD_STOPPED (0/1).
+stop_idle_docker_desktop() { # <dry:0|1> <why>
+  local dry=$1 why=$2 pid up cmd ev ps
+  DD_STOPPED=0
+  pid=$($DD_PID_CMD 2>/dev/null | head -1)
+  if [ -z "$pid" ]; then echo "mac-cleanup: docker desktop: not running"; return 0; fi
+  cmd=${DD_UP_CMD//PIDOF/$pid}
+  up=$(etime_secs "$($cmd 2>/dev/null | tr -d ' ')")
+  case "$up" in ''|*[!0-9]*) echo "mac-cleanup: docker desktop: kept, uptime unmeasured"; return 0 ;; esac
+  if [ "$up" -lt $(( VM_IDLE_MIN * 60 )) ]; then echo "mac-cleanup: docker desktop: kept, up ${up}s (under ${VM_IDLE_MIN}m)"; return 0; fi
+  ps=$(perl -e 'alarm 30; exec @ARGV' $DD_PS_CMD 2>/dev/null) || { echo "mac-cleanup: docker desktop: kept, containers unmeasured"; return 0; }
+  if printf '%s\n' "$ps" | grep -q .; then echo "mac-cleanup: docker desktop: kept, running $(printf '%s\n' "$ps" | head -1)"; return 0; fi
+  cmd=${DD_EVENTS_CMD//MIN/$VM_IDLE_MIN}
+  ev=$(perl -e 'alarm 30; exec @ARGV' $cmd 2>/dev/null) || { echo "mac-cleanup: docker desktop: kept, events unmeasured"; return 0; }
+  if printf '%s\n' "$ev" | grep -v -E '^(exec_create|exec_start|exec_die)' | grep -q .; then echo "mac-cleanup: docker desktop: kept, docker activity in the last ${VM_IDLE_MIN}m"; return 0; fi
+  if [ "$dry" = 1 ]; then echo "mac-cleanup: docker desktop: would quit idle Docker Desktop (dry run)"; return 0; fi
+  local ok=0
+  if [ -n "$DD_STOP_CMD" ]; then perl -e 'alarm 120; exec @ARGV' $DD_STOP_CMD >/dev/null 2>&1 && ok=1
+  else perl -e 'alarm 120; exec @ARGV' osascript -e 'quit app "Docker Desktop"' >/dev/null 2>&1 && ok=1; fi
+  if [ "$ok" = 1 ]; then
+    DD_STOPPED=1; mkdir -p "$STATE_DIR"
+    echo "$(date '+%F %T') quit Docker Desktop ($why; no container and no docker activity but healthchecks for ${VM_IDLE_MIN}m). Restore: open -a 'Docker Desktop'" >> "$STATE_DIR/vm-stops.log"
+    echo "mac-cleanup: docker desktop: quit idle Docker Desktop (restore: open -a 'Docker Desktop')"
+  else
+    echo "mac-cleanup: docker desktop: FAILED to quit"
+  fi
+}
+
 effective_target_idle_h() { # <disk_free_gb> <normal_h> <tight_free_gb> <tight_h>
   awk -v f="$1" -v n="$2" -v t="$3" -v h="$4" 'BEGIN{ if (f >= 0 && f < t && h < n) print h; else print n }'
 }
@@ -1471,7 +1514,7 @@ if [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then prune_vm_build_caches "$DRY"; fi
 [ "${AMUX_CLEANUP_LANE_TMP:-1}" = 1 ] && reap_lane_tmp "$DRY"
 VMS_STOPPED=0
 vm_level=$($PRESSURE_CMD 2>/dev/null); case "$vm_level" in ''|*[!0-9]*) vm_level=-1 ;; esac
-if [ "$vm_level" -ge 2 ]; then stop_idle_vms "$DRY" "memory pressure $vm_level"
+if [ "$vm_level" -ge 2 ]; then stop_idle_vms "$DRY" "memory pressure $vm_level"; stop_idle_docker_desktop "$DRY" "memory pressure $vm_level"
 elif [ "$tgt_idle" != "$TARGET_IDLE_H" ]; then stop_idle_vms "$DRY" "disk under ${TARGET_TIGHT_FREE_GB}G"; fi
 reap_idle_worktrees "$WORKTREE_ROOTS" "$WORKTREE_IDLE_H" "$DRY"
 ctmp_idle=$CLAUDE_TMP_IDLE_H
