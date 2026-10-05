@@ -3298,6 +3298,7 @@ CC_DIR=/tmp
             ("released", "ses-released"),
             ("conflict", "ses-conflict"),
             ("decomposed", "ses-decomposed"),
+            ("verifier", "ses-verifier"),
         ] {
             conn.execute(
                 "INSERT INTO _amux_workers (id, display_name, state, created_at, updated_at) \
@@ -3340,6 +3341,22 @@ CC_DIR=/tmp
             rusqlite::params![now],
         )
         .unwrap();
+        // `verifier` claimed VERIFY-0, parked it, and is now writing to its own
+        // done card VERIFY-1 (evidence/desc_append): only the request log sees it.
+        for (id, status) in [("VERIFY-0", "backlog"), ("VERIFY-1", "done")] {
+            conn.execute(
+                "INSERT INTO issues (id, title, status, session, creator, created, updated) \
+                 VALUES (?1, ?2, ?3, 'verifier', 'test', ?4, ?4)",
+                rusqlite::params![id, format!("title {id}"), status, now],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO _amux_request_log (ts, method, path, family, status, latency_ms, amux_session) \
+             VALUES (?1, 'PATCH', '/api/board/VERIFY-1', '/api/board', 200, 3.0, 'verifier')",
+            rusqlite::params![marker_ts + 5.0],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO issues (id, title, status, session, creator, created, updated) \
              VALUES ('TUBES-2496', 'renewed clearance', 'backlog', 'tubescience', 'test', ?1, ?1)",
@@ -3363,6 +3380,7 @@ CC_DIR=/tmp
             ("conflict", "CONFLICT-2"),
             ("decomposed", "DECOMP-1"),
             ("decomposed", "DECOMP-2"),
+            ("verifier", "VERIFY-0"),
         ] {
             conn.execute(
                 "INSERT INTO session_events (ts, session, type, data, source) \
@@ -3513,6 +3531,17 @@ CC_DIR=/tmp
             .iter()
             .find(|row| row["name"] == "released")
             .expect("released row");
+        let verifier = rows
+            .iter()
+            .find(|row| row["name"] == "verifier")
+            .expect("verifier row");
+        assert_eq!(
+            verifier["runtime_board"]["verdict"],
+            json!("linked-verifying"),
+            "a lane writing to its own done card is attributed to it: {verifier}"
+        );
+        assert_eq!(verifier["runtime_board"]["card_id"], json!("VERIFY-1"), "{verifier}");
+        assert_eq!(verifier["runtime_board"]["violation"], json!(false), "{verifier}");
         assert_eq!(
             released["runtime_board"]["status"],
             json!("cardless-allowed"),

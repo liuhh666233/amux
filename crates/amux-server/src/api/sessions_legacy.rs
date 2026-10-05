@@ -3388,9 +3388,9 @@ const VERIFYING_WINDOW_S: f64 = 7200.0;
 /// its card out of Doing and spends the next hour on evidence and the
 /// done -> verified move, and every claim emit fires only on Doing, so six gs12
 /// lanes read `unattributed` (active-card-invalid) while doing exactly what they
-/// were told. The board_change_log write is the causal fact: the lane's own
-/// latest write that left its own card at done or verified, newer than its last
-/// claim and inside VERIFYING_WINDOW_S. A lane that parked its card to backlog
+/// were told. The causal fact is the lane's own latest successful write (status,
+/// desc_append, evidence) to its own card that is now done or verified, newer
+/// than its last claim and inside VERIFYING_WINDOW_S. A lane that parked its card to backlog
 /// and wrote nothing since stays a violation.
 fn apply_verifying(
     truth: RuntimeBoardTruth,
@@ -5487,16 +5487,31 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
                 .unwrap_or_default();
             last_board_change_from_rows(&rows)
         };
-        // session -> (card, ts) of its latest write leaving its OWN card at
-        // done or verified (see apply_verifying). SQLite returns the bare
-        // row_id from the MAX row.
+        // session -> (card, ts) of the lane's latest successful write to its OWN
+        // card that is now done or verified (see apply_verifying). Read from the
+        // request log because it records the real WRITER: board_change_log's
+        // changed_by is the card's owner (NEW.session), and its trigger fires
+        // only on status/title changes, so a lane shepherding a done card by
+        // desc_append and evidence never showed up (gs12-planes on GP-197,
+        // 2026-10-05). The family filter keeps this on idx_reqlog_family_ts:
+        // 17 ms over two hours, against 2 s scanning by ts alone.
         let verifying_writes: BTreeMap<String, (String, f64)> = conn
             .prepare(
-                "SELECT l.changed_by, l.row_id, MAX(l.changed_at) FROM board_change_log l \
-                 JOIN issues i ON i.id = l.row_id AND i.session = l.changed_by \
-                 WHERE l.table_name = 'issues' AND l.new_status IN ('done','verified') \
-                   AND l.changed_at >= ?1 AND l.changed_by IS NOT NULL AND l.changed_by != '' \
-                 GROUP BY l.changed_by",
+                "WITH w AS ( \
+                   SELECT r.amux_session AS lane, \
+                          CASE WHEN instr(substr(r.path, 12), '/') > 0 \
+                               THEN substr(r.path, 12, instr(substr(r.path, 12), '/') - 1) \
+                               ELSE substr(r.path, 12) END AS card, \
+                          r.ts AS ts \
+                   FROM _amux_request_log r \
+                   WHERE r.family = '/api/board' AND r.ts >= ?1 \
+                     AND r.method IN ('PATCH','POST') AND r.status BETWEEN 200 AND 299 \
+                     AND r.path LIKE '/api/board/%' \
+                     AND r.amux_session IS NOT NULL AND r.amux_session != '') \
+                 SELECT w.lane, w.card, MAX(w.ts) FROM w \
+                 JOIN issues i ON i.id = w.card AND i.session = w.lane \
+                 WHERE i.status IN ('done','verified') \
+                 GROUP BY w.lane",
             )
             .and_then(|mut stmt| {
                 stmt.query_map([signals.now - VERIFYING_WINDOW_S], |r| {
@@ -5504,7 +5519,12 @@ fn build_array(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::
                 })
                 .map(|rows| rows.flatten().collect())
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!(target: "amux::sessions", %error, measured = false, n_considered = 0,
+                    verdict = "verifying_writes_unmeasured",
+                    "verification attribution query failed; lanes verifying their own cards read unattributed");
+                BTreeMap::new()
+            });
         {
             for (session, text, card_id, ts_ms) in user_msgs {
                 let card_id = card_id.filter(|id| !id.trim().is_empty());
