@@ -73,6 +73,14 @@ def evidence_for(lane_ids, by_id, now):
     return "\n\n".join(parts)
 
 
+def _why(e):
+    try:
+        d = json.loads(e.read() or b"{}")
+        return f"{d.get('code') or ''} {d.get('error') or ''}".strip() or str(e)
+    except Exception:
+        return str(e)
+
+
 def api(url, path, method="GET", body=None, session=None):
     ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
     headers = {"Content-Type": "application/json"}
@@ -98,34 +106,49 @@ def main():
     ready = plan(cards, a.orchestrator)[: a.max]
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     print(f"board-close-tracking: {len(ready)} tracking card(s) ready ({'apply' if a.apply and not a.board_file else 'dry run'})")
-    closed = []
+    closed, refused = [], []
     for tid, lanes in ready:
         print(f"  {tid} <- {', '.join(lanes)}")
         if not a.apply or a.board_file:
             continue
-        # The card's effective gate is what the board checks; a refused PATCH
-        # returns it and discards the whole body, so probe, then move with the
-        # gate and the evidence in one request.
+        # The board checks evidence before the gate, and a refused PATCH
+        # discards its whole body. So write the evidence on its own first (the
+        # board accepts that), then probe for the card's effective gate, then
+        # move. Probing first returned verified_requires_evidence with no gate
+        # on MO-4100 (2026-10-05 01:26Z).
+        ev = evidence_for(lanes, by_id, now)
+        try:
+            api(url, f"/api/board/{tid}", "PATCH", {"evidence": ev}, session=a.orchestrator)
+        except urllib.error.HTTPError as e:
+            refused.append(tid)
+            print(f"    REFUSED evidence write {e.code}: {_why(e)}")
+            continue
         try:
             api(url, f"/api/board/{tid}", "PATCH", {"status": "verified", "gate_checked": []}, session=a.orchestrator)
             gate = []
         except urllib.error.HTTPError as e:
             gate = (json.loads(e.read() or b"{}").get("gate") or [])
-        body = {"status": "verified", "gate_checked": gate, "evidence": evidence_for(lanes, by_id, now)}
+        body = {"status": "verified", "gate_checked": gate, "evidence": ev}
         try:
             api(url, f"/api/board/{tid}", "PATCH", body, session=a.orchestrator)
         except urllib.error.HTTPError as e:
-            print(f"    REFUSED {e.code}: {(e.read() or b'')[:200].decode(errors='ignore')}")
+            refused.append(tid)
+            print(f"    REFUSED {e.code}: {_why(e)}")
             continue
         if api(url, f"/api/board/{tid}").get("status") == "verified":
             closed.append(f"{tid} (from {', '.join(lanes)})")
             print("    verified")
         else:
+            refused.append(tid)
             print("    NOT verified after an accepted PATCH; left for the orchestrator")
     if closed:
         api(url, f"/api/board/{a.log_card}", "PATCH",
             {"desc_append": f"\n{now} board-close-tracking auto-verified {len(closed)}: " + "; ".join(closed)},
             session=a.orchestrator)
+    if refused:
+        # Non-zero so the schedule run reads failed and the owner sees it.
+        print(f"board-close-tracking: WARN {len(refused)} close(s) refused: {', '.join(refused)}")
+        return 1
     return 0
 
 
